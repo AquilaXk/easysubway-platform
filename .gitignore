@@ -1,0 +1,107 @@
+.DS_Store
+
+# Documentation policy
+*.md
+!/README.md
+!/.github/pull_request_template.md
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+google-services.json
+GoogleService-Info.plist
+
+# Editors
+.idea/
+.vscode/
+.fleet/
+*.iws
+*.iml
+*.ipr
+
+# Agent-only local docs and state
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+CURSOR.md
+COPILOT.md
+docs/
+.codex/
+.claude/
+.cursor/
+.aider/
+.aider*
+.windsurf/
+.ai/
+.playwright-mcp/
+
+# JavaScript / TypeScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+build/
+dist/
+coverage/
+logs/
+*.log
+tmp/
+temp/
+.cache/
+
+# Backend / Gradle
+.gradle/
+backend/.gradle/
+backend/**/build/
+gradle-app.setting
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+apps/mobile/.dart_tool/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/.packages
+apps/mobile/build/
+apps/mobile/pubspec.lock
+
+# Android
+apps/mobile/android/.gradle/
+apps/mobile/android/build/
+apps/mobile/android/app/build/
+*.apk
+*.aab
+
+# iOS / Xcode
+apps/mobile/ios/Pods/
+apps/mobile/ios/.bundle/
+apps/mobile/ios/vendor/bundle/
+apps/mobile/ios/build/
+apps/mobile/ios/DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+**/*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+*.xcuserstate
+
+# Infrastructure local state
+**/.terraform/
+**/.terraform.lock.hcl
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/terraform.tfvars
+**/terraform.tfvars.json
+**/*.auto.tfvars
+**/*.auto.tfvars.json
+!**/terraform.tfvars.example
