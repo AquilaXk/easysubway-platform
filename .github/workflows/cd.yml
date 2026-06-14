@@ -1,0 +1,85 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    name: CD Readiness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: CD Readiness / Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: CD Readiness / Restore GitHub Actions dotenv secret
+        id: dotenv
+        shell: bash
+        env:
+          EASYSUBWAY_ENV_SECRET: ${{ secrets.EASYSUBWAY_ENV }}
+        run: |
+          set -euo pipefail
+
+          env_file="${RUNNER_TEMP}/easysubway.env"
+          if [[ -n "${EASYSUBWAY_ENV_SECRET}" ]]; then
+            printf '%s' "${EASYSUBWAY_ENV_SECRET}" > "${env_file}"
+            echo "source=secret" >> "${GITHUB_OUTPUT}"
+          else
+            cp .env.example "${env_file}"
+            echo "source=example" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=CD env secret::EASYSUBWAY_ENV secret is not configured; validating template only."
+          fi
+
+          chmod 600 "${env_file}"
+          echo "EASYSUBWAY_ENV_FILE=${env_file}" >> "${GITHUB_ENV}"
+
+      - name: CD Readiness / Validate deployment dotenv contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing_names=()
+          while IFS= read -r name; do
+            if [[ -n "${name}" ]] && ! grep -Eq "^${name}=" "${EASYSUBWAY_ENV_FILE}"; then
+              missing_names+=("${name}")
+            fi
+          done < <(sed -nE 's/^([A-Z0-9_]+)=.*/\1/p' .env.example)
+
+          if (( ${#missing_names[@]} > 0 )); then
+            printf 'Missing required deployment env names:\n' >&2
+            printf ' - %s\n' "${missing_names[@]}" >&2
+            exit 1
+          fi
+
+      - name: CD Readiness / Validate Docker Compose deployment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file "${EASYSUBWAY_ENV_FILE}" -f infra/docker-compose.yml config --quiet
+
+      - name: CD Readiness / Summarize deployment readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### CD Readiness"
+            echo "- dotenv source: ${{ steps.dotenv.outputs.source }}"
+            echo "- compose config: valid"
+            if [[ "${{ steps.dotenv.outputs.source }}" == "example" ]]; then
+              echo "- deployment secret: EASYSUBWAY_ENV secret is not configured"
+            else
+              echo "- deployment secret: EASYSUBWAY_ENV"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
