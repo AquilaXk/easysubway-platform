@@ -2,8 +2,6 @@ services:
   postgres:
     image: postgis/postgis:16-3.5
     container_name: easysubway-postgres
-    profiles:
-      - backend
     environment:
       POSTGRES_DB: ${EASYSUBWAY_POSTGRES_DB:-easysubway}
       POSTGRES_USER: ${EASYSUBWAY_POSTGRES_USER:-easysubway}
@@ -22,8 +20,6 @@ services:
   object-storage:
     image: minio/minio:RELEASE.2026-06-13T11-33-47Z
     container_name: easysubway-object-storage
-    profiles:
-      - backend
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY:-easysubway_local}
