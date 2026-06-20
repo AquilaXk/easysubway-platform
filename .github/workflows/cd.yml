@@ -49,19 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          missing_names=()
-          while IFS= read -r name; do
-            if [[ -n "${name}" ]] && ! grep -Eq "^${name}=" "${EASYSUBWAY_ENV_FILE}"; then
-              missing_names+=("${name}")
-            fi
-          done < <(sed -nE 's/^([A-Z0-9_]+)=.*/\1/p' .env.example)
-
-          if (( ${#missing_names[@]} > 0 )); then
-            printf 'Missing required deployment env names:\n' >&2
-            printf ' - %s\n' "${missing_names[@]}" >&2
-            exit 1
-          fi
+          tools/ci/validate-deployment-env.sh "${EASYSUBWAY_ENV_FILE}"
 
       - name: CD Readiness / Validate Docker Compose deployment config
         shell: bash
