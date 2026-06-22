@@ -139,7 +139,6 @@ variable "ssh_ingress_cidr" {
 variable "http_ingress_cidr" {
   description = "CIDR allowed to connect to the staging HTTP port 80."
   type        = string
-  default     = "0.0.0.0/0"
   nullable    = false
 
   validation {
@@ -151,7 +150,6 @@ variable "http_ingress_cidr" {
 variable "https_ingress_cidr" {
   description = "CIDR allowed to connect to the staging HTTPS port 443."
   type        = string
-  default     = "0.0.0.0/0"
   nullable    = false
 
   validation {
@@ -373,7 +371,7 @@ variable "datapack_public_base_url_override" {
   nullable    = true
 
   validation {
-    condition     = var.datapack_public_base_url_override == null || can(regex("^https://", var.datapack_public_base_url_override))
+    condition     = var.datapack_public_base_url_override == null || can(regex("^https://[^\\s]+$", trimspace(var.datapack_public_base_url_override)))
     error_message = "datapack_public_base_url_override must be null or an HTTPS URL."
   }
 }

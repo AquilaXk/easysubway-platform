@@ -17,6 +17,10 @@ resource "oci_core_instance" "this" {
     are_legacy_imds_endpoints_disabled = true
   }
 
+  launch_options {
+    is_pv_encryption_in_transit_enabled = true
+  }
+
   metadata = {
     ssh_authorized_keys = trimspace(var.ssh_public_key)
     user_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {

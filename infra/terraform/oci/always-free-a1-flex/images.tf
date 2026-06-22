@@ -10,3 +10,10 @@ data "oci_core_images" "ubuntu_a1" {
   sort_order               = "DESC"
   state                    = "AVAILABLE"
 }
+
+check "ubuntu_image_exists" {
+  assert {
+    condition     = var.source_image_ocid_override != null ? true : length(data.oci_core_images.ubuntu_a1[0].images) > 0
+    error_message = "No AVAILABLE OCI image matched the configured OS/version/shape filters."
+  }
+}
