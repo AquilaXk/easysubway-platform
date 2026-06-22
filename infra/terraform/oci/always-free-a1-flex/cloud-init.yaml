@@ -1,0 +1,58 @@
+#cloud-config
+write_files:
+  - path: /usr/local/sbin/easysubway-data-volume-setup.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      data_volume_enabled="${data_volume_enabled}"
+      device="${data_volume_device}"
+      mount_path="${data_volume_mount_path}"
+      docker_data_root="${data_volume_mount_path}/docker"
+
+      if [[ "$data_volume_enabled" != "true" ]]; then
+        echo "Data volume disabled; keeping the default Docker data root."
+        exit 0
+      fi
+
+      for _ in $(seq 1 60); do
+        if [[ -b "$device" ]]; then
+          break
+        fi
+        sleep 2
+      done
+
+      if [[ ! -b "$device" ]]; then
+        echo "OCI data volume device not found: $device" >&2
+        exit 1
+      fi
+
+      if ! blkid "$device" >/dev/null 2>&1; then
+        mkfs.ext4 -F "$device"
+      fi
+
+      uuid="$(blkid -s UUID -o value "$device")"
+      mkdir -p "$mount_path"
+
+      if ! grep -F "UUID=$uuid " /etc/fstab >/dev/null 2>&1; then
+        echo "UUID=$uuid $mount_path ext4 defaults,nofail 0 2" >>/etc/fstab
+      fi
+
+      mountpoint -q "$mount_path" || mount "$mount_path"
+      mkdir -p "$docker_data_root"
+
+      mkdir -p /etc/docker
+      cat >/etc/docker/daemon.json <<JSON
+      {
+        "data-root": "$docker_data_root"
+      }
+      JSON
+
+      if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+        systemctl restart docker || true
+      fi
+
+runcmd:
+  - /usr/local/sbin/easysubway-data-volume-setup.sh
