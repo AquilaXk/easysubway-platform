@@ -11,3 +11,10 @@ resource "oci_objectstorage_bucket" "datapack" {
   storage_tier   = "Standard"
   versioning     = "Enabled"
 }
+
+resource "oci_identity_customer_secret_key" "datapack_publisher" {
+  provider = oci.identity_home
+
+  display_name = "${var.name_prefix}-datapack-publisher"
+  user_id      = var.user_ocid
+}

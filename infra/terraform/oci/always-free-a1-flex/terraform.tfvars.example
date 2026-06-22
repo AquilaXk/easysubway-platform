@@ -4,6 +4,9 @@ fingerprint      = "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"
 private_key_path = "/absolute/path/to/oci_api_key.pem"
 region           = "ap-seoul-1"
 
+# Set when the tenancy home region differs from the resource region.
+# identity_home_region = "ap-chuncheon-1"
+
 compartment_ocid   = "ocid1.compartment.oc1..example"
 availability_domain = "example:AP-SEOUL-1-AD-1"
 ssh_public_key      = "ssh-ed25519 example"

@@ -55,6 +55,18 @@ variable "region" {
   }
 }
 
+variable "identity_home_region" {
+  description = "Optional OCI tenancy home region for Identity resources such as Object Storage customer secret keys. Defaults to region when null."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.identity_home_region == null || can(regex("^[a-z]+-[a-z]+-[0-9]+$", var.identity_home_region))
+    error_message = "identity_home_region must be null or look like ap-chuncheon-1 or us-ashburn-1."
+  }
+}
+
 variable "compartment_ocid" {
   description = "Compartment OCID where the free-tier resources will be created."
   type        = string
