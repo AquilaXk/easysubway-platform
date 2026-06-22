@@ -29,13 +29,13 @@ data_volume_device       = "/dev/oracleoci/oraclevdb"
 data_volume_mount_path   = "/var/lib/easysubway-data"
 
 datapack_bucket_name               = "easysubway-datapacks"
-datapack_object_prefix             = "datapacks"
+datapack_object_prefix             = ""
 datapack_bucket_public_access_type = "ObjectReadWithoutList"
 server_domain_name                 = "easysubway-api.aquilaxk.site"
 datapack_domain_name               = "datapack.aquilaxk.site"
 
 # Enable only after DNS/CDN for this host is configured outside this module.
-# datapack_public_base_url_override = "https://datapack.aquilaxk.site/datapacks"
+# datapack_public_base_url_override = "https://datapack.aquilaxk.site"
 
 freeform_tags = {
   Environment = "production"

@@ -103,7 +103,7 @@ output "recommended_dns_records" {
     }
     datapack_reserved = {
       name                      = var.datapack_domain_name
-      custom_base_url_candidate = "https://${var.datapack_domain_name}/${var.datapack_object_prefix}"
+      custom_base_url_candidate = local.datapack_custom_base_url_candidate
       current_base_url          = local.datapack_base_url
       note                      = "Use current_base_url until a reverse proxy or CDN rewrites this host to the OCI Object Storage bucket prefix."
     }

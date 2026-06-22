@@ -17,16 +17,9 @@ write_files:
         exit 0
       fi
 
-      for _ in $(seq 1 60); do
-        if [[ -b "$device" ]]; then
-          break
-        fi
-        sleep 2
-      done
-
       if [[ ! -b "$device" ]]; then
-        echo "OCI data volume device not found: $device" >&2
-        exit 1
+        echo "OCI data volume device not found yet: $device" >&2
+        exit 75
       fi
 
       if ! blkid "$device" >/dev/null 2>&1; then
@@ -54,5 +47,26 @@ write_files:
         systemctl restart docker || true
       fi
 
+  - path: /etc/systemd/system/easysubway-data-volume-setup.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prepare Easysubway data volume for Docker
+      After=local-fs.target
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/easysubway-data-volume-setup.sh
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=30s
+      TimeoutStartSec=0
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
-  - /usr/local/sbin/easysubway-data-volume-setup.sh
+  - systemctl daemon-reload
+  - systemctl enable --now easysubway-data-volume-setup.service

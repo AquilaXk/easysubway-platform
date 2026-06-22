@@ -38,7 +38,7 @@ resource "oci_core_instance" "this" {
   }
 
   lifecycle {
-    # Keep image drift out of routine network or metadata changes.
-    ignore_changes = [source_details[0].source_id]
+    # Keep image and boot metadata drift from replacing a running host.
+    ignore_changes = [metadata["user_data"], source_details[0].source_id]
   }
 }

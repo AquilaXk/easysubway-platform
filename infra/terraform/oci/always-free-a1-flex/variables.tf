@@ -343,14 +343,14 @@ variable "datapack_bucket_name" {
 }
 
 variable "datapack_object_prefix" {
-  description = "Object prefix used by the app and publisher for data pack files."
+  description = "Object prefix used by the app and publisher for data pack files. Empty means bucket root."
   type        = string
-  default     = "datapacks"
+  default     = ""
   nullable    = false
 
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9/_-]*[a-z0-9]$", var.datapack_object_prefix))
-    error_message = "datapack_object_prefix must contain lowercase path characters without leading or trailing slash."
+    condition     = var.datapack_object_prefix == "" || can(regex("^[a-z0-9][a-z0-9/_-]*[a-z0-9]$", var.datapack_object_prefix))
+    error_message = "datapack_object_prefix must be empty or contain lowercase path characters without leading or trailing slash."
   }
 }
 
