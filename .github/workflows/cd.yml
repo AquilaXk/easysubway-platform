@@ -1,30 +1,104 @@
 name: CD
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "실행 모드"
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - preflight
+      deploy_sha:
+        description: "배포할 main 커밋 SHA. 비우면 현재 workflow SHA를 사용합니다."
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: cd-${{ github.ref }}
-  cancel-in-progress: true
+  group: cd-production-deploy
+  cancel-in-progress: false
 
 jobs:
-  readiness:
-    name: CD Readiness
+  deploy:
+    name: CD Deploy
     runs-on: ubuntu-latest
+    environment: production
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
 
     steps:
-      - name: CD Readiness / Checkout repository
+      - name: CD Deploy / Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: CD Readiness / Restore GitHub Actions dotenv secret
+      - name: CD Deploy / Resolve deployment target
+        id: target
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.deploy_sha }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            deploy_sha="${WORKFLOW_RUN_SHA}"
+            mode="deploy"
+          else
+            deploy_sha="${DISPATCH_SHA:-${GITHUB_SHA}}"
+            mode="${DISPATCH_MODE:-deploy}"
+          fi
+
+          if [[ ! "${deploy_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid deploy sha: ${deploy_sha}" >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${deploy_sha}" origin/main; then
+            echo "deploy target is not on origin/main: ${deploy_sha}" >&2
+            exit 1
+          fi
+          git checkout --detach "${deploy_sha}"
+
+          echo "sha=${deploy_sha}" >> "${GITHUB_OUTPUT}"
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+          echo "DEPLOY_SHA=${deploy_sha}" >> "${GITHUB_ENV}"
+
+      - name: CD Deploy / Validate manual dispatch CI
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ci_url="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${DEPLOY_SHA}&branch=main&event=push&status=success&per_page=20" \
+              --jq '.workflow_runs[] | select(.name == "CI" and .conclusion == "success") | .html_url' \
+              | head -n 1
+          )"
+          if [[ -z "${ci_url}" ]]; then
+            echo "manual deployment requires a successful CI workflow for ${DEPLOY_SHA}" >&2
+            exit 1
+          fi
+
+          echo "validated_ci_url=${ci_url}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: CD Deploy / Restore GitHub Actions dotenv secret
         id: dotenv
         shell: bash
         env:
@@ -39,35 +113,177 @@ jobs:
           else
             cp .env.example "${env_file}"
             echo "source=example" >> "${GITHUB_OUTPUT}"
-            echo "::notice title=CD env secret::EASYSUBWAY_ENV secret is not configured; validating template only."
+            echo "::notice title=CD env secret::EASYSUBWAY_ENV secret is not configured; deployment will not start."
           fi
 
           chmod 600 "${env_file}"
           echo "EASYSUBWAY_ENV_FILE=${env_file}" >> "${GITHUB_ENV}"
 
-      - name: CD Readiness / Validate deployment dotenv contract
+      - name: CD Deploy / Validate deployment dotenv contract
         shell: bash
         run: |
           set -euo pipefail
           tools/ci/validate-deployment-env.sh "${EASYSUBWAY_ENV_FILE}"
 
-      - name: CD Readiness / Validate Docker Compose deployment config
+      - name: CD Deploy / Prepare split deployment env files
+        id: split-env
+        if: ${{ steps.dotenv.outputs.source == 'secret' }}
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file "${EASYSUBWAY_ENV_FILE}" -f infra/docker-compose.yml config --quiet
 
-      - name: CD Readiness / Summarize deployment readiness
+          prepared_dir="${RUNNER_TEMP}/deploy-env"
+          tools/deploy/prepare-deployment-env.sh \
+            "${EASYSUBWAY_ENV_FILE}" \
+            tools/deploy/compose-server-env.allowlist \
+            tools/deploy/backend-app-env.allowlist \
+            "${prepared_dir}"
+
+          echo "dir=${prepared_dir}" >> "${GITHUB_OUTPUT}"
+          echo "PREPARED_ENV_DIR=${prepared_dir}" >> "${GITHUB_ENV}"
+
+      - name: CD Deploy / Validate Docker Compose deployment config
+        if: ${{ steps.dotenv.outputs.source == 'secret' }}
         shell: bash
         run: |
           set -euo pipefail
+
+          EASYSUBWAY_BACKEND_ENV_FILE="${PREPARED_ENV_DIR}/backend.env" \
+            docker compose --env-file "${PREPARED_ENV_DIR}/compose.env" -f infra/docker-compose.yml config --quiet
+
+      - name: CD Deploy / Set up Java
+        uses: actions/setup-java@be66141d4002b0e783cc31e5449d3f9f3267ffd9
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: CD Deploy / Build backend bootJar
+        shell: bash
+        working-directory: backend
+        run: |
+          set -euo pipefail
+
+          ./gradlew bootJar --no-daemon
+          jar_file="$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-plain.jar' | head -n 1)"
+          if [[ -z "${jar_file}" ]]; then
+            echo "bootJar artifact not found" >&2
+            exit 1
+          fi
+
+          cp "${jar_file}" "${RUNNER_TEMP}/backend.jar"
+          cd "${RUNNER_TEMP}"
+          sha256sum backend.jar > backend.jar.sha256
+
+      - name: CD Deploy / Decide remote deploy readiness
+        id: remote
+        shell: bash
+        env:
+          MODE: ${{ steps.target.outputs.mode }}
+          ENV_SOURCE: ${{ steps.dotenv.outputs.source }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+          DEPLOY_COMPOSE_PROJECT: ${{ vars.DEPLOY_COMPOSE_PROJECT }}
+        run: |
+          set -euo pipefail
+
+          deploy_ready=true
+          reason="ready"
+          if [[ "${MODE}" == "preflight" ]]; then
+            deploy_ready=false
+            reason="preflight_mode"
+          elif [[ "${ENV_SOURCE}" != "secret" ]]; then
+            deploy_ready=false
+            reason="missing_easysubway_env"
+          elif [[ -z "${DEPLOY_HOST}" || -z "${DEPLOY_USER}" || -z "${DEPLOY_SSH_PRIVATE_KEY}" ]]; then
+            deploy_ready=false
+            reason="missing_ssh_credentials"
+          elif [[ -z "${DEPLOY_ROOT}" || -z "${DEPLOY_COMPOSE_PROJECT}" ]]; then
+            deploy_ready=false
+            reason="missing_deploy_vars"
+          elif [[ ! "${DEPLOY_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ || "${DEPLOY_ROOT}" == *..* ]]; then
+            deploy_ready=false
+            reason="invalid_deploy_root"
+          elif [[ ! "${DEPLOY_COMPOSE_PROJECT}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+            deploy_ready=false
+            reason="invalid_compose_project"
+          fi
+
+          echo "deploy_ready=${deploy_ready}" >> "${GITHUB_OUTPUT}"
+          echo "reason=${reason}" >> "${GITHUB_OUTPUT}"
+          echo "DEPLOY_ROOT=${DEPLOY_ROOT:-/opt/easysubway}" >> "${GITHUB_ENV}"
+          echo "DEPLOY_COMPOSE_PROJECT=${DEPLOY_COMPOSE_PROJECT:-easysubway}" >> "${GITHUB_ENV}"
+
+      - name: CD Deploy / Upload and run SSH deployment
+        if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          install -m 700 -d "${RUNNER_TEMP}/ssh"
+          key_file="${RUNNER_TEMP}/ssh/deploy_key"
+          printf '%s' "${DEPLOY_SSH_PRIVATE_KEY}" > "${key_file}"
+          chmod 600 "${key_file}"
+
+          ssh_base=(ssh -i "${key_file}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${DEPLOY_USER}@${DEPLOY_HOST}")
+          scp_base=(scp -i "${key_file}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+          incoming="${DEPLOY_ROOT}/incoming/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          "${ssh_base[@]}" "install -m 700 -d '${incoming}'"
+          "${scp_base[@]}" \
+            "${RUNNER_TEMP}/backend.jar" \
+            "${RUNNER_TEMP}/backend.jar.sha256" \
+            "${PREPARED_ENV_DIR}/compose.env" \
+            "${PREPARED_ENV_DIR}/backend.env" \
+            tools/deploy/deploy-backend.sh \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${incoming}/"
+
+          "${ssh_base[@]}" \
+            "DEPLOY_ROOT='${DEPLOY_ROOT}' DEPLOY_COMPOSE_PROJECT='${DEPLOY_COMPOSE_PROJECT}' DEPLOY_SHA='${DEPLOY_SHA}' INCOMING_DIR='${incoming}' bash '${incoming}/deploy-backend.sh'"
+
+      - name: CD Deploy / Verify public readiness
+        if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
+        shell: bash
+        env:
+          DEPLOY_PUBLIC_API_BASE_URL: ${{ vars.DEPLOY_PUBLIC_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DEPLOY_PUBLIC_API_BASE_URL}" ]]; then
+            echo "::notice title=CD public readiness::DEPLOY_PUBLIC_API_BASE_URL is not configured; remote local readiness was already checked."
+            exit 0
+          fi
+
+          curl -fsS --retry 6 --retry-delay 10 --max-time 10 "${DEPLOY_PUBLIC_API_BASE_URL%/}/actuator/health/readiness"
+
+      - name: CD Deploy / Summarize deployment result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
           {
-            echo "### CD Readiness"
-            echo "- dotenv source: ${{ steps.dotenv.outputs.source }}"
-            echo "- compose config: valid"
-            if [[ "${{ steps.dotenv.outputs.source }}" == "example" ]]; then
-              echo "- deployment secret: EASYSUBWAY_ENV secret is not configured"
-            else
-              echo "- deployment secret: EASYSUBWAY_ENV"
-            fi
+            echo "### CD Deploy"
+            echo "- target sha: ${DEPLOY_SHA:-unknown}"
+            echo "- dotenv source: ${{ steps.dotenv.outputs.source || 'unknown' }}"
+            echo "- mode: ${{ steps.target.outputs.mode || 'unknown' }}"
+            echo "- remote deployment: ${{ steps.remote.outputs.deploy_ready == 'true' && 'started' || 'not_started' }}"
+            echo "- remote reason: ${{ steps.remote.outputs.reason || 'not_evaluated' }}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: CD Deploy / Cleanup sensitive files
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f "${RUNNER_TEMP}/backend.jar" "${RUNNER_TEMP}/backend.jar.sha256"
+          if [[ -n "${EASYSUBWAY_ENV_FILE:-}" ]]; then
+            rm -f "${EASYSUBWAY_ENV_FILE}"
+          fi
+          rm -rf "${RUNNER_TEMP}/deploy-env" "${RUNNER_TEMP}/ssh"
