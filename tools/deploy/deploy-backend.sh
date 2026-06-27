@@ -127,6 +127,16 @@ read_env_value() {
 	local name="$2"
 	sed -nE "s/^${name}=//p" "${file}" | tail -n 1 | sed -E 's/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/'
 }
+ensure_backend_env_value() {
+	local name="$1"
+	local value="$2"
+	if [[ -z "$(read_env_value "${BACKEND_ENV}" "${name}")" ]]; then
+		printf '%s=%s\n' "${name}" "${value}" >> "${BACKEND_ENV}"
+	fi
+}
+ensure_backend_env_value EASYSUBWAY_ADMIN_REVISION "${DEPLOY_SHA}"
+ensure_backend_env_value EASYSUBWAY_ADMIN_MASTER_DATA_VERSION "${DEPLOY_SHA}"
+
 backend_port="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_BACKEND_PORT)"
 backend_port="${backend_port:-8080}"
 report_upload_bucket="$(read_env_value "${BACKEND_ENV}" EASYSUBWAY_REPORT_UPLOAD_BUCKET)"
