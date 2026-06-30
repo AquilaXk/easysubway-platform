@@ -158,27 +158,45 @@ compose() {
 
 compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" config --quiet
 
-stop_legacy_backend_service() {
-	local legacy_unit="easysubway-backend.service"
-	local legacy_jar="${DEPLOY_ROOT}/easysubway-backend.jar"
+LEGACY_BACKEND_UNIT="easysubway-backend.service"
+LEGACY_BACKEND_JAR="${DEPLOY_ROOT}/easysubway-backend.jar"
+legacy_backend_was_active=0
+legacy_backend_was_enabled=0
 
-	if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${legacy_unit}" --no-pager --no-legend 2>/dev/null | grep -q "^${legacy_unit}"; then
-		if systemctl is-active --quiet "${legacy_unit}"; then
-			if ! sudo -n systemctl stop "${legacy_unit}"; then
+restore_legacy_backend_service() {
+	if [[ "${legacy_backend_was_enabled}" -eq 1 ]]; then
+		sudo -n systemctl enable "${LEGACY_BACKEND_UNIT}" >/dev/null || return 1
+	fi
+	if [[ "${legacy_backend_was_active}" -eq 1 ]]; then
+		sudo -n systemctl start "${LEGACY_BACKEND_UNIT}" || return 1
+	fi
+}
+
+stop_legacy_backend_service() {
+	if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${LEGACY_BACKEND_UNIT}" --no-pager --no-legend 2>/dev/null | grep -q "^${LEGACY_BACKEND_UNIT}"; then
+		if systemctl is-active --quiet "${LEGACY_BACKEND_UNIT}"; then
+			legacy_backend_was_active=1
+			if ! sudo -n systemctl stop "${LEGACY_BACKEND_UNIT}"; then
 				write_result "failed" "legacy_backend_stop_failed"
+				write_phase "completed"
 				exit 1
 			fi
 		fi
-		if systemctl is-enabled --quiet "${legacy_unit}"; then
-			if ! sudo -n systemctl disable "${legacy_unit}" >/dev/null; then
+		if systemctl is-enabled --quiet "${LEGACY_BACKEND_UNIT}"; then
+			legacy_backend_was_enabled=1
+			if ! sudo -n systemctl disable "${LEGACY_BACKEND_UNIT}" >/dev/null; then
+				restore_legacy_backend_service || true
 				write_result "failed" "legacy_backend_disable_failed"
+				write_phase "completed"
 				exit 1
 			fi
 		fi
 	fi
 
-	if pgrep -f "java -jar ${legacy_jar}" >/dev/null; then
+	if pgrep -f "java -jar ${LEGACY_BACKEND_JAR}" >/dev/null; then
+		restore_legacy_backend_service || true
 		write_result "blocked" "legacy_backend_still_running"
+		write_phase "completed"
 		exit 1
 	fi
 }
@@ -325,7 +343,15 @@ fail_backend_deployment() {
 		write_result "failed" "${detail}_rollback_attempted"
 	else
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s backend || true
-		write_result "failed" "${detail}_rollback_unavailable"
+		if [[ "${legacy_backend_was_active}" -eq 1 || "${legacy_backend_was_enabled}" -eq 1 ]]; then
+			if restore_legacy_backend_service; then
+				write_result "failed" "${detail}_legacy_restore_attempted"
+			else
+				write_result "failed" "${detail}_legacy_restore_failed"
+			fi
+		else
+			write_result "failed" "${detail}_rollback_unavailable"
+		fi
 	fi
 	write_phase "completed"
 	printf '%s\n' "${DEPLOY_SHA}" > "${SHARED_DIR}/failed-sha"
