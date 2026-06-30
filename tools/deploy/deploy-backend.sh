@@ -162,6 +162,7 @@ LEGACY_BACKEND_UNIT="easysubway-backend.service"
 LEGACY_BACKEND_JAR="${DEPLOY_ROOT}/easysubway-backend.jar"
 legacy_backend_was_active=0
 legacy_backend_was_enabled=0
+legacy_restore_on_error=0
 
 restore_legacy_backend_service() {
 	if [[ "${legacy_backend_was_enabled}" -eq 1 ]]; then
@@ -170,6 +171,17 @@ restore_legacy_backend_service() {
 	if [[ "${legacy_backend_was_active}" -eq 1 ]]; then
 		sudo -n systemctl start "${LEGACY_BACKEND_UNIT}" || return 1
 	fi
+}
+
+restore_legacy_on_unhandled_error() {
+	local exit_code="$?"
+	trap - ERR
+	if [[ "${legacy_restore_on_error}" -eq 1 ]]; then
+		restore_legacy_backend_service || true
+		write_result "failed" "legacy_restore_unhandled_error" || true
+		write_phase "completed" || true
+	fi
+	exit "${exit_code}"
 }
 
 stop_legacy_backend_service() {
@@ -313,6 +325,8 @@ if [[ "${needs_backup}" -eq 1 ]]; then
 fi
 
 stop_legacy_backend_service
+legacy_restore_on_error=1
+trap restore_legacy_on_unhandled_error ERR
 
 write_phase "started"
 env_set="${SHARED_DIR}/env-sets/${DEPLOY_SHA}-${target_env_hash}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -373,6 +387,9 @@ for _ in $(seq 1 60); do
 	fi
 	sleep 5
 done
+
+legacy_restore_on_error=0
+trap - ERR
 
 if [[ "${ready}" -ne 1 ]]; then
 	diagnostic="${DIAGNOSTICS_DIR}/${DEPLOY_SHA}-$(date -u +%Y%m%dT%H%M%SZ).log"
