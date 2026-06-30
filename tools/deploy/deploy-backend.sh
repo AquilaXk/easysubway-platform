@@ -312,6 +312,8 @@ if [[ "${needs_backup}" -eq 1 ]]; then
 		timeout 300 tools/ops/postgres-backup.sh
 fi
 
+stop_legacy_backend_service
+
 write_phase "started"
 env_set="${SHARED_DIR}/env-sets/${DEPLOY_SHA}-${target_env_hash}-$(date -u +%Y%m%dT%H%M%SZ)"
 tmp_env_set="${env_set}.tmp"
@@ -358,7 +360,6 @@ fail_backend_deployment() {
 }
 
 write_phase "restarting"
-stop_legacy_backend_service
 if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build backend; then
 	fail_backend_deployment "backend_start_failed"
 	exit 1
