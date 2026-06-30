@@ -39,6 +39,8 @@ JAR_FILE="${INCOMING_DIR}/backend.jar"
 CHECKSUM_FILE="${INCOMING_DIR}/backend.jar.sha256"
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
+RUNTIME_SERVICES=(backend back-worker)
+OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe prometheus loki grafana)
 
 for file in "${JAR_FILE}" "${CHECKSUM_FILE}" "${COMPOSE_ENV}" "${BACKEND_ENV}"; do
 	[[ -f "${file}" ]] || { printf 'missing staged file: %s\n' "${file}" >&2; exit 2; }
@@ -273,7 +275,8 @@ if ! compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" exec -T \
 fi
 
 backend_id="$(compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" ps -q backend || true)"
-if [[ -z "${current_sha}" && -n "${backend_id}" ]]; then
+back_worker_id="$(compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" ps -q back-worker || true)"
+if [[ -z "${current_sha}" && ( -n "${backend_id}" || -n "${back_worker_id}" ) ]]; then
 	write_result "blocked" "unmanaged_backend"
 	exit 1
 fi
@@ -286,6 +289,13 @@ if [[ -n "${current_sha}" ]]; then
 	if [[ -z "${backend_id}" || -z "${current_image_id}" || "${running_image_id}" != "${current_image_id}" ]]; then
 		write_result "blocked" "managed_image_drift"
 		exit 1
+	fi
+	if [[ -n "${back_worker_id}" ]]; then
+		running_worker_image_id="$(docker inspect --format '{{.Image}}' "${back_worker_id}" 2>/dev/null || true)"
+		if [[ "${running_worker_image_id}" != "${current_image_id}" ]]; then
+			write_result "blocked" "managed_image_drift"
+			exit 1
+		fi
 	fi
 fi
 
@@ -375,10 +385,10 @@ fail_backend_deployment() {
 	if [[ -n "${current_sha}" && -L "${SHARED_DIR}/previous-env" ]]; then
 		ln -sfn "$(readlink "${SHARED_DIR}/previous-env")" "${SHARED_DIR}/current-env.next"
 		mv -Tf "${SHARED_DIR}/current-env.next" "${SHARED_DIR}/current-env"
-		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build backend || true
+		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}" || true
 		write_result "failed" "${detail}_rollback_attempted"
 	else
-		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s backend || true
+		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s "${RUNTIME_SERVICES[@]}" || true
 		if [[ "${legacy_backend_was_active}" -eq 1 || "${legacy_backend_was_enabled}" -eq 1 ]]; then
 			if restore_legacy_backend_service; then
 				write_result "failed" "${detail}_legacy_restore_attempted"
@@ -394,8 +404,12 @@ fail_backend_deployment() {
 }
 
 write_phase "restarting"
-if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build backend; then
+if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}"; then
 	fail_backend_deployment "backend_start_failed"
+	exit 1
+fi
+if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" --profile observability up -d --no-build "${OBSERVABILITY_SERVICES[@]}"; then
+	fail_backend_deployment "observability_start_failed"
 	exit 1
 fi
 
@@ -410,7 +424,7 @@ done
 
 if [[ "${ready}" -ne 1 ]]; then
 	diagnostic="${DIAGNOSTICS_DIR}/${DEPLOY_SHA}-$(date -u +%Y%m%dT%H%M%SZ).log"
-	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" logs --no-color --tail=200 backend > "${diagnostic}" 2>&1 || true
+	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" logs --no-color --tail=200 "${RUNTIME_SERVICES[@]}" > "${diagnostic}" 2>&1 || true
 	chmod 600 "${diagnostic}"
 	fail_backend_deployment "readiness_failed"
 	exit 1
