@@ -216,7 +216,7 @@ if is_truthy EASYSUBWAY_ALERT_EMAIL_ENABLED; then
 	fi
 	alertmanager_url_normalized="$(printf '%s' "${alertmanager_url}" | tr '[:upper:]' '[:lower:]')"
 	case "${alertmanager_url_normalized}" in
-		http://*|https://localhost*|https://127.*|https://[::1]*|https://alertmanager:*|https://prometheus:*) printf 'alertmanager external URL must not be internal\n' >&2; exit 1 ;;
+		http://*|https://localhost*|https://127.*|https://[::1]*|https://alertmanager|https://alertmanager/*|https://alertmanager:*|https://prometheus|https://prometheus/*|https://prometheus:*) printf 'alertmanager external URL must not be internal\n' >&2; exit 1 ;;
 	esac
 fi
 
