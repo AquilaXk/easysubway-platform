@@ -210,13 +210,14 @@ if is_truthy EASYSUBWAY_ALERT_EMAIL_ENABLED; then
 	require_nonempty EASYSUBWAY_ALERT_SMTP_USERNAME
 	require_nonempty EASYSUBWAY_ALERT_SMTP_PASSWORD
 	alertmanager_url="$(value EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL)"
-	if [[ ! "${alertmanager_url}" =~ ^https://[^/@\?#:]+(:[0-9]+)?(/.*)?$ ]]; then
+	if [[ ! "${alertmanager_url}" =~ ^https://(\[[0-9A-Fa-f:.]+\]|[^/@\?#:]+)(:[0-9]+)?(/.*)?$ ]]; then
 		printf 'alertmanager external URL must be an HTTPS URL\n' >&2
 		exit 1
 	fi
 	alertmanager_url_normalized="$(printf '%s' "${alertmanager_url}" | tr '[:upper:]' '[:lower:]')"
 	case "${alertmanager_url_normalized}" in
-		http://*|https://localhost*|https://127.*|https://[::1]*|https://alertmanager|https://alertmanager/*|https://alertmanager:*|https://prometheus|https://prometheus/*|https://prometheus:*) printf 'alertmanager external URL must not be internal\n' >&2; exit 1 ;;
+		http://*|https://localhost*|https://127.*|https://\[::1\]*|https://alertmanager|https://alertmanager/*|https://alertmanager:*|https://prometheus|https://prometheus/*|https://prometheus:*) printf 'alertmanager external URL must not be internal\n' >&2; exit 1 ;;
+		*) ;;
 	esac
 fi
 
