@@ -218,8 +218,6 @@ for service in postgres object-storage; do
 	wait_stateful_service "${service}"
 done
 
-stop_legacy_backend_service
-
 if ! compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" exec -T \
 	-e REPORT_UPLOAD_BUCKET="${report_upload_bucket}" \
 	object-storage sh -lc 'mc alias set local http://127.0.0.1:9000 "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >/dev/null && mc mb --ignore-existing "local/${REPORT_UPLOAD_BUCKET}" >/dev/null'; then
@@ -334,6 +332,7 @@ fail_backend_deployment() {
 }
 
 write_phase "restarting"
+stop_legacy_backend_service
 if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build backend; then
 	fail_backend_deployment "backend_start_failed"
 	exit 1
