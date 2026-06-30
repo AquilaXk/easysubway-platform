@@ -34,7 +34,9 @@ concurrency:
 jobs:
   deploy:
     name: CD Deploy
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - easysubway-production
     environment: production
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
 
@@ -183,9 +185,6 @@ jobs:
         env:
           MODE: ${{ steps.target.outputs.mode }}
           ENV_SOURCE: ${{ steps.dotenv.outputs.source }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
           DEPLOY_COMPOSE_PROJECT: ${{ vars.DEPLOY_COMPOSE_PROJECT }}
         run: |
@@ -199,9 +198,6 @@ jobs:
           elif [[ "${ENV_SOURCE}" != "secret" ]]; then
             deploy_ready=false
             reason="missing_easysubway_env"
-          elif [[ -z "${DEPLOY_HOST}" || -z "${DEPLOY_USER}" || -z "${DEPLOY_SSH_PRIVATE_KEY}" ]]; then
-            deploy_ready=false
-            reason="missing_ssh_credentials"
           elif [[ -z "${DEPLOY_ROOT}" || -z "${DEPLOY_COMPOSE_PROJECT}" ]]; then
             deploy_ready=false
             reason="missing_deploy_vars"
@@ -218,36 +214,28 @@ jobs:
           echo "DEPLOY_ROOT=${DEPLOY_ROOT:-/opt/easysubway}" >> "${GITHUB_ENV}"
           echo "DEPLOY_COMPOSE_PROJECT=${DEPLOY_COMPOSE_PROJECT:-easysubway}" >> "${GITHUB_ENV}"
 
-      - name: CD Deploy / Upload and run SSH deployment
+      - name: CD Deploy / Run local deployment
         if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
         shell: bash
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
-          install -m 700 -d "${RUNNER_TEMP}/ssh"
-          key_file="${RUNNER_TEMP}/ssh/deploy_key"
-          printf '%s' "${DEPLOY_SSH_PRIVATE_KEY}" > "${key_file}"
-          chmod 600 "${key_file}"
-
-          ssh_base=(ssh -i "${key_file}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${DEPLOY_USER}@${DEPLOY_HOST}")
-          scp_base=(scp -i "${key_file}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
           incoming="${DEPLOY_ROOT}/incoming/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-          "${ssh_base[@]}" "install -m 700 -d '${incoming}'"
-          "${scp_base[@]}" \
+          install -m 700 -d "${incoming}"
+          cp \
             "${RUNNER_TEMP}/backend.jar" \
             "${RUNNER_TEMP}/backend.jar.sha256" \
             "${PREPARED_ENV_DIR}/compose.env" \
             "${PREPARED_ENV_DIR}/backend.env" \
             tools/deploy/deploy-backend.sh \
-            "${DEPLOY_USER}@${DEPLOY_HOST}:${incoming}/"
+            "${incoming}/"
 
-          "${ssh_base[@]}" \
-            "DEPLOY_ROOT='${DEPLOY_ROOT}' DEPLOY_COMPOSE_PROJECT='${DEPLOY_COMPOSE_PROJECT}' DEPLOY_SHA='${DEPLOY_SHA}' INCOMING_DIR='${incoming}' bash '${incoming}/deploy-backend.sh'"
+          DEPLOY_ROOT="${DEPLOY_ROOT}" \
+            DEPLOY_COMPOSE_PROJECT="${DEPLOY_COMPOSE_PROJECT}" \
+            DEPLOY_SHA="${DEPLOY_SHA}" \
+            INCOMING_DIR="${incoming}" \
+            bash "${incoming}/deploy-backend.sh"
 
       - name: CD Deploy / Verify public readiness
         if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
@@ -288,4 +276,4 @@ jobs:
           if [[ -n "${EASYSUBWAY_ENV_FILE:-}" ]]; then
             rm -f "${EASYSUBWAY_ENV_FILE}"
           fi
-          rm -rf "${RUNNER_TEMP}/deploy-env" "${RUNNER_TEMP}/ssh"
+          rm -rf "${RUNNER_TEMP}/deploy-env"
