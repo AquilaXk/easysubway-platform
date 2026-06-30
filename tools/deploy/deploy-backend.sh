@@ -179,7 +179,7 @@ restore_legacy_on_unhandled_error() {
 	if [[ "${legacy_restore_on_error}" -eq 1 ]]; then
 		restore_legacy_backend_service || true
 		write_result "failed" "legacy_restore_unhandled_error" || true
-		write_phase "completed" || true
+		write_phase "interrupted" || true
 	fi
 	exit "${exit_code}"
 }
