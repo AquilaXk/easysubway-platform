@@ -174,6 +174,11 @@ require_port EASYSUBWAY_OBJECT_STORAGE_PORT
 require_port EASYSUBWAY_OBJECT_STORAGE_CONSOLE_PORT
 require_port EASYSUBWAY_BACKEND_PORT
 
+if [[ "$(value EASYSUBWAY_POSTGRES_PORT)" == "5432" ]]; then
+	printf 'postgres host port 5432 is reserved on the production host\n' >&2
+	exit 1
+fi
+
 mkdir -p "${output_dir}"
 chmod 700 "${output_dir}"
 compose_tmp="$(mktemp "${output_dir}/compose.env.XXXXXX")"
