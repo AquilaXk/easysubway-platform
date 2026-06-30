@@ -158,6 +158,31 @@ compose() {
 
 compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" config --quiet
 
+stop_legacy_backend_service() {
+	local legacy_unit="easysubway-backend.service"
+	local legacy_jar="${DEPLOY_ROOT}/easysubway-backend.jar"
+
+	if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${legacy_unit}" --no-pager --no-legend 2>/dev/null | grep -q "^${legacy_unit}"; then
+		if systemctl is-active --quiet "${legacy_unit}"; then
+			if ! sudo -n systemctl stop "${legacy_unit}"; then
+				write_result "failed" "legacy_backend_stop_failed"
+				exit 1
+			fi
+		fi
+		if systemctl is-enabled --quiet "${legacy_unit}"; then
+			if ! sudo -n systemctl disable "${legacy_unit}" >/dev/null; then
+				write_result "failed" "legacy_backend_disable_failed"
+				exit 1
+			fi
+		fi
+	fi
+
+	if pgrep -f "java -jar ${legacy_jar}" >/dev/null; then
+		write_result "blocked" "legacy_backend_still_running"
+		exit 1
+	fi
+}
+
 EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
 EASYSUBWAY_BACKEND_IMAGE_TAG="${DEPLOY_SHA}" \
 EASYSUBWAY_BACKEND_JAR_SHA256="${jar_sha}" \
@@ -192,6 +217,8 @@ wait_stateful_service() {
 for service in postgres object-storage; do
 	wait_stateful_service "${service}"
 done
+
+stop_legacy_backend_service
 
 if ! compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" exec -T \
 	-e REPORT_UPLOAD_BUCKET="${report_upload_bucket}" \
