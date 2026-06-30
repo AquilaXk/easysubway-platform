@@ -32,13 +32,83 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plan:
+    name: CD Plan
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_target_relevant: ${{ steps.changes.outputs.deploy }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
+
+    steps:
+      - name: CD Plan / Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: CD Plan / Resolve deployment target
+        id: target
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.deploy_sha }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            deploy_sha="${WORKFLOW_RUN_SHA}"
+            mode="deploy"
+          else
+            deploy_sha="${DISPATCH_SHA:-${GITHUB_SHA}}"
+            mode="${DISPATCH_MODE:-deploy}"
+          fi
+
+          if [[ ! "${deploy_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid deploy sha: ${deploy_sha}" >&2
+            exit 1
+          fi
+
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${deploy_sha}" origin/main; then
+            echo "deploy target is not on origin/main: ${deploy_sha}" >&2
+            exit 1
+          fi
+
+          echo "sha=${deploy_sha}" >> "${GITHUB_OUTPUT}"
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+
+      - name: CD Plan / Detect deployment changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "deploy=true" >> "${GITHUB_OUTPUT}"
+            echo "manual dispatch deploys the requested main SHA" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          if git rev-parse "${DEPLOY_SHA}^" >/dev/null 2>&1; then
+            git diff --name-only "${DEPLOY_SHA}^" "${DEPLOY_SHA}" > changed-files.txt
+          else
+            git diff-tree --root --name-only "${DEPLOY_SHA}" > changed-files.txt
+          fi
+          bash tools/ci/detect-changed-paths.sh changed-files.txt
+
   deploy:
     name: CD Deploy
+    needs: plan
     runs-on:
       - self-hosted
       - easysubway-production
     environment: production
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
+    if: ${{ needs.plan.outputs.deploy_target_relevant == 'true' }}
 
     steps:
       - name: CD Deploy / Checkout repository
