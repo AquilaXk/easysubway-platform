@@ -105,7 +105,7 @@ services:
       - observability
 
   docker-runtime-probe:
-    image: ghcr.io/google/cadvisor:v0.55.1
+    image: ghcr.io/google/cadvisor:v0.60.3
     container_name: easysubway-docker-runtime-probe
     profiles:
       - observability
