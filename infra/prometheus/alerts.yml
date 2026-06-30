@@ -1,0 +1,32 @@
+groups:
+  - name: easysubway-observability
+    rules:
+      - alert: AquilaPublicEdgeProbeScrapeDown
+        expr: min(up{job="public_edge_probe"}) < 1
+        for: 5m
+        labels:
+          severity: warning
+          service: aquila-public-edge-probe
+        annotations:
+          summary: Public edge probe scrape is down
+          description: Prometheus cannot scrape public_edge_probe for 5m. Check the exporter container, live probe refresh loop, and network path.
+
+      - alert: AquilaDockerRuntimeProbeScrapeDown
+        expr: min(up{job="docker_runtime_probe"}) < 1
+        for: 3m
+        labels:
+          severity: warning
+          service: aquila-docker-runtime-probe
+        annotations:
+          summary: docker runtime probe scrape is down
+          description: Prometheus cannot scrape docker_runtime_probe for 3m. Check probe container health and docker socket access.
+
+      - alert: AquilaBackWorkerScrapeDown
+        expr: min(up{job="back_worker"}) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: aquila-back-worker
+        annotations:
+          summary: Back worker metrics scrape is down
+          description: Prometheus cannot scrape the backend worker target for 3m. Task queue and DLQ alerts may stop evaluating.
