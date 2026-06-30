@@ -32,7 +32,7 @@ docker compose "${compose_args[@]}" exec -T postgres sh -lc \
 	> "${temp_file}"
 
 test -s "${temp_file}"
-docker compose "${compose_args[@]}" exec -T postgres sh -lc 'pg_restore --list - >/dev/null' < "${temp_file}"
+docker compose "${compose_args[@]}" exec -T postgres sh -lc 'pg_restore --list >/dev/null' < "${temp_file}"
 mv "${temp_file}" "${backup_file}"
 if command -v sha256sum >/dev/null 2>&1; then
 	sha256sum "${backup_file}" > "${backup_file}.sha256"
