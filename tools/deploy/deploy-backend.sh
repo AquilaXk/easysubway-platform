@@ -195,7 +195,7 @@ done
 
 if ! compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" exec -T \
 	-e REPORT_UPLOAD_BUCKET="${report_upload_bucket}" \
-	object-storage sh -lc 'mc mb --ignore-existing "local/${REPORT_UPLOAD_BUCKET}" >/dev/null'; then
+	object-storage sh -lc 'mc alias set local http://127.0.0.1:9000 "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >/dev/null && mc mb --ignore-existing "local/${REPORT_UPLOAD_BUCKET}" >/dev/null'; then
 	write_result "failed" "report_upload_bucket_init_failed"
 	exit 1
 fi
