@@ -27,10 +27,6 @@ permissions:
   actions: read
   contents: read
 
-concurrency:
-  group: cd-production-deploy
-  cancel-in-progress: false
-
 jobs:
   plan:
     name: CD Plan
@@ -108,6 +104,9 @@ jobs:
       - self-hosted
       - easysubway-production
     environment: production
+    concurrency:
+      group: cd-production-deploy
+      cancel-in-progress: false
     if: ${{ needs.plan.outputs.deploy_target_relevant == 'true' }}
 
     steps:
