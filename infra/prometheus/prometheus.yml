@@ -4,14 +4,34 @@ global:
 
 scrape_configs:
   - job_name: "easysubway-backend"
-    metrics_path: "/actuator/prometheus"
+    metrics_path: "/probe"
+    params:
+      module: [http_2xx]
     static_configs:
-      - targets: ["host.docker.internal:8080"]
+      - targets:
+          - "http://backend:8080/actuator/health/readiness"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: public-edge-probe:9115
 
   - job_name: "back_worker"
-    metrics_path: "/actuator/prometheus"
+    metrics_path: "/probe"
+    params:
+      module: [http_2xx]
     static_configs:
-      - targets: ["back-worker:8080"]
+      - targets:
+          - "http://back-worker:8080/actuator/health/readiness"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: public-edge-probe:9115
 
   - job_name: "docker_runtime_probe"
     static_configs:

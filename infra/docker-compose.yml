@@ -129,7 +129,7 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
     ports:
-      - "${EASYSUBWAY_PROMETHEUS_PORT:-9090}:9090"
+      - "${EASYSUBWAY_PROMETHEUS_BIND:-127.0.0.1}:${EASYSUBWAY_PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -171,7 +171,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${EASYSUBWAY_GRAFANA_ADMIN_PASSWORD:-easysubway_local}
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "${EASYSUBWAY_GRAFANA_PORT:-3000}:3000"
+      - "${EASYSUBWAY_GRAFANA_BIND:-127.0.0.1}:${EASYSUBWAY_GRAFANA_PORT:-3000}:3000"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
