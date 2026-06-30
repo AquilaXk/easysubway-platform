@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
 DEPLOY_REPO_URL="${DEPLOY_REPO_URL:-https://github.com/AquilaXk/easysubway.git}"
@@ -158,6 +158,78 @@ compose() {
 
 compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" config --quiet
 
+LEGACY_BACKEND_UNIT="easysubway-backend.service"
+LEGACY_BACKEND_JAR="${DEPLOY_ROOT}/easysubway-backend.jar"
+legacy_backend_was_active=0
+legacy_backend_was_enabled=0
+legacy_restore_on_error=0
+
+restore_legacy_backend_service() {
+	if [[ "${legacy_backend_was_enabled}" -eq 1 ]]; then
+		sudo -n systemctl enable "${LEGACY_BACKEND_UNIT}" >/dev/null || return 1
+	fi
+	if [[ "${legacy_backend_was_active}" -eq 1 ]]; then
+		sudo -n systemctl start "${LEGACY_BACKEND_UNIT}" || return 1
+	fi
+}
+
+restore_legacy_on_unhandled_error() {
+	local exit_code="$?"
+	trap - ERR INT TERM HUP
+	if [[ "${legacy_restore_on_error}" -eq 1 ]]; then
+		restore_legacy_backend_service || true
+		write_result "failed" "legacy_restore_unhandled_error" || true
+		write_phase "interrupted" || true
+	fi
+	exit "${exit_code}"
+}
+
+restore_legacy_on_interruption() {
+	local signal="$1"
+	local exit_code=130
+	local detail="legacy_restore_interrupted_int"
+	case "${signal}" in
+		HUP) exit_code=129; detail="legacy_restore_interrupted_hup" ;;
+		TERM) exit_code=143; detail="legacy_restore_interrupted_term" ;;
+	esac
+	trap - ERR INT TERM HUP
+	if [[ "${legacy_restore_on_error}" -eq 1 ]]; then
+		restore_legacy_backend_service || true
+		write_result "failed" "${detail}" || true
+		write_phase "interrupted" || true
+	fi
+	exit "${exit_code}"
+}
+
+stop_legacy_backend_service() {
+	if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${LEGACY_BACKEND_UNIT}" --no-pager --no-legend 2>/dev/null | grep -q "^${LEGACY_BACKEND_UNIT}"; then
+		if systemctl is-active --quiet "${LEGACY_BACKEND_UNIT}"; then
+			legacy_backend_was_active=1
+			if ! sudo -n systemctl stop "${LEGACY_BACKEND_UNIT}"; then
+				write_result "failed" "legacy_backend_stop_failed"
+				write_phase "completed"
+				exit 1
+			fi
+		fi
+		if systemctl is-enabled --quiet "${LEGACY_BACKEND_UNIT}"; then
+			legacy_backend_was_enabled=1
+			if ! sudo -n systemctl disable "${LEGACY_BACKEND_UNIT}" >/dev/null; then
+				restore_legacy_backend_service || true
+				write_result "failed" "legacy_backend_disable_failed"
+				write_phase "completed"
+				exit 1
+			fi
+		fi
+	fi
+
+	if pgrep -f "java -jar ${LEGACY_BACKEND_JAR}" >/dev/null; then
+		restore_legacy_backend_service || true
+		write_result "blocked" "legacy_backend_still_running"
+		write_phase "completed"
+		exit 1
+	fi
+}
+
 EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
 EASYSUBWAY_BACKEND_IMAGE_TAG="${DEPLOY_SHA}" \
 EASYSUBWAY_BACKEND_JAR_SHA256="${jar_sha}" \
@@ -269,6 +341,13 @@ if [[ "${needs_backup}" -eq 1 ]]; then
 		timeout 300 tools/ops/postgres-backup.sh
 fi
 
+stop_legacy_backend_service
+legacy_restore_on_error=1
+trap restore_legacy_on_unhandled_error ERR
+trap 'restore_legacy_on_interruption INT' INT
+trap 'restore_legacy_on_interruption TERM' TERM
+trap 'restore_legacy_on_interruption HUP' HUP
+
 write_phase "started"
 env_set="${SHARED_DIR}/env-sets/${DEPLOY_SHA}-${target_env_hash}-$(date -u +%Y%m%dT%H%M%SZ)"
 tmp_env_set="${env_set}.tmp"
@@ -300,7 +379,15 @@ fail_backend_deployment() {
 		write_result "failed" "${detail}_rollback_attempted"
 	else
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s backend || true
-		write_result "failed" "${detail}_rollback_unavailable"
+		if [[ "${legacy_backend_was_active}" -eq 1 || "${legacy_backend_was_enabled}" -eq 1 ]]; then
+			if restore_legacy_backend_service; then
+				write_result "failed" "${detail}_legacy_restore_attempted"
+			else
+				write_result "failed" "${detail}_legacy_restore_failed"
+			fi
+		else
+			write_result "failed" "${detail}_rollback_unavailable"
+		fi
 	fi
 	write_phase "completed"
 	printf '%s\n' "${DEPLOY_SHA}" > "${SHARED_DIR}/failed-sha"
@@ -328,6 +415,9 @@ if [[ "${ready}" -ne 1 ]]; then
 	fail_backend_deployment "readiness_failed"
 	exit 1
 fi
+
+legacy_restore_on_error=0
+trap - ERR INT TERM HUP
 
 printf '%s\n' "${DEPLOY_SHA}" > "${SHARED_DIR}/current-sha"
 printf '%s\n' "${jar_sha}" > "${SHARED_DIR}/current-jar.sha256"
