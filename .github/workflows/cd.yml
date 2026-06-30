@@ -103,7 +103,6 @@ jobs:
     runs-on:
       - self-hosted
       - easysubway-production
-    environment: production
     concurrency:
       group: cd-production-deploy
       cancel-in-progress: false
@@ -259,6 +258,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
+          DEPLOY_COMPOSE_PROJECT="${DEPLOY_COMPOSE_PROJECT:-easysubway}"
           deploy_ready=true
           reason="ready"
           if [[ "${MODE}" == "preflight" ]]; then
@@ -267,9 +268,6 @@ jobs:
           elif [[ "${ENV_SOURCE}" != "secret" ]]; then
             deploy_ready=false
             reason="missing_easysubway_env"
-          elif [[ -z "${DEPLOY_ROOT}" || -z "${DEPLOY_COMPOSE_PROJECT}" ]]; then
-            deploy_ready=false
-            reason="missing_deploy_vars"
           elif [[ ! "${DEPLOY_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ || "${DEPLOY_ROOT}" == *..* ]]; then
             deploy_ready=false
             reason="invalid_deploy_root"
@@ -280,8 +278,8 @@ jobs:
 
           echo "deploy_ready=${deploy_ready}" >> "${GITHUB_OUTPUT}"
           echo "reason=${reason}" >> "${GITHUB_OUTPUT}"
-          echo "DEPLOY_ROOT=${DEPLOY_ROOT:-/opt/easysubway}" >> "${GITHUB_ENV}"
-          echo "DEPLOY_COMPOSE_PROJECT=${DEPLOY_COMPOSE_PROJECT:-easysubway}" >> "${GITHUB_ENV}"
+          echo "DEPLOY_ROOT=${DEPLOY_ROOT}" >> "${GITHUB_ENV}"
+          echo "DEPLOY_COMPOSE_PROJECT=${DEPLOY_COMPOSE_PROJECT}" >> "${GITHUB_ENV}"
 
       - name: CD Deploy / Run local deployment
         if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
