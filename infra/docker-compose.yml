@@ -18,7 +18,7 @@ services:
       start_period: 20s
 
   object-storage:
-    image: minio/minio:RELEASE.2026-06-13T11-33-47Z
+    image: minio/minio:RELEASE.2025-06-13T11-33-47Z
     container_name: easysubway-object-storage
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
