@@ -86,7 +86,7 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
       EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
-      EASYSUBWAY_PUSH_DELIVERY_ENABLED: ${EASYSUBWAY_PUSH_DELIVERY_ENABLED:-false}
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "true"
     logging:
       driver: json-file
       options:

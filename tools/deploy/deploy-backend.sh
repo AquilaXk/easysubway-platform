@@ -407,6 +407,7 @@ fail_backend_deployment() {
 		ln -sfn "$(readlink "${SHARED_DIR}/previous-env")" "${SHARED_DIR}/current-env.next"
 		mv -Tf "${SHARED_DIR}/current-env.next" "${SHARED_DIR}/current-env"
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}" || true
+		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" --profile observability up -d --no-build --force-recreate "${OBSERVABILITY_SERVICES[@]}" || true
 		write_result "failed" "${detail}_rollback_attempted"
 	else
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s "${RUNTIME_SERVICES[@]}" || true
