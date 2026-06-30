@@ -175,10 +175,27 @@ restore_legacy_backend_service() {
 
 restore_legacy_on_unhandled_error() {
 	local exit_code="$?"
-	trap - ERR
+	trap - ERR INT TERM HUP
 	if [[ "${legacy_restore_on_error}" -eq 1 ]]; then
 		restore_legacy_backend_service || true
 		write_result "failed" "legacy_restore_unhandled_error" || true
+		write_phase "interrupted" || true
+	fi
+	exit "${exit_code}"
+}
+
+restore_legacy_on_interruption() {
+	local signal="$1"
+	local exit_code=130
+	local detail="legacy_restore_interrupted_int"
+	case "${signal}" in
+		HUP) exit_code=129; detail="legacy_restore_interrupted_hup" ;;
+		TERM) exit_code=143; detail="legacy_restore_interrupted_term" ;;
+	esac
+	trap - ERR INT TERM HUP
+	if [[ "${legacy_restore_on_error}" -eq 1 ]]; then
+		restore_legacy_backend_service || true
+		write_result "failed" "${detail}" || true
 		write_phase "interrupted" || true
 	fi
 	exit "${exit_code}"
@@ -327,6 +344,9 @@ fi
 stop_legacy_backend_service
 legacy_restore_on_error=1
 trap restore_legacy_on_unhandled_error ERR
+trap 'restore_legacy_on_interruption INT' INT
+trap 'restore_legacy_on_interruption TERM' TERM
+trap 'restore_legacy_on_interruption HUP' HUP
 
 write_phase "started"
 env_set="${SHARED_DIR}/env-sets/${DEPLOY_SHA}-${target_env_hash}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -397,7 +417,7 @@ if [[ "${ready}" -ne 1 ]]; then
 fi
 
 legacy_restore_on_error=0
-trap - ERR
+trap - ERR INT TERM HUP
 
 printf '%s\n' "${DEPLOY_SHA}" > "${SHARED_DIR}/current-sha"
 printf '%s\n' "${jar_sha}" > "${SHARED_DIR}/current-jar.sha256"
