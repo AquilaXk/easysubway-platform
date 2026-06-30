@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
 DEPLOY_REPO_URL="${DEPLOY_REPO_URL:-https://github.com/AquilaXk/easysubway.git}"
