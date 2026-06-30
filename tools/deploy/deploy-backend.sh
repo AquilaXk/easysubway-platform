@@ -388,9 +388,6 @@ for _ in $(seq 1 60); do
 	sleep 5
 done
 
-legacy_restore_on_error=0
-trap - ERR
-
 if [[ "${ready}" -ne 1 ]]; then
 	diagnostic="${DIAGNOSTICS_DIR}/${DEPLOY_SHA}-$(date -u +%Y%m%dT%H%M%SZ).log"
 	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" logs --no-color --tail=200 backend > "${diagnostic}" 2>&1 || true
@@ -398,6 +395,9 @@ if [[ "${ready}" -ne 1 ]]; then
 	fail_backend_deployment "readiness_failed"
 	exit 1
 fi
+
+legacy_restore_on_error=0
+trap - ERR
 
 printf '%s\n' "${DEPLOY_SHA}" > "${SHARED_DIR}/current-sha"
 printf '%s\n' "${jar_sha}" > "${SHARED_DIR}/current-jar.sha256"
