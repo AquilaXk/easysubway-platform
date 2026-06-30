@@ -7,3 +7,27 @@ scrape_configs:
     metrics_path: "/actuator/prometheus"
     static_configs:
       - targets: ["host.docker.internal:8080"]
+
+  - job_name: "back_worker"
+    metrics_path: "/actuator/prometheus"
+    static_configs:
+      - targets: ["back-worker:8080"]
+
+  - job_name: "docker_runtime_probe"
+    static_configs:
+      - targets: ["docker-runtime-probe:8080"]
+
+  - job_name: "public_edge_probe"
+    metrics_path: "/probe"
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - "https://easysubway-api.aquilaxk.site/actuator/health/readiness"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: public-edge-probe:9115

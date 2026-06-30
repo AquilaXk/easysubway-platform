@@ -54,6 +54,7 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
       EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false"
     ports:
       - "${EASYSUBWAY_BACKEND_BIND:-127.0.0.1}:${EASYSUBWAY_BACKEND_PORT:-8080}:8080"
     logging:
@@ -66,6 +67,57 @@ services:
         condition: service_healthy
       object-storage:
         condition: service_healthy
+
+  back-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+        org.opencontainers.image.source: https://github.com/AquilaXk/easysubway
+        com.easysubway.jar.sha256: ${EASYSUBWAY_BACKEND_JAR_SHA256:-unknown}
+    image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+    container_name: easysubway-back-worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - ${EASYSUBWAY_BACKEND_ENV_FILE:-../.env.example}
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
+      EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: ${EASYSUBWAY_PUSH_DELIVERY_ENABLED:-false}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+
+  public-edge-probe:
+    image: prom/blackbox-exporter:v0.27.0
+    container_name: easysubway-public-edge-probe
+    profiles:
+      - observability
+
+  docker-runtime-probe:
+    image: ghcr.io/google/cadvisor:v0.55.1
+    container_name: easysubway-docker-runtime-probe
+    profiles:
+      - observability
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
 
   prometheus:
     image: prom/prometheus:v3.5.4
