@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: imresamu/postgis:16-3.5
+    image: imresamu/postgis:16-3.5@sha256:92031b614897082103c00729ea26e62f118ecb59b71e27b5c3ac3a8dc13bff23
     container_name: easysubway-postgres
     environment:
       POSTGRES_DB: ${EASYSUBWAY_POSTGRES_DB:-easysubway}
