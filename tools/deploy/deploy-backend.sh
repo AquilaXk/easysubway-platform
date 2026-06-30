@@ -408,7 +408,7 @@ if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/
 	fail_backend_deployment "backend_start_failed"
 	exit 1
 fi
-if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" --profile observability up -d --no-build "${OBSERVABILITY_SERVICES[@]}"; then
+if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" --profile observability up -d --no-build --force-recreate "${OBSERVABILITY_SERVICES[@]}"; then
 	fail_backend_deployment "observability_start_failed"
 	exit 1
 fi
