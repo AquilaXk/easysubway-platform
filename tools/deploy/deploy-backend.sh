@@ -158,6 +158,26 @@ compose() {
 	docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${compose_env}" -f infra/docker-compose.yml "$@"
 }
 
+compose_services_running() {
+	local backend_env="$1"
+	local compose_env="$2"
+	local image_tag="$3"
+	shift 3
+	local service
+	local container_id
+	local running
+	for service in "$@"; do
+		container_id="$(compose "${backend_env}" "${compose_env}" "${image_tag}" ps -q "${service}" 2>/dev/null || true)"
+		if [[ -z "${container_id}" ]]; then
+			return 1
+		fi
+		running="$(docker inspect --format '{{.State.Running}}' "${container_id}" 2>/dev/null || true)"
+		if [[ "${running}" != "true" ]]; then
+			return 1
+		fi
+	done
+}
+
 compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" config --quiet
 
 LEGACY_BACKEND_UNIT="easysubway-backend.service"
@@ -314,9 +334,10 @@ if [[ -f "${SHARED_DIR}/current-env/metadata.env" ]]; then
 fi
 
 if [[ "${current_sha}" == "${DEPLOY_SHA}" && "${current_env_hash}" == "${target_env_hash}" ]]; then
-	if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${backend_port}/actuator/health/readiness" >/dev/null 2>&1; then
+	if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${backend_port}/actuator/health/readiness" >/dev/null 2>&1 \
+		&& compose_services_running "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}"; then
 		write_phase "completed"
-		write_result "noop" "same_sha_same_env_ready"
+		write_result "noop" "same_sha_same_env_services_ready"
 		exit 0
 	fi
 fi
