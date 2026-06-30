@@ -40,7 +40,7 @@ CHECKSUM_FILE="${INCOMING_DIR}/backend.jar.sha256"
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
 RUNTIME_SERVICES=(backend back-worker)
-OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe prometheus loki grafana)
+OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana)
 
 for file in "${JAR_FILE}" "${CHECKSUM_FILE}" "${COMPOSE_ENV}" "${BACKEND_ENV}"; do
 	[[ -f "${file}" ]] || { printf 'missing staged file: %s\n' "${file}" >&2; exit 2; }
@@ -129,6 +129,76 @@ read_env_value() {
 	local name="$2"
 	sed -nE "s/^${name}=//p" "${file}" | tail -n 1 | sed -E 's/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/'
 }
+yaml_quote() {
+	local value="$1"
+	value="${value//\\/\\\\}"
+	value="${value//\"/\\\"}"
+	printf '"%s"' "${value}"
+}
+is_truthy_compose_env() {
+	local name="$1"
+	case "$(read_env_value "${COMPOSE_ENV}" "${name}" | tr '[:upper:]' '[:lower:]')" in
+		true|on|yes|1) true ;;
+		*) false ;;
+	esac
+}
+write_alertmanager_config() {
+	local path="$1"
+	if is_truthy_compose_env EASYSUBWAY_ALERT_EMAIL_ENABLED; then
+		for name in EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL EASYSUBWAY_ALERT_EMAIL_TO EASYSUBWAY_ALERT_EMAIL_FROM EASYSUBWAY_ALERT_SMTP_SMARTHOST EASYSUBWAY_ALERT_SMTP_USERNAME EASYSUBWAY_ALERT_SMTP_PASSWORD; do
+			if [[ -z "$(read_env_value "${COMPOSE_ENV}" "${name}")" ]]; then
+				write_result "blocked" "missing_${name}"
+				exit 1
+			fi
+		done
+		local require_tls
+		require_tls="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ALERT_SMTP_REQUIRE_TLS)"
+		require_tls="${require_tls:-true}"
+		require_tls="$(printf '%s' "${require_tls}" | tr '[:upper:]' '[:lower:]')"
+		case "${require_tls}" in
+			true|on|yes|1) require_tls=true ;;
+			false|off|no|0) require_tls=false ;;
+			*) write_result "blocked" "invalid_alert_smtp_require_tls"; exit 1 ;;
+		esac
+		{
+			printf 'templates:\n'
+			printf '  - /etc/alertmanager/templates/*.tmpl\n\n'
+			printf 'route:\n'
+			printf '  receiver: operations-email\n'
+			printf '  group_by: ["alertname", "service", "job"]\n'
+			printf '  group_wait: 30s\n'
+			printf '  group_interval: 5m\n'
+			printf '  repeat_interval: 3h\n\n'
+			printf 'receivers:\n'
+			printf '  - name: operations-email\n'
+			printf '    email_configs:\n'
+			printf '      - send_resolved: true\n'
+			printf '        to: %s\n' "$(yaml_quote "$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ALERT_EMAIL_TO)")"
+			printf '        from: %s\n' "$(yaml_quote "$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ALERT_EMAIL_FROM)")"
+			printf '        smarthost: %s\n' "$(yaml_quote "$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ALERT_SMTP_SMARTHOST)")"
+			printf '        auth_username: %s\n' "$(yaml_quote "$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ALERT_SMTP_USERNAME)")"
+			printf '        auth_password: %s\n' "$(yaml_quote "$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ALERT_SMTP_PASSWORD)")"
+			printf '        require_tls: %s\n' "${require_tls}"
+			printf '        headers:\n'
+			printf "          Subject: '{{ template \"easysubway.email.subject\" . }}'\n"
+			printf "        text: '{{ template \"easysubway.email.text\" . }}'\n"
+			printf "        html: '{{ template \"easysubway.email.html\" . }}'\n"
+		} > "${path}"
+	else
+		{
+			printf 'templates:\n'
+			printf '  - /etc/alertmanager/templates/*.tmpl\n\n'
+			printf 'route:\n'
+			printf '  receiver: operations-null\n'
+			printf '  group_by: ["alertname", "service", "job"]\n'
+			printf '  group_wait: 30s\n'
+			printf '  group_interval: 5m\n'
+			printf '  repeat_interval: 3h\n\n'
+			printf 'receivers:\n'
+			printf '  - name: operations-null\n'
+		} > "${path}"
+	fi
+}
 ensure_backend_env_value() {
 	local name="$1"
 	local value="$2"
@@ -155,6 +225,7 @@ compose() {
 	EASYSUBWAY_BACKEND_ENV_FILE="${backend_env}" \
 	EASYSUBWAY_BACKEND_IMAGE_TAG="${image_tag}" \
 	EASYSUBWAY_BACKEND_JAR_SHA256="${jar_sha}" \
+	EASYSUBWAY_ALERTMANAGER_CONFIG_FILE="${SHARED_DIR}/current-env/alertmanager.yml" \
 	docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${compose_env}" -f infra/docker-compose.yml "$@"
 }
 
@@ -387,12 +458,13 @@ mkdir -p "${tmp_env_set}"
 chmod 700 "${tmp_env_set}"
 cp "${COMPOSE_ENV}" "${tmp_env_set}/compose.env"
 cp "${BACKEND_ENV}" "${tmp_env_set}/backend.env"
+write_alertmanager_config "${tmp_env_set}/alertmanager.yml"
 {
 	printf 'sha=%s\n' "${DEPLOY_SHA}"
 	printf 'jar_sha256=%s\n' "${jar_sha}"
 	printf 'env_hash=%s\n' "${target_env_hash}"
 } > "${tmp_env_set}/metadata.env"
-chmod 600 "${tmp_env_set}/compose.env" "${tmp_env_set}/backend.env" "${tmp_env_set}/metadata.env"
+chmod 600 "${tmp_env_set}/compose.env" "${tmp_env_set}/backend.env" "${tmp_env_set}/alertmanager.yml" "${tmp_env_set}/metadata.env"
 mv "${tmp_env_set}" "${env_set}"
 if [[ -L "${SHARED_DIR}/current-env" ]]; then
 	previous_target="$(readlink "${SHARED_DIR}/current-env")"

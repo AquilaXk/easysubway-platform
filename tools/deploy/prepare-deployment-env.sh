@@ -108,6 +108,25 @@ require_port() {
 	fi
 }
 
+require_bool() {
+	local name="$1"
+	local raw
+	raw="$(printf '%s' "$(value "${name}")" | tr '[:upper:]' '[:lower:]')"
+	[[ -z "${raw}" ]] && return 0
+	case "${raw}" in
+		true|false|on|off|yes|no|1|0) ;;
+		*) printf 'invalid boolean: %s\n' "${name}" >&2; exit 1 ;;
+	esac
+}
+
+is_truthy() {
+	local name="$1"
+	case "$(printf '%s' "$(value "${name}")" | tr '[:upper:]' '[:lower:]')" in
+		true|on|yes|1) true ;;
+		*) false ;;
+	esac
+}
+
 require_nonempty EASYSUBWAY_ADMIN_USERNAME
 require_nonempty EASYSUBWAY_ADMIN_PASSWORD
 require_nonempty EASYSUBWAY_POSTGRES_USER
@@ -173,10 +192,32 @@ require_port EASYSUBWAY_POSTGRES_PORT
 require_port EASYSUBWAY_OBJECT_STORAGE_PORT
 require_port EASYSUBWAY_OBJECT_STORAGE_CONSOLE_PORT
 require_port EASYSUBWAY_BACKEND_PORT
+require_port EASYSUBWAY_PROMETHEUS_PORT
+require_port EASYSUBWAY_ALERTMANAGER_PORT
+require_bool EASYSUBWAY_ALERT_EMAIL_ENABLED
+require_bool EASYSUBWAY_ALERT_SMTP_REQUIRE_TLS
 
 if [[ "$(value EASYSUBWAY_POSTGRES_PORT)" == "5432" ]]; then
 	printf 'postgres host port 5432 is reserved on the production host\n' >&2
 	exit 1
+fi
+
+if is_truthy EASYSUBWAY_ALERT_EMAIL_ENABLED; then
+	require_nonempty EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL
+	require_nonempty EASYSUBWAY_ALERT_EMAIL_TO
+	require_nonempty EASYSUBWAY_ALERT_EMAIL_FROM
+	require_nonempty EASYSUBWAY_ALERT_SMTP_SMARTHOST
+	require_nonempty EASYSUBWAY_ALERT_SMTP_USERNAME
+	require_nonempty EASYSUBWAY_ALERT_SMTP_PASSWORD
+	alertmanager_url="$(value EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL)"
+	if [[ ! "${alertmanager_url}" =~ ^https://[^/@\?#:]+(:[0-9]+)?(/.*)?$ ]]; then
+		printf 'alertmanager external URL must be an HTTPS URL\n' >&2
+		exit 1
+	fi
+	alertmanager_url_normalized="$(printf '%s' "${alertmanager_url}" | tr '[:upper:]' '[:lower:]')"
+	case "${alertmanager_url_normalized}" in
+		http://*|https://localhost*|https://127.*|https://[::1]*|https://alertmanager:*|https://prometheus:*) printf 'alertmanager external URL must not be internal\n' >&2; exit 1 ;;
+	esac
 fi
 
 mkdir -p "${output_dir}"

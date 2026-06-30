@@ -1,0 +1,29 @@
+{{ define "easysubway.email.subject" }}[EasySubway 운영][{{ .Status | toUpper }}:{{ len .Alerts.Firing }}] {{ .CommonLabels.alertname }}{{ end }}
+
+{{ define "easysubway.email.text" -}}
+상태: {{ .Status }}
+{{ if .ExternalURL }}Alertmanager: {{ .ExternalURL }}
+{{ end }}
+{{ range .Alerts }}
+- 알림: {{ .Labels.alertname }}
+  심각도: {{ .Labels.severity }}
+  서비스: {{ or .Labels.service .Labels.job }}
+  요약: {{ .Annotations.summary }}
+  설명: {{ .Annotations.description }}
+  시작: {{ .StartsAt }}
+{{ end }}
+{{- end }}
+
+{{ define "easysubway.email.html" -}}
+<h2>EasySubway 운영 알림: {{ .Status }}</h2>
+{{ if .ExternalURL }}<p><a href="{{ .ExternalURL }}">Alertmanager에서 보기</a></p>{{ end }}
+{{ range .Alerts }}
+<hr>
+<p><strong>알림</strong>: {{ .Labels.alertname }}</p>
+<p><strong>심각도</strong>: {{ .Labels.severity }}</p>
+<p><strong>서비스</strong>: {{ or .Labels.service .Labels.job }}</p>
+<p><strong>요약</strong>: {{ .Annotations.summary }}</p>
+<p><strong>설명</strong>: {{ .Annotations.description }}</p>
+<p><strong>시작</strong>: {{ .StartsAt }}</p>
+{{ end }}
+{{- end }}
