@@ -464,7 +464,9 @@ write_alertmanager_config "${tmp_env_set}/alertmanager.yml"
 	printf 'jar_sha256=%s\n' "${jar_sha}"
 	printf 'env_hash=%s\n' "${target_env_hash}"
 } > "${tmp_env_set}/metadata.env"
-chmod 600 "${tmp_env_set}/compose.env" "${tmp_env_set}/backend.env" "${tmp_env_set}/alertmanager.yml" "${tmp_env_set}/metadata.env"
+chmod 600 "${tmp_env_set}/compose.env" "${tmp_env_set}/backend.env" "${tmp_env_set}/metadata.env"
+# Alertmanager runs as nobody in the official image; the private env-set directory keeps this config scoped.
+chmod 644 "${tmp_env_set}/alertmanager.yml"
 mv "${tmp_env_set}" "${env_set}"
 if [[ -L "${SHARED_DIR}/current-env" ]]; then
 	previous_target="$(readlink "${SHARED_DIR}/current-env")"
