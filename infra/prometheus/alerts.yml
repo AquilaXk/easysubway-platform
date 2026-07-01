@@ -10,6 +10,9 @@ groups:
         annotations:
           summary: Public edge probe scrape is down
           description: Prometheus cannot scrape public_edge_probe for 5m. Check the exporter container, live probe refresh loop, and network path.
+          title_ko: "공개 접속 점검 실패"
+          impact_ko: "외부에서 API readiness를 확인하는 관측 신호가 멈췄습니다."
+          action_ko: "public-edge-probe 컨테이너 상태와 외부 HTTPS readiness 응답을 확인하세요."
 
       - alert: AquilaDockerRuntimeProbeScrapeDown
         expr: min(up{job="docker_runtime_probe"}) < 1
@@ -20,6 +23,9 @@ groups:
         annotations:
           summary: docker runtime probe scrape is down
           description: Prometheus cannot scrape docker_runtime_probe for 3m. Check probe container health and docker socket access.
+          title_ko: "Docker 런타임 점검 실패"
+          impact_ko: "컨테이너 상태 관측 신호가 멈춰 Docker 기반 장애 탐지가 늦어질 수 있습니다."
+          action_ko: "docker-runtime-probe 컨테이너 상태와 Docker socket 접근 권한을 확인하세요."
 
       - alert: AquilaBackWorkerScrapeDown
         expr: min(up{job="back_worker"}) < 1
@@ -30,3 +36,6 @@ groups:
         annotations:
           summary: Back worker metrics scrape is down
           description: Prometheus cannot scrape the backend worker target for 3m. Task queue and DLQ alerts may stop evaluating.
+          title_ko: "백그라운드 작업자 상태 점검 실패"
+          impact_ko: "작업 큐와 DLQ 관련 알림 평가가 늦거나 멈출 수 있습니다."
+          action_ko: "back-worker 컨테이너 상태와 /actuator/health/readiness 응답을 확인하세요."
