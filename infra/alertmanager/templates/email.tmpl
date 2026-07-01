@@ -1,29 +1,65 @@
-{{ define "easysubway.email.subject" }}[EasySubway 운영][{{ .Status | toUpper }}:{{ len .Alerts.Firing }}] {{ .CommonLabels.alertname }}{{ end }}
+{{ define "easysubway.status_ko" -}}
+{{- if eq . "firing" -}}장애 발생{{- else if eq . "resolved" -}}복구{{- else -}}{{ . }}{{- end -}}
+{{- end }}
+
+{{ define "easysubway.severity_ko" -}}
+{{- if eq . "critical" -}}긴급{{- else if eq . "warning" -}}주의{{- else if . -}}{{ . }}{{- else -}}미분류{{- end -}}
+{{- end }}
+
+{{ define "easysubway.email.subject" -}}
+{{- $title := or (index .CommonAnnotations "title_ko") (index .CommonAnnotations "summary") .CommonLabels.alertname -}}
+{{- $severity := or .CommonLabels.severity "unknown" -}}
+[쉬운지하철 운영][{{ template "easysubway.status_ko" .Status }}][{{ template "easysubway.severity_ko" $severity }}] {{ $title }}
+{{- end }}
 
 {{ define "easysubway.email.text" -}}
-상태: {{ .Status }}
-{{ if .ExternalURL }}Alertmanager: {{ .ExternalURL }}
-{{ end }}
+{{- $root := . -}}
 {{ range .Alerts }}
-- 알림: {{ .Labels.alertname }}
-  심각도: {{ .Labels.severity }}
-  서비스: {{ or .Labels.service .Labels.job }}
-  요약: {{ .Annotations.summary }}
-  설명: {{ .Annotations.description }}
-  시작: {{ .StartsAt }}
+쉬운지하철 운영 알림
+
+상태: {{ template "easysubway.status_ko" .Status }}
+심각도: {{ template "easysubway.severity_ko" .Labels.severity }}
+대상: {{ or .Labels.service .Labels.job }}
+알림: {{ or (index .Annotations "title_ko") (index .Annotations "summary") .Labels.alertname }}
+
+영향
+{{ or (index .Annotations "impact_ko") (index .Annotations "description") }}
+
+확인할 것
+{{ or (index .Annotations "action_ko") "Alertmanager와 관련 서비스 상태를 확인하세요." }}
+
+시작 시각
+{{ .StartsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 -0700" }}
+
+{{ if $root.ExternalURL }}Alertmanager에서 보기
+{{ $root.ExternalURL }}
+{{ end }}
+
+내부 알림명: {{ .Labels.alertname }}
+job: {{ .Labels.job }}
+service: {{ .Labels.service }}
+
 {{ end }}
 {{- end }}
 
 {{ define "easysubway.email.html" -}}
-<h2>EasySubway 운영 알림: {{ .Status }}</h2>
-{{ if .ExternalURL }}<p><a href="{{ .ExternalURL }}">Alertmanager에서 보기</a></p>{{ end }}
+{{- $root := . -}}
+<h2>쉬운지하철 운영 알림</h2>
 {{ range .Alerts }}
+<table role="presentation" cellpadding="6" cellspacing="0" style="border-collapse:collapse;border:1px solid #d0d7de;width:100%;max-width:720px">
+  <tr><th align="left">상태</th><td>{{ template "easysubway.status_ko" .Status }}</td></tr>
+  <tr><th align="left">심각도</th><td>{{ template "easysubway.severity_ko" .Labels.severity }}</td></tr>
+  <tr><th align="left">대상</th><td>{{ or .Labels.service .Labels.job }}</td></tr>
+  <tr><th align="left">알림</th><td>{{ or (index .Annotations "title_ko") (index .Annotations "summary") .Labels.alertname }}</td></tr>
+</table>
+<h3>영향</h3>
+<p>{{ or (index .Annotations "impact_ko") (index .Annotations "description") }}</p>
+<h3>확인할 것</h3>
+<p>{{ or (index .Annotations "action_ko") "Alertmanager와 관련 서비스 상태를 확인하세요." }}</p>
+<h3>시작 시각</h3>
+<p>{{ .StartsAt | tz "Asia/Seoul" | date "2006-01-02 15:04:05 -0700" }}</p>
+{{ if $root.ExternalURL }}<p><a href="{{ $root.ExternalURL }}">Alertmanager에서 보기</a></p>{{ end }}
 <hr>
-<p><strong>알림</strong>: {{ .Labels.alertname }}</p>
-<p><strong>심각도</strong>: {{ .Labels.severity }}</p>
-<p><strong>서비스</strong>: {{ or .Labels.service .Labels.job }}</p>
-<p><strong>요약</strong>: {{ .Annotations.summary }}</p>
-<p><strong>설명</strong>: {{ .Annotations.description }}</p>
-<p><strong>시작</strong>: {{ .StartsAt }}</p>
+<p><small>내부 알림명: {{ .Labels.alertname }}<br>job: {{ .Labels.job }}<br>service: {{ .Labels.service }}</small></p>
 {{ end }}
 {{- end }}
