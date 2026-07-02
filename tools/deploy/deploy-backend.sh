@@ -509,6 +509,25 @@ if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/
 	exit 1
 fi
 
+observability_ready=0
+for _ in $(seq 1 12); do
+	if compose_services_running "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}"; then
+		observability_ready=1
+		break
+	fi
+	sleep 5
+done
+
+if [[ "${observability_ready}" -ne 1 ]]; then
+	diagnostic="$(mktemp "${DIAGNOSTICS_DIR}/${DEPLOY_SHA}-observability-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX.log")"
+	chmod 600 "${diagnostic}"
+	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" --profile observability ps > "${diagnostic}" 2>&1 || true
+	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" --profile observability logs --no-color --tail=200 "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}" >> "${diagnostic}" 2>&1 || true
+	chmod 600 "${diagnostic}"
+	fail_backend_deployment "observability_readiness_failed"
+	exit 1
+fi
+
 ready=0
 for _ in $(seq 1 60); do
 	if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${backend_port}/actuator/health/readiness" >/dev/null 2>&1; then
@@ -519,7 +538,8 @@ for _ in $(seq 1 60); do
 done
 
 if [[ "${ready}" -ne 1 ]]; then
-	diagnostic="${DIAGNOSTICS_DIR}/${DEPLOY_SHA}-$(date -u +%Y%m%dT%H%M%SZ).log"
+	diagnostic="$(mktemp "${DIAGNOSTICS_DIR}/${DEPLOY_SHA}-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX.log")"
+	chmod 600 "${diagnostic}"
 	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" logs --no-color --tail=200 "${RUNTIME_SERVICES[@]}" > "${diagnostic}" 2>&1 || true
 	chmod 600 "${diagnostic}"
 	fail_backend_deployment "readiness_failed"
