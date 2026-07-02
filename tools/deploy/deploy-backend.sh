@@ -41,6 +41,7 @@ COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
 RUNTIME_SERVICES=(backend back-worker)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana)
+OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana)
 
 for file in "${JAR_FILE}" "${CHECKSUM_FILE}" "${COMPOSE_ENV}" "${BACKEND_ENV}"; do
 	[[ -f "${file}" ]] || { printf 'missing staged file: %s\n' "${file}" >&2; exit 2; }
@@ -249,6 +250,20 @@ compose_services_running() {
 	done
 }
 
+start_observability_services() {
+	local backend_env="$1"
+	local compose_env="$2"
+	local image_tag="$3"
+	local recreate_alertmanager="$4"
+	local recreate_config_services="$5"
+	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build "${OBSERVABILITY_SERVICES[@]}" || return 1
+	if [[ "${recreate_config_services}" -eq 1 ]]; then
+		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --force-recreate "${OBSERVABILITY_CONFIG_SERVICES[@]}" || return 1
+	elif [[ "${recreate_alertmanager}" -eq 1 ]]; then
+		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --force-recreate alertmanager || return 1
+	fi
+}
+
 compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" config --quiet
 
 LEGACY_BACKEND_UNIT="easysubway-backend.service"
@@ -403,6 +418,16 @@ current_env_hash=""
 if [[ -f "${SHARED_DIR}/current-env/metadata.env" ]]; then
 	current_env_hash="$(sed -n 's/^env_hash=//p' "${SHARED_DIR}/current-env/metadata.env")"
 fi
+recreate_alertmanager=0
+if [[ "${current_env_hash}" != "${target_env_hash}" ]]; then
+	recreate_alertmanager=1
+fi
+recreate_observability_config=0
+if [[ -z "${current_sha}" ]]; then
+	recreate_observability_config=1
+elif ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/prometheus infra/alertmanager/templates infra/loki infra/grafana/provisioning; then
+	recreate_observability_config=1
+fi
 
 if [[ "${current_sha}" == "${DEPLOY_SHA}" && "${current_env_hash}" == "${target_env_hash}" ]]; then
 	if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${backend_port}/actuator/health/readiness" >/dev/null 2>&1 \
@@ -481,7 +506,7 @@ fail_backend_deployment() {
 		ln -sfn "$(readlink "${SHARED_DIR}/previous-env")" "${SHARED_DIR}/current-env.next"
 		mv -Tf "${SHARED_DIR}/current-env.next" "${SHARED_DIR}/current-env"
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}" || true
-		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" --profile observability up -d --no-build --force-recreate "${OBSERVABILITY_SERVICES[@]}" || true
+		start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" "${recreate_alertmanager}" "${recreate_observability_config}" || true
 		write_result "failed" "${detail}_rollback_attempted"
 	else
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s "${RUNTIME_SERVICES[@]}" || true
@@ -504,7 +529,7 @@ if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/
 	fail_backend_deployment "backend_start_failed"
 	exit 1
 fi
-if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" --profile observability up -d --no-build --force-recreate "${OBSERVABILITY_SERVICES[@]}"; then
+if ! start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${recreate_alertmanager}" "${recreate_observability_config}"; then
 	fail_backend_deployment "observability_start_failed"
 	exit 1
 fi
