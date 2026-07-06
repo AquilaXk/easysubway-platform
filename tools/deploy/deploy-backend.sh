@@ -6,12 +6,20 @@ DEPLOY_REPO_URL="${DEPLOY_REPO_URL:-https://github.com/AquilaXk/easysubway.git}"
 DEPLOY_COMPOSE_PROJECT="${DEPLOY_COMPOSE_PROJECT:?DEPLOY_COMPOSE_PROJECT is required}"
 DEPLOY_SHA="${DEPLOY_SHA:?DEPLOY_SHA is required}"
 INCOMING_DIR="${INCOMING_DIR:?INCOMING_DIR is required}"
+# GHCR image digest of the arm64 image the CD build-image job pushed for this
+# SHA (issue #1686). The image is pulled and retagged as easysubway-backend:SHA
+# by the CD deploy job before this script runs; here we only verify identity.
+DEPLOY_IMAGE_DIGEST="${DEPLOY_IMAGE_DIGEST:?DEPLOY_IMAGE_DIGEST is required}"
 
 case "${DEPLOY_SHA}" in
 	*[!0-9a-f]*|"") printf 'invalid DEPLOY_SHA\n' >&2; exit 2 ;;
 esac
 if [[ ${#DEPLOY_SHA} -ne 40 ]]; then
 	printf 'invalid DEPLOY_SHA length\n' >&2
+	exit 2
+fi
+if [[ ! "${DEPLOY_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+	printf 'invalid DEPLOY_IMAGE_DIGEST\n' >&2
 	exit 2
 fi
 if [[ "${DEPLOY_REPO_URL}" != "https://github.com/AquilaXk/easysubway.git" ]]; then
@@ -35,15 +43,20 @@ STATE_FILE="${SHARED_DIR}/deployment-state.env"
 RESULT_FILE="${SHARED_DIR}/last-result.env"
 LOCK_FILE="${DEPLOY_ROOT}/deploy.lock"
 
-JAR_FILE="${INCOMING_DIR}/backend.jar"
-CHECKSUM_FILE="${INCOMING_DIR}/backend.jar.sha256"
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
 RUNTIME_SERVICES=(backend back-worker)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana)
 OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana)
 
-for file in "${JAR_FILE}" "${CHECKSUM_FILE}" "${COMPOSE_ENV}" "${BACKEND_ENV}"; do
+# The image content sha (digest hex) replaces the former jar sha256 as the
+# deployed-artifact identity; it flows into the compose metadata label.
+image_digest_hex="${DEPLOY_IMAGE_DIGEST#sha256:}"
+# GHCR repository the CD build-image job pushes to; used as the rollback source
+# of truth when a previous image is no longer in the server-local cache.
+GHCR_IMAGE="${DEPLOY_GHCR_IMAGE:-ghcr.io/aquilaxk/easysubway-backend}"
+
+for file in "${COMPOSE_ENV}" "${BACKEND_ENV}"; do
 	[[ -f "${file}" ]] || { printf 'missing staged file: %s\n' "${file}" >&2; exit 2; }
 	chmod 600 "${file}"
 done
@@ -119,11 +132,6 @@ fi
 
 git checkout --detach "${DEPLOY_SHA}"
 git clean -ffdx
-
-pushd "${INCOMING_DIR}" >/dev/null
-sha256sum -c "$(basename "${CHECKSUM_FILE}")"
-popd >/dev/null
-jar_sha="$(cut -d ' ' -f 1 "${CHECKSUM_FILE}")"
 
 read_env_value() {
 	local file="$1"
@@ -225,7 +233,7 @@ compose() {
 	shift 3
 	EASYSUBWAY_BACKEND_ENV_FILE="${backend_env}" \
 	EASYSUBWAY_BACKEND_IMAGE_TAG="${image_tag}" \
-	EASYSUBWAY_BACKEND_JAR_SHA256="${jar_sha}" \
+	EASYSUBWAY_BACKEND_JAR_SHA256="${image_digest_hex}" \
 	EASYSUBWAY_ALERTMANAGER_CONFIG_FILE="${SHARED_DIR}/current-env/alertmanager.yml" \
 	docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${compose_env}" -f infra/docker-compose.yml "$@"
 }
@@ -340,7 +348,7 @@ stop_legacy_backend_service() {
 
 EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
 EASYSUBWAY_BACKEND_IMAGE_TAG="${DEPLOY_SHA}" \
-EASYSUBWAY_BACKEND_JAR_SHA256="${jar_sha}" \
+EASYSUBWAY_BACKEND_JAR_SHA256="${image_digest_hex}" \
 	timeout 600 docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${COMPOSE_ENV}" -f infra/docker-compose.yml up -d --no-build postgres object-storage
 
 wait_stateful_service() {
@@ -438,19 +446,23 @@ if [[ "${current_sha}" == "${DEPLOY_SHA}" && "${current_env_hash}" == "${target_
 	fi
 fi
 
-mkdir -p backend/build/libs
-cp "${JAR_FILE}" backend/build/libs/app.jar
-
-needs_build=1
-if [[ "${current_sha}" == "${DEPLOY_SHA}" ]]; then
-	needs_build=0
+# build-once, deploy-same: the arm64 image was built and pushed to GHCR by the
+# CD build-image job, then pulled and retagged as easysubway-backend:SHA by the
+# CD deploy job. There is no on-server build; we only verify the pulled image is
+# exactly the digest CI produced, and that it carries the expected revision.
+if ! docker image inspect "easysubway-backend:${DEPLOY_SHA}" >/dev/null 2>&1; then
+	write_result "blocked" "image_missing"
+	exit 1
 fi
-
-if [[ "${needs_build}" -eq 1 ]]; then
-	EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
-	EASYSUBWAY_BACKEND_IMAGE_TAG="${DEPLOY_SHA}" \
-	EASYSUBWAY_BACKEND_JAR_SHA256="${jar_sha}" \
-		timeout 900 docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${COMPOSE_ENV}" -f infra/docker-compose.yml build backend
+repo_digests="$(docker image inspect "easysubway-backend:${DEPLOY_SHA}" --format '{{join .RepoDigests "\n"}}' 2>/dev/null || true)"
+if ! grep -qF "@${DEPLOY_IMAGE_DIGEST}" <<<"${repo_digests}"; then
+	write_result "blocked" "image_digest_mismatch"
+	exit 1
+fi
+image_revision="$(docker image inspect "easysubway-backend:${DEPLOY_SHA}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+if [[ "${image_revision}" != "${DEPLOY_SHA}" ]]; then
+	write_result "blocked" "image_revision_mismatch"
+	exit 1
 fi
 
 needs_backup=0
@@ -486,7 +498,7 @@ cp "${BACKEND_ENV}" "${tmp_env_set}/backend.env"
 write_alertmanager_config "${tmp_env_set}/alertmanager.yml"
 {
 	printf 'sha=%s\n' "${DEPLOY_SHA}"
-	printf 'jar_sha256=%s\n' "${jar_sha}"
+	printf 'image_digest=%s\n' "${DEPLOY_IMAGE_DIGEST}"
 	printf 'env_hash=%s\n' "${target_env_hash}"
 } > "${tmp_env_set}/metadata.env"
 chmod 600 "${tmp_env_set}/compose.env" "${tmp_env_set}/backend.env" "${tmp_env_set}/metadata.env"
@@ -500,11 +512,32 @@ fi
 ln -sfn "${env_set}" "${SHARED_DIR}/current-env.next"
 mv -Tf "${SHARED_DIR}/current-env.next" "${SHARED_DIR}/current-env"
 
+ensure_rollback_image() {
+	local sha="$1"
+	if docker image inspect "easysubway-backend:${sha}" >/dev/null 2>&1; then
+		return 0
+	fi
+	# Local image was pruned; restore it from GHCR using the digest recorded when
+	# that SHA was deployed (issue #1686 — removes server-local cache dependence).
+	local prev_digest=""
+	if [[ -f "${SHARED_DIR}/previous-env/metadata.env" ]]; then
+		prev_digest="$(sed -n 's/^image_digest=//p' "${SHARED_DIR}/previous-env/metadata.env")"
+	fi
+	if [[ ! "${prev_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+		return 1
+	fi
+	if ! timeout 300 docker pull "${GHCR_IMAGE}@${prev_digest}" >/dev/null 2>&1; then
+		return 1
+	fi
+	docker tag "${GHCR_IMAGE}@${prev_digest}" "easysubway-backend:${sha}"
+}
+
 fail_backend_deployment() {
 	local detail="$1"
 	if [[ -n "${current_sha}" && -L "${SHARED_DIR}/previous-env" ]]; then
 		ln -sfn "$(readlink "${SHARED_DIR}/previous-env")" "${SHARED_DIR}/current-env.next"
 		mv -Tf "${SHARED_DIR}/current-env.next" "${SHARED_DIR}/current-env"
+		ensure_rollback_image "${current_sha}" || true
 		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}" || true
 		start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" "${recreate_alertmanager}" "${recreate_observability_config}" || true
 		write_result "failed" "${detail}_rollback_attempted"
@@ -575,7 +608,7 @@ legacy_restore_on_error=0
 trap - ERR INT TERM HUP
 
 printf '%s\n' "${DEPLOY_SHA}" > "${SHARED_DIR}/current-sha"
-printf '%s\n' "${jar_sha}" > "${SHARED_DIR}/current-jar.sha256"
-chmod 600 "${SHARED_DIR}/current-sha" "${SHARED_DIR}/current-jar.sha256"
+printf '%s\n' "${DEPLOY_IMAGE_DIGEST}" > "${SHARED_DIR}/current-image-digest"
+chmod 600 "${SHARED_DIR}/current-sha" "${SHARED_DIR}/current-image-digest"
 write_phase "completed"
 write_result "success" "backend_ready"
