@@ -105,10 +105,16 @@ jobs:
     permissions:
       actions: read
       contents: read
+    environment:
+      name: production
+      url: ${{ vars.DEPLOY_PUBLIC_API_BASE_URL }}
     concurrency:
       group: cd-production-deploy
       cancel-in-progress: false
     if: ${{ needs.plan.outputs.deploy_target_relevant == 'true' }}
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+      deploy_ready: ${{ steps.remote.outputs.deploy_ready }}
 
     steps:
       - name: CD Deploy / Checkout repository
@@ -375,6 +381,49 @@ jobs:
           fi
           rm -rf "${RUNNER_TEMP}/deploy-env"
 
+  record-deploy:
+    name: CD Record deployment
+    needs: deploy
+    runs-on: ubuntu-latest
+    # Only this job may write refs; the self-hosted deploy job stays read-only.
+    permissions:
+      contents: write
+    if: ${{ needs.deploy.result == 'success' && needs.deploy.outputs.deploy_ready == 'true' }}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: CD Record deployment / Tag deployed SHA
+        id: tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${DEPLOY_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "record-deploy received an invalid sha" >&2
+            exit 1
+          fi
+
+          tag="deploy/backend/$(date -u +%Y%m%d-%H%M)-${DEPLOY_SHA:0:12}"
+          # Lightweight tag on the deployed commit — GitHub-side deploy history
+          # to complement the environment deployment record (issue #1687). Uses
+          # curl (not gh) to match cd.yml's existing GitHub API convention.
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs" \
+            -d "{\"ref\":\"refs/tags/${tag}\",\"sha\":\"${DEPLOY_SHA}\"}"
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### CD deployment recorded"
+            echo "- sha: \`${DEPLOY_SHA}\`"
+            echo "- tag: \`${tag}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   notify-slack-cd-result:
     name: Slack / CD result
     runs-on: ubuntu-latest
@@ -382,6 +431,7 @@ jobs:
     needs:
       - plan
       - deploy
+      - record-deploy
     if: >-
       ${{
         always() &&
@@ -410,5 +460,7 @@ jobs:
                     *EasySubway CD ${{ contains(needs.*.result, 'failure') && '실패' || contains(needs.*.result, 'cancelled') && '취소' || '성공' }}*
                     • repo: `${{ github.repository }}`
                     • ref: `${{ github.ref_name }}`
+                    • sha: `${{ needs.deploy.outputs.sha || 'unknown' }}`
+                    • tag: `${{ needs.record-deploy.outputs.tag || 'not_recorded' }}`
                     • actor: `${{ github.actor }}`
                     • run: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Actions 열기>
