@@ -33,7 +33,7 @@
       "minItineraries": 1,
       "legEtaSourceField": "etaSource",
       "acceptedNoServiceStatuses": ["NO_TIMETABLE_SERVICE"],
-      "noServiceNoteKo": "프로덕션 데이터팩에 시간표(stop_times)가 아직 적재되지 않으면 NO_TIMETABLE_SERVICE로 응답한다(#1415 갭). 유효한 V2 응답 + 이 status면 엔드포인트 건강성으로 PASS, 데이터 완성도는 #1415가 담당한다.",
+      "noServiceNoteKo": "커버리지 게이트(#1838) 이후: 시간표 미적재/비커버 O/D는 graph 검색으로 폴백(FOUND)하고, NO_TIMETABLE_SERVICE는 커버 코리도의 막차후(현재 서비스 없음)에 국한된다. 스모크는 유효한 V2 응답이면 엔드포인트 건강성으로 PASS하며 두 status 모두 허용, 데이터 완성도는 #1415가 담당한다.",
       "downgradeLadderNoteKo": "강등 사다리 존중: leg의 etaSource가 REALTIME이 아니어도(PLANNED·STATIC_BACKEND_ESTIMATE 등) 실패로 처리하지 않는다. 실시간 provider 상태에 의존하는 flaky 게이트를 만들지 않기 위해 useRealtime=false로 고정한다."
     },
     "adminLogin": {
