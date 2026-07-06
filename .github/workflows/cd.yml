@@ -340,20 +340,10 @@ jobs:
             INCOMING_DIR="${incoming}" \
             bash "${incoming}/deploy-backend.sh"
 
-      - name: CD Deploy / Verify public readiness
-        if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
-        shell: bash
-        env:
-          DEPLOY_PUBLIC_API_BASE_URL: ${{ vars.DEPLOY_PUBLIC_API_BASE_URL }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${DEPLOY_PUBLIC_API_BASE_URL}" ]]; then
-            echo "::notice title=CD public readiness::DEPLOY_PUBLIC_API_BASE_URL is not configured; remote local readiness was already checked."
-            exit 0
-          fi
-
-          curl -fsS --retry 6 --retry-delay 10 --max-time 10 "${DEPLOY_PUBLIC_API_BASE_URL%/}/actuator/health/readiness"
+      # Public readiness is now one axis of the post-deploy-smoke job (below),
+      # which runs on ubuntu-latest so it also verifies true external
+      # reachability of the deployed URL (issue #1688). Local readiness is
+      # already enforced inside deploy-backend.sh before the container swap.
 
       - name: CD Deploy / Summarize deployment result
         if: ${{ always() }}
@@ -380,6 +370,61 @@ jobs:
             rm -f "${EASYSUBWAY_ENV_FILE}"
           fi
           rm -rf "${RUNNER_TEMP}/deploy-env"
+
+  post-deploy-smoke:
+    name: Post-deploy smoke
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: ${{ needs.deploy.outputs.deploy_ready == 'true' }}
+    steps:
+      - name: Post-deploy smoke / Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Post-deploy smoke / Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+
+      - name: Post-deploy smoke / Run core API smoke
+        shell: bash
+        env:
+          DEPLOY_PUBLIC_API_BASE_URL: ${{ vars.DEPLOY_PUBLIC_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          # A configured public base URL is required: "not configured, so it
+          # passed" is not a gate (issue #1688). Set the repo variable
+          # DEPLOY_PUBLIC_API_BASE_URL to the live deployment URL.
+          if [[ -z "${DEPLOY_PUBLIC_API_BASE_URL}" ]]; then
+            echo "::error title=Post-deploy smoke::DEPLOY_PUBLIC_API_BASE_URL repo variable is not configured." >&2
+            exit 1
+          fi
+
+          # The datapack distribution URL is the contract default in
+          # post-deploy-smoke-contract.json (the same OCI value pinned by the
+          # repository contract test); no workflow var override is used.
+          #
+          # A public smoke failure is intentionally NOT auto-rolled back: local
+          # readiness already passed inside deploy-backend.sh, so a failure here
+          # is likely edge/DNS/datapack-URL and auto-reverting a healthy deploy
+          # is the larger risk. The job fails and notify-slack-cd-result alerts.
+          node tools/ops/post-deploy-smoke.mjs \
+            --base-url "${DEPLOY_PUBLIC_API_BASE_URL}" \
+            --timeout-seconds 90 \
+            --report "${RUNNER_TEMP}/post-deploy-smoke-report.json" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Post-deploy smoke / Upload report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: post-deploy-smoke-report
+          path: ${{ runner.temp }}/post-deploy-smoke-report.json
+          retention-days: 14
+          if-no-files-found: ignore
 
   record-deploy:
     name: CD Record deployment
@@ -432,6 +477,7 @@ jobs:
       - plan
       - deploy
       - record-deploy
+      - post-deploy-smoke
     if: >-
       ${{
         always() &&

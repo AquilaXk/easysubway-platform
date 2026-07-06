@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "gate": "post-deploy-smoke",
+  "issue": 1688,
+  "descriptionKo": "매 백엔드 배포 직후 핵심 4축이 배포 URL에서 실제 동작하는지 확인하는 경량 스모크 계약. 대표 OD·필수 응답 필드가 바뀌면 스크립트가 아니라 이 파일만 갱신한다.",
+  "axes": {
+    "readiness": {
+      "id": "readiness",
+      "titleKo": "헬스 (플랫폼)",
+      "deploymentAttributed": true,
+      "path": "/actuator/health/readiness",
+      "expectStatusField": "status",
+      "expectStatusValue": "UP"
+    },
+    "routeSearch": {
+      "id": "route-search",
+      "titleKo": "경로 탐색 (북극성)",
+      "deploymentAttributed": true,
+      "method": "POST",
+      "path": "/api/v2/routes/search",
+      "request": {
+        "originStationId": "station-sangnoksu",
+        "destinationStationId": "station-sadang",
+        "mobilityType": "SENIOR",
+        "constraintMode": "ALLOW_WITH_WARNINGS",
+        "useRealtime": false,
+        "maxTransfers": 3,
+        "alternativeCount": 3
+      },
+      "departureLocalTime": "09:15:00",
+      "departureUtcOffset": "+09:00",
+      "expectedContractVersion": "ROUTE_SEARCH_V2",
+      "minItineraries": 1,
+      "legEtaSourceField": "etaSource",
+      "downgradeLadderNoteKo": "강등 사다리 존중: leg의 etaSource가 REALTIME이 아니어도(PLANNED·STATIC_BACKEND_ESTIMATE 등) 실패로 처리하지 않는다. 실시간 provider 상태에 의존하는 flaky 게이트를 만들지 않기 위해 useRealtime=false로 고정한다."
+    },
+    "adminLogin": {
+      "id": "admin-login",
+      "titleKo": "관리자 웹",
+      "deploymentAttributed": true,
+      "path": "/admin/login",
+      "mustIncludeAny": ["<form", "login", "로그인"]
+    },
+    "datapack": {
+      "id": "datapack",
+      "titleKo": "데이터팩 배포 URL (오프라인)",
+      "deploymentAttributed": false,
+      "baseUrl": "https://objectstorage.ap-seoul-1.oraclecloud.com/n/axvym6vk8g7i/b/easysubway-datapacks/o",
+      "catalogPath": "/catalog/current.json",
+      "requiredArrayField": "packs"
+    }
+  }
+}
