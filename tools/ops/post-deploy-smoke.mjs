@@ -108,8 +108,19 @@ async function checkRouteSearch(baseUrl, axis, timeoutMs) {
     throw new Error(`route search contractVersion was ${data?.contractVersion}, expected ${axis.expectedContractVersion}`);
   }
   const itineraries = data.itineraries;
+  const statuses = Array.isArray(data.statuses) ? data.statuses : [];
   if (!Array.isArray(itineraries) || itineraries.length < axis.minItineraries) {
-    throw new Error(`route search returned ${itineraries?.length ?? 0} itineraries, expected >= ${axis.minItineraries}`);
+    // Endpoint-health gate: a valid ROUTE_SEARCH_V2 response that reports a known
+    // "no service data" status (e.g. NO_TIMETABLE_SERVICE while timetable
+    // ingestion is still pending — #1415) means the API is healthy but the
+    // datapack lacks data for this OD. That is a data-completeness concern, not a
+    // deploy regression, so the smoke passes. A broken endpoint still fails
+    // earlier (non-200, success!=true, wrong contractVersion).
+    const noServiceOk = (axis.acceptedNoServiceStatuses ?? []).some((s) => statuses.includes(s));
+    if (noServiceOk) return;
+    throw new Error(
+      `route search returned ${itineraries?.length ?? 0} itineraries and no accepted no-service status (statuses=${statuses.join(",") || "none"})`,
+    );
   }
   const legs = itineraries.flatMap((entry) => (Array.isArray(entry.legs) ? entry.legs : []));
   if (legs.length < 1) throw new Error("route search itineraries contained no legs");

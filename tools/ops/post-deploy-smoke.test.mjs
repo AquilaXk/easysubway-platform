@@ -158,6 +158,19 @@ test("post-deploy smoke fails when route search omits itineraries", async () => 
   });
 });
 
+test("post-deploy smoke passes when route search reports NO_TIMETABLE_SERVICE (endpoint healthy, data pending)", async () => {
+  const routes = defaultRoutes();
+  routes.routeSearch = () => ({
+    status: 200,
+    body: { success: true, data: { contractVersion: "ROUTE_SEARCH_V2", statuses: ["NO_TIMETABLE_SERVICE"], itineraries: [] } },
+  });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 0);
+    assert.equal(axis(report, "route-search").result, "PASS");
+  });
+});
+
 test("post-deploy smoke fails when a leg is missing its eta source label", async () => {
   const routes = defaultRoutes();
   routes.routeSearch = () => ({
@@ -226,6 +239,11 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
   assert.equal(routeSearch.expectedContractVersion, "ROUTE_SEARCH_V2");
   assert.ok(routeSearch.minItineraries >= 1);
   assert.equal(routeSearch.legEtaSourceField, "etaSource");
+  assert.ok(
+    Array.isArray(routeSearch.acceptedNoServiceStatuses)
+      && routeSearch.acceptedNoServiceStatuses.includes("NO_TIMETABLE_SERVICE"),
+    "route search must accept NO_TIMETABLE_SERVICE as endpoint-healthy",
+  );
   // useRealtime must stay false so the gate never depends on a flaky provider.
   assert.equal(routeSearch.request.useRealtime, false);
   assert.equal(routeSearch.request.originStationId, "station-sangnoksu");
