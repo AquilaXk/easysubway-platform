@@ -1,0 +1,21 @@
+# Local backend image build only.
+# Usage: docker compose -f infra/docker-compose.yml -f infra/docker-compose.local-build.yml up --build
+# Production deploy keeps consuming the prebuilt easysubway-backend image.
+services:
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+        org.opencontainers.image.source: https://github.com/AquilaXk/easysubway
+        com.easysubway.jar.sha256: ${EASYSUBWAY_BACKEND_JAR_SHA256:-unknown}
+
+  back-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+        org.opencontainers.image.source: https://github.com/AquilaXk/easysubway
+        com.easysubway.jar.sha256: ${EASYSUBWAY_BACKEND_JAR_SHA256:-unknown}

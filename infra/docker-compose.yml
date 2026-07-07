@@ -37,13 +37,6 @@ services:
       start_period: 20s
 
   backend:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
-      labels:
-        org.opencontainers.image.revision: ${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
-        org.opencontainers.image.source: https://github.com/AquilaXk/easysubway
-        com.easysubway.jar.sha256: ${EASYSUBWAY_BACKEND_JAR_SHA256:-unknown}
     image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
     container_name: easysubway-backend
     restart: unless-stopped
@@ -69,13 +62,6 @@ services:
         condition: service_healthy
 
   back-worker:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
-      labels:
-        org.opencontainers.image.revision: ${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
-        org.opencontainers.image.source: https://github.com/AquilaXk/easysubway
-        com.easysubway.jar.sha256: ${EASYSUBWAY_BACKEND_JAR_SHA256:-unknown}
     image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
     container_name: easysubway-back-worker
     restart: unless-stopped
