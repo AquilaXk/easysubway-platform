@@ -136,6 +136,54 @@ require_nonempty EASYSUBWAY_DATASOURCE_PASSWORD
 require_nonempty EASYSUBWAY_REPORT_UPLOAD_BUCKET
 require_nonempty EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY
 require_nonempty EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY
+require_nonempty EASYSUBWAY_ADS_ASSET_ORIGIN
+
+ads_asset_origin="$(value EASYSUBWAY_ADS_ASSET_ORIGIN)"
+ads_asset_authority="${ads_asset_origin#https://}"
+ads_asset_authority="${ads_asset_authority%/}"
+ads_asset_host="${ads_asset_authority%%:*}"
+ads_asset_port=""
+if [[ "${ads_asset_authority}" == *:* ]]; then
+	ads_asset_port="${ads_asset_authority##*:}"
+fi
+ads_asset_host_normalized="$(printf '%s' "${ads_asset_host}" | tr '[:upper:]' '[:lower:]')"
+ads_asset_origin_invalid=0
+IFS='.' read -r -a ads_asset_host_labels <<< "${ads_asset_host}"
+ads_asset_numeric_ipv4=0
+if [[ "${#ads_asset_host_labels[@]}" -ge 2 && "${#ads_asset_host_labels[@]}" -le 4 ]]; then
+	ads_asset_numeric_ipv4=1
+fi
+
+if [[ "${#ads_asset_host}" -gt 253 ]]; then
+	ads_asset_origin_invalid=1
+fi
+for ads_asset_host_label in "${ads_asset_host_labels[@]}"; do
+	if [[ "${#ads_asset_host_label}" -lt 1 || "${#ads_asset_host_label}" -gt 63 ]]; then
+		ads_asset_origin_invalid=1
+	fi
+	if [[ "${ads_asset_numeric_ipv4}" -eq 1 && ! "${ads_asset_host_label}" =~ ^([0-9]+|0[xX][0-9A-Fa-f]+)$ ]]; then
+		ads_asset_numeric_ipv4=0
+	fi
+done
+if [[ "${ads_asset_numeric_ipv4}" -eq 1 ]]; then
+	ads_asset_origin_invalid=1
+fi
+
+if [[ ! "${ads_asset_origin}" =~ ^https://([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(:[1-9][0-9]{0,4})?/?$ ]]; then
+	ads_asset_origin_invalid=1
+fi
+if [[ "${ads_asset_port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#${ads_asset_port} > 65535 )); then
+	ads_asset_origin_invalid=1
+fi
+case ".${ads_asset_host_normalized}." in
+	*.localhost.*|*.local.|*.internal.|*.example.|*.invalid.|*.test.|*.arpa.|*.onion.|*.alt.|*.example.com.|*.example.net.|*.example.org.|*.placeholder.*|*.change-me.*|*.changeme.*|*.todo.*|*.tbd.*)
+		ads_asset_origin_invalid=1
+		;;
+esac
+if [[ "${ads_asset_origin_invalid}" -ne 0 ]]; then
+	printf 'invalid public HTTPS origin: %s\n' EASYSUBWAY_ADS_ASSET_ORIGIN >&2
+	exit 1
+fi
 
 receipt_pepper="$(value EASYSUBWAY_REPORT_RECEIPT_PEPPER)"
 legacy_pepper="$(value EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER)"
