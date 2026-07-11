@@ -105,3 +105,4 @@ apps/mobile/ios/DerivedData/
 **/*.auto.tfvars
 **/*.auto.tfvars.json
 !**/terraform.tfvars.example
+/CLAUDE.md
