@@ -108,6 +108,18 @@ require_port() {
 	fi
 }
 
+require_positive_postgres_integer() {
+	local name="$1"
+	local raw
+	raw="$(value "${name}")"
+	if [[ ! "${raw}" =~ ^[1-9][0-9]*$ \
+		|| "${#raw}" -gt 10 \
+		|| ( "${#raw}" -eq 10 && "${raw}" > "2147483647" ) ]]; then
+		printf 'invalid positive integer: %s\n' "${name}" >&2
+		exit 1
+	fi
+}
+
 require_bool() {
 	local name="$1"
 	local raw
@@ -137,6 +149,16 @@ require_nonempty EASYSUBWAY_REPORT_UPLOAD_BUCKET
 require_nonempty EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY
 require_nonempty EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY
 require_nonempty EASYSUBWAY_ADS_ASSET_ORIGIN
+if grep -qx 'EASYSUBWAY_ADS_EVENT_DAILY_CAP=' "${env_values_file}"; then
+	require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
+fi
+require_nonempty EASYSUBWAY_ADS_EVENT_DAILY_CAP
+require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
+
+if [[ "$(value EASYSUBWAY_BACKEND_BIND)" != "127.0.0.1" ]]; then
+	printf 'backend bind must be 127.0.0.1\n' >&2
+	exit 1
+fi
 
 ads_asset_origin="$(value EASYSUBWAY_ADS_ASSET_ORIGIN)"
 ads_asset_authority="${ads_asset_origin#https://}"

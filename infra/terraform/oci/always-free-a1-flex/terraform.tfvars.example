@@ -17,9 +17,7 @@ hostname_label    = "easysubwaya1"
 vcn_dns_label     = "easysubway"
 subnet_dns_label  = "public"
 vcn_cidr          = "10.52.0.0/16"
-subnet_cidr       = "10.52.1.0/24"
-http_ingress_cidr = "0.0.0.0/0"
-https_ingress_cidr = "0.0.0.0/0"
+subnet_cidr      = "10.52.1.0/24"
 
 instance_ocpus         = 4
 instance_memory_in_gbs = 24

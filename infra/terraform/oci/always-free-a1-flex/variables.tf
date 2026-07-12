@@ -148,28 +148,6 @@ variable "ssh_ingress_cidr" {
   }
 }
 
-variable "http_ingress_cidr" {
-  description = "CIDR allowed to connect to the staging HTTP port 80."
-  type        = string
-  nullable    = false
-
-  validation {
-    condition     = can(cidrnetmask(var.http_ingress_cidr))
-    error_message = "http_ingress_cidr must be a valid IPv4 CIDR."
-  }
-}
-
-variable "https_ingress_cidr" {
-  description = "CIDR allowed to connect to the staging HTTPS port 443."
-  type        = string
-  nullable    = false
-
-  validation {
-    condition     = can(cidrnetmask(var.https_ingress_cidr))
-    error_message = "https_ingress_cidr must be a valid IPv4 CIDR."
-  }
-}
-
 variable "name_prefix" {
   description = "Name prefix for OCI resources."
   type        = string

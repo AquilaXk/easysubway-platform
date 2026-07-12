@@ -53,27 +53,19 @@ resource "oci_core_security_list" "public" {
     }
   }
 
-  ingress_security_rules {
-    description = "HTTP ingress for staging"
-    protocol    = "6"
-    source      = var.http_ingress_cidr
-    source_type = "CIDR_BLOCK"
+  dynamic "ingress_security_rules" {
+    for_each = local.cloudflare_ipv4_ingress_cidrs
 
-    tcp_options {
-      max = 80
-      min = 80
-    }
-  }
+    content {
+      description = "HTTPS ingress from Cloudflare"
+      protocol    = "6"
+      source      = ingress_security_rules.value
+      source_type = "CIDR_BLOCK"
 
-  ingress_security_rules {
-    description = "HTTPS ingress for staging"
-    protocol    = "6"
-    source      = var.https_ingress_cidr
-    source_type = "CIDR_BLOCK"
-
-    tcp_options {
-      max = 443
-      min = 443
+      tcp_options {
+        max = 443
+        min = 443
+      }
     }
   }
 }
