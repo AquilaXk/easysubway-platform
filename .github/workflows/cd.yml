@@ -277,6 +277,8 @@ jobs:
         shell: bash
         env:
           EASYSUBWAY_ENV_SECRET: ${{ secrets.EASYSUBWAY_ENV }}
+          EASYSUBWAY_ADS_ASSET_ORIGIN: ${{ vars.EASYSUBWAY_ADS_ASSET_ORIGIN }}
+          EASYSUBWAY_ADS_EVENT_DAILY_CAP: ${{ vars.EASYSUBWAY_ADS_EVENT_DAILY_CAP }}
           EASYSUBWAY_SEOUL_TOPIS_SERVICE_KEY_SECRET: ${{ secrets.EASYSUBWAY_SEOUL_TOPIS_SERVICE_KEY }}
         run: |
           set -euo pipefail
@@ -315,6 +317,28 @@ jobs:
             echo "source=example" >> "${GITHUB_OUTPUT}"
             echo "::notice title=CD env secret::EASYSUBWAY_ENV secret is not configured; deployment will not start."
           fi
+
+          for name in EASYSUBWAY_ADS_ASSET_ORIGIN EASYSUBWAY_ADS_EVENT_DAILY_CAP; do
+            value="${!name}"
+            if [[ -z "${value}" || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+              echo "${name} repository variable must be a non-empty single line" >&2
+              exit 1
+            fi
+          done
+
+          filtered_env_file="${RUNNER_TEMP}/easysubway.ads-overlay.env"
+          awk -F= '
+            BEGIN {
+              drop["EASYSUBWAY_ADS_ASSET_ORIGIN"] = 1
+              drop["EASYSUBWAY_ADS_EVENT_DAILY_CAP"] = 1
+            }
+            !($1 in drop)
+          ' "${env_file}" > "${filtered_env_file}"
+          mv "${filtered_env_file}" "${env_file}"
+          for name in EASYSUBWAY_ADS_ASSET_ORIGIN EASYSUBWAY_ADS_EVENT_DAILY_CAP; do
+            value="${!name}"
+            printf '%s=%s\n' "${name}" "${value}" >> "${env_file}"
+          done
 
           chmod 600 "${env_file}"
           echo "EASYSUBWAY_ENV_FILE=${env_file}" >> "${GITHUB_ENV}"
