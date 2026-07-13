@@ -331,10 +331,12 @@ jobs:
             BEGIN {
               drop["EASYSUBWAY_ADS_ASSET_ORIGIN"] = 1
               drop["EASYSUBWAY_ADS_EVENT_DAILY_CAP"] = 1
+              drop["EASYSUBWAY_BACKEND_BIND"] = 1
             }
             !($1 in drop)
           ' "${env_file}" > "${filtered_env_file}"
           mv "${filtered_env_file}" "${env_file}"
+          printf 'EASYSUBWAY_BACKEND_BIND=127.0.0.1\n' >> "${env_file}"
           for name in EASYSUBWAY_ADS_ASSET_ORIGIN EASYSUBWAY_ADS_EVENT_DAILY_CAP; do
             value="${!name}"
             printf '%s=%s\n' "${name}" "${value}" >> "${env_file}"
