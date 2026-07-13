@@ -68,7 +68,7 @@ SELECT report_id,
 	REPLACE(REPLACE(ENCODE(CONVERT_TO(COALESCE(photo_file_name, ''), 'UTF8'), 'base64'), E'\n', ''), E'\r', '') AS photo_file_name_base64,
 	REPLACE(REPLACE(ENCODE(CONVERT_TO(COALESCE(photo_content_type, ''), 'UTF8'), 'base64'), E'\n', ''), E'\r', '') AS photo_content_type_base64,
 	COALESCE(photo_object_key, '') AS photo_object_key,
-	COALESCE(photo_thumbnail_object_key, '') AS photo_thumbnail_object_key,
+	COALESCE(photo_thumbnail_object_key, '__EASYSUBWAY_EMPTY__') AS photo_thumbnail_object_key,
 	COALESCE(photo_sha256, '') AS photo_sha256,
 	COALESCE(photo_size_bytes::TEXT, '') AS photo_size_bytes
 FROM facility_reports
@@ -83,6 +83,9 @@ printf 'report_id\tfile_name\tcontent_type\tobject_key\tthumbnail_object_key\tsh
 while IFS=$'\t' read -r report_id file_name_base64 content_type_base64 object_key thumbnail_object_key sha256 size_bytes; do
 	if [[ -z "${report_id}" || -z "${object_key}" ]]; then
 		continue
+	fi
+	if [[ "${thumbnail_object_key}" == "__EASYSUBWAY_EMPTY__" ]]; then
+		thumbnail_object_key=""
 	fi
 	object_path="objects/${object_key}"
 	thumbnail_path="objects/${thumbnail_object_key}"

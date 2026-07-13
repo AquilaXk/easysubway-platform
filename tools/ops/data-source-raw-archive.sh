@@ -75,6 +75,8 @@ awk -v collection_runs_file="${collection_runs_file}" -v raw_archives_file="${ra
 	}
 ' "${stream_file}"
 
+node "${ROOT_DIR}/tools/ops/data-source-raw-archive-materialize.mjs" "${raw_archives_file}" "${run_dir}"
+
 trap - EXIT
 cleanup
 printf 'data source archive written: %s\n' "${run_dir}"

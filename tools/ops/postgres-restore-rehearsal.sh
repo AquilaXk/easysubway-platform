@@ -21,7 +21,7 @@ cleanup() {
 
 case "$RESTORE_DB" in
 	"$POSTGRES_DB"|postgres|template0|template1)
-		printf 'Refusing to use protected restore database: %s\n' "$RESTORE_DB" >&2
+		printf "Refusing to use protected restore database: %s\n" "$RESTORE_DB" >&2
 		exit 2
 		;;
 esac
