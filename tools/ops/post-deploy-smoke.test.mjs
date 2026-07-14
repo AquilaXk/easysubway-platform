@@ -11,26 +11,12 @@ const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "../..");
 const script = "tools/ops/post-deploy-smoke.mjs";
 
-function itinerary(overrides = {}) {
-  return {
-    itineraryId: "route-search-1-primary",
-    status: "FOUND",
-    etaSource: "PLANNED",
-    legs: [
-      { legType: "ACCESS", etaSource: "PLANNED" },
-      { legType: "RIDE", etaSource: "STATIC_BACKEND_ESTIMATE" },
-    ],
-    ...overrides,
-  };
-}
-
 function defaultRoutes() {
   return {
     readiness: () => ({ status: 200, body: { status: "UP" } }),
-    routeSearch: () => ({
-      status: 200,
-      body: { success: true, data: { contractVersion: "ROUTE_SEARCH_V2", itineraries: [itinerary()] } },
-    }),
+    routeV1Search: () => ({ status: 403, body: {} }),
+    routeV2Search: () => ({ status: 403, body: {} }),
+    routeRefresh: () => ({ status: 404, body: {} }),
     adminLogin: () => ({ status: 200, body: "<html><body><form method=\"post\">login</form></body></html>", raw: true }),
     datapack: () => ({ status: 200, body: { packs: [{ id: "capital", version: "2026.07.01" }] } }),
   };
@@ -41,7 +27,9 @@ async function withServer(routes, fn) {
     const url = new URL(req.url, "http://localhost");
     let handler;
     if (url.pathname === "/actuator/health/readiness") handler = routes.readiness;
-    else if (url.pathname === "/api/v2/routes/search" && req.method === "POST") handler = routes.routeSearch;
+    else if (url.pathname === "/api/v1/routes/search" && req.method === "POST") handler = routes.routeV1Search;
+    else if (url.pathname === "/api/v2/routes/search" && req.method === "POST") handler = routes.routeV2Search;
+    else if (url.pathname === "/api/v2/routes/closure-probe/refresh" && req.method === "POST") handler = routes.routeRefresh;
     else if (url.pathname === "/admin/login") handler = routes.adminLogin;
     else if (url.pathname === "/catalog/current.json") handler = routes.datapack;
 
@@ -51,8 +39,8 @@ async function withServer(routes, fn) {
     }
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => {
-      const out = handler(Buffer.concat(chunks).toString("utf8"));
+    req.on("end", async () => {
+      const out = await handler(Buffer.concat(chunks).toString("utf8"));
       const payload = out.raw ? out.body : JSON.stringify(out.body);
       res.writeHead(out.status, { "content-type": out.raw ? "text/html" : "application/json" }).end(payload);
     });
@@ -109,7 +97,7 @@ test("post-deploy smoke passes when all four axes respond correctly", async () =
     assert.equal(code, 0);
     assert.equal(report.overall, "PASS");
     assert.equal(report.axes.length, 4);
-    for (const id of ["readiness", "route-search", "admin-login", "datapack"]) {
+    for (const id of ["readiness", "route-api-closure", "admin-login", "datapack"]) {
       assert.equal(axis(report, id).result, "PASS", `${id} should pass`);
     }
     assert.equal(axis(report, "datapack").deploymentAttributed, false);
@@ -117,76 +105,50 @@ test("post-deploy smoke passes when all four axes respond correctly", async () =
   });
 });
 
-test("post-deploy smoke tolerates downgraded (non-realtime) eta sources", async () => {
+test("post-deploy smoke accepts one-shot 403/404 for every closed route endpoint", async () => {
   const routes = defaultRoutes();
-  routes.routeSearch = () => ({
-    status: 200,
-    body: {
-      success: true,
-      data: {
-        contractVersion: "ROUTE_SEARCH_V2",
-        itineraries: [
-          itinerary({
-            etaSource: "PLANNED",
-            legs: [
-              { legType: "ACCESS", etaSource: "PLANNED" },
-              { legType: "RIDE", etaSource: "PLANNED" },
-            ],
-          }),
-        ],
-      },
-    },
-  });
   await withServer(routes, async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl);
     assert.equal(code, 0);
-    assert.equal(axis(report, "route-search").result, "PASS");
+    assert.equal(axis(report, "route-api-closure").result, "PASS");
+    assert.equal(axis(report, "route-api-closure").attempts, 1);
   });
 });
 
-test("post-deploy smoke fails when route search omits itineraries", async () => {
+test("post-deploy smoke fails immediately when any closed route endpoint returns 2xx", async () => {
   const routes = defaultRoutes();
-  routes.routeSearch = () => ({
-    status: 200,
-    body: { success: true, data: { contractVersion: "ROUTE_SEARCH_V2", itineraries: [] } },
-  });
+  let calls = 0;
+  routes.routeV2Search = () => {
+    calls += 1;
+    return calls === 1 ? { status: 200, body: { success: true } } : { status: 403, body: {} };
+  };
   await withServer(routes, async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl);
     assert.equal(code, 1);
     assert.equal(report.overall, "FAIL");
-    assert.equal(axis(report, "route-search").result, "FAIL");
+    assert.equal(axis(report, "route-api-closure").result, "FAIL");
+    assert.equal(axis(report, "route-api-closure").attempts, 1);
+    assert.equal(calls, 1);
   });
 });
 
-test("post-deploy smoke passes when route search reports NO_TIMETABLE_SERVICE (endpoint healthy, data pending)", async () => {
+test("post-deploy smoke shares one timeout budget across closed route endpoints", async () => {
   const routes = defaultRoutes();
-  routes.routeSearch = () => ({
-    status: 200,
-    body: { success: true, data: { contractVersion: "ROUTE_SEARCH_V2", statuses: ["NO_TIMETABLE_SERVICE"], itineraries: [] } },
+  const delayedForbidden = () => new Promise((resolve) => {
+    setTimeout(() => resolve({ status: 403, body: {} }), 900);
   });
-  await withServer(routes, async (baseUrl) => {
-    const { code, report } = await runSmoke(baseUrl);
-    assert.equal(code, 0);
-    assert.equal(axis(report, "route-search").result, "PASS");
-  });
-});
+  routes.routeV1Search = delayedForbidden;
+  routes.routeV2Search = delayedForbidden;
+  routes.routeRefresh = delayedForbidden;
 
-test("post-deploy smoke fails when a leg is missing its eta source label", async () => {
-  const routes = defaultRoutes();
-  routes.routeSearch = () => ({
-    status: 200,
-    body: {
-      success: true,
-      data: {
-        contractVersion: "ROUTE_SEARCH_V2",
-        itineraries: [itinerary({ legs: [{ legType: "ACCESS" }] })],
-      },
-    },
-  });
   await withServer(routes, async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl);
     assert.equal(code, 1);
-    assert.equal(axis(report, "route-search").result, "FAIL");
+    assert.equal(axis(report, "route-api-closure").result, "FAIL");
+    assert.match(
+      axis(report, "route-api-closure").detail,
+      /POST \/api\/v2\/routes\/closure-probe\/refresh check failed/,
+    );
   });
 });
 
@@ -229,27 +191,22 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
   assert.equal(contract.gate, "post-deploy-smoke");
   assert.equal(contract.issue, 1688);
 
-  const { readiness, routeSearch, adminLogin, datapack } = contract.axes;
+  const { readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
   assert.equal(readiness.deploymentAttributed, true);
   assert.equal(readiness.path, "/actuator/health/readiness");
   assert.equal(readiness.expectStatusValue, "UP");
 
-  assert.equal(routeSearch.deploymentAttributed, true);
-  assert.equal(routeSearch.path, "/api/v2/routes/search");
-  assert.equal(routeSearch.expectedContractVersion, "ROUTE_SEARCH_V2");
-  assert.ok(routeSearch.minItineraries >= 1);
-  assert.equal(routeSearch.legEtaSourceField, "etaSource");
-  assert.ok(
-    Array.isArray(routeSearch.acceptedNoServiceStatuses)
-      && routeSearch.acceptedNoServiceStatuses.includes("NO_TIMETABLE_SERVICE"),
-    "route search must accept NO_TIMETABLE_SERVICE as endpoint-healthy",
+  assert.equal(routeApiClosure.deploymentAttributed, true);
+  assert.equal(routeApiClosure.id, "route-api-closure");
+  assert.deepEqual(routeApiClosure.acceptedStatuses, [403, 404]);
+  assert.deepEqual(
+    routeApiClosure.endpoints.map(({ method, path: endpointPath }) => `${method} ${endpointPath}`),
+    [
+      "POST /api/v1/routes/search",
+      "POST /api/v2/routes/search",
+      "POST /api/v2/routes/closure-probe/refresh",
+    ],
   );
-  // useRealtime must stay false so the gate never depends on a flaky provider.
-  assert.equal(routeSearch.request.useRealtime, false);
-  assert.equal(routeSearch.request.originStationId, "station-sangnoksu");
-  assert.equal(routeSearch.request.destinationStationId, "station-sadang");
-  assert.match(routeSearch.departureLocalTime, /^\d{2}:\d{2}:\d{2}$/);
-  assert.match(routeSearch.departureUtcOffset, /^[+-]\d{2}:\d{2}$/);
 
   assert.equal(adminLogin.deploymentAttributed, true);
   assert.equal(adminLogin.path, "/admin/login");

@@ -1,13 +1,9 @@
 #!/usr/bin/env node
-// Post-deploy smoke: verifies that the core user-facing flows actually answer at
-// the deployed URL after a backend deploy (issue #1688). Four axes mirror the
-// service structure: platform health, route search (north star), admin web, and
-// the datapack distribution URL (independent OCI Object Storage infra).
+// Post-deploy smoke: verifies the deployed backend and the independent datapack
+// URL after a deploy (issue #1688). The route axis proves that production route
+// APIs stay closed; it must never retry an observed 2xx into a later PASS.
 //
 // Design constraints (see issue #1688):
-// - Respect the downgrade ladder: a non-realtime eta source (PLANNED/STATIC) is
-//   NOT a failure. useRealtime is fixed to false so the gate never depends on a
-//   flaky realtime provider.
 // - The datapack axis is a DIFFERENT failure domain than the backend deploy; the
 //   report labels each axis with `deploymentAttributed` so an operator can tell a
 //   backend regression apart from an offline-data-supply outage.
@@ -21,18 +17,6 @@ const DEFAULT_CONTRACT = path.join(import.meta.dirname, "post-deploy-smoke-contr
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function buildDepartureTime(axis, now = Date.now()) {
-  const match = /^([+-])(\d{2}):(\d{2})$/.exec(axis.departureUtcOffset);
-  if (!match) throw new Error(`invalid departureUtcOffset: ${axis.departureUtcOffset}`);
-  const sign = match[1] === "-" ? -1 : 1;
-  const offsetSeconds = sign * (Number(match[2]) * 3600 + Number(match[3]) * 60);
-  const local = new Date(now + offsetSeconds * 1000);
-  const year = local.getUTCFullYear();
-  const month = String(local.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(local.getUTCDate()).padStart(2, "0");
-  return `${year}-${month}-${day}T${axis.departureLocalTime}${axis.departureUtcOffset}`;
 }
 
 async function httpRequest(url, { method = "GET", body, headers = {}, timeoutMs }) {
@@ -91,43 +75,25 @@ async function checkReadiness(baseUrl, axis, timeoutMs) {
   }
 }
 
-async function checkRouteSearch(baseUrl, axis, timeoutMs) {
-  const url = joinUrl(baseUrl, axis.path);
-  const requestBody = { ...axis.request, departureTime: buildDepartureTime(axis) };
-  const { status, text } = await httpRequest(url, {
-    method: axis.method ?? "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(requestBody),
-    timeoutMs,
-  });
-  if (status !== 200) throw new Error(`route search returned HTTP ${status}`);
-  const body = parseJson(text, "route search");
-  if (body.success !== true) throw new Error("route search response.success was not true");
-  const data = body.data;
-  if (!data || data.contractVersion !== axis.expectedContractVersion) {
-    throw new Error(`route search contractVersion was ${data?.contractVersion}, expected ${axis.expectedContractVersion}`);
-  }
-  const itineraries = data.itineraries;
-  const statuses = Array.isArray(data.statuses) ? data.statuses : [];
-  if (!Array.isArray(itineraries) || itineraries.length < axis.minItineraries) {
-    // Endpoint-health gate: a valid ROUTE_SEARCH_V2 response that reports a known
-    // "no service data" status (e.g. NO_TIMETABLE_SERVICE while timetable
-    // ingestion is still pending — #1415) means the API is healthy but the
-    // datapack lacks data for this OD. That is a data-completeness concern, not a
-    // deploy regression, so the smoke passes. A broken endpoint still fails
-    // earlier (non-200, success!=true, wrong contractVersion).
-    const noServiceOk = (axis.acceptedNoServiceStatuses ?? []).some((s) => statuses.includes(s));
-    if (noServiceOk) return;
-    throw new Error(
-      `route search returned ${itineraries?.length ?? 0} itineraries and no accepted no-service status (statuses=${statuses.join(",") || "none"})`,
-    );
-  }
-  const legs = itineraries.flatMap((entry) => (Array.isArray(entry.legs) ? entry.legs : []));
-  if (legs.length < 1) throw new Error("route search itineraries contained no legs");
-  for (const leg of legs) {
-    const label = leg[axis.legEtaSourceField];
-    if (typeof label !== "string" || label.length === 0) {
-      throw new Error(`route search leg is missing a ${axis.legEtaSourceField} label`);
+async function checkRouteApiClosure(baseUrl, axis, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (const endpoint of axis.endpoints) {
+    const context = `${endpoint.method} ${endpoint.path}`;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error(`${context} check failed: timeout budget exhausted`);
+    let status;
+    try {
+      ({ status } = await httpRequest(joinUrl(baseUrl, endpoint.path), {
+        method: endpoint.method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(endpoint.request),
+        timeoutMs: remainingMs,
+      }));
+    } catch (error) {
+      throw new Error(`${context} check failed: ${error.message}`, { cause: error });
+    }
+    if (!axis.acceptedStatuses.includes(status)) {
+      throw new Error(`${context} returned HTTP ${status}`);
     }
   }
 }
@@ -167,6 +133,32 @@ async function runAxis(axis, check, { maxMs, delayMs }) {
   };
 }
 
+async function runAxisOnce(axis, check, timeoutMs) {
+  const startedAt = Date.now();
+  try {
+    await check(timeoutMs);
+    return {
+      id: axis.id,
+      titleKo: axis.titleKo,
+      deploymentAttributed: axis.deploymentAttributed,
+      result: "PASS",
+      latencyMs: Date.now() - startedAt,
+      attempts: 1,
+      detail: "ok",
+    };
+  } catch (error) {
+    return {
+      id: axis.id,
+      titleKo: axis.titleKo,
+      deploymentAttributed: axis.deploymentAttributed,
+      result: "FAIL",
+      latencyMs: Date.now() - startedAt,
+      attempts: 1,
+      detail: error.message,
+    };
+  }
+}
+
 function renderTable(report) {
   const lines = [
     "| 축 | 결과 | 배포 기인 | latency(ms) | 시도 | 상세 |",
@@ -188,7 +180,7 @@ async function main() {
 
   const contractPath = argValue(args, "--contract", DEFAULT_CONTRACT);
   const contract = JSON.parse(await readFile(contractPath, "utf8"));
-  const { readiness, routeSearch, adminLogin, datapack } = contract.axes;
+  const { readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
 
   const datapackBaseUrl = argValue(args, "--datapack-base-url", datapack.baseUrl);
   const budgetMs = Number(argValue(args, "--timeout-seconds", "90")) * 1000;
@@ -198,10 +190,11 @@ async function main() {
     maxMs: Math.max(6000, budgetMs * 0.55),
     delayMs: 3000,
   }));
-  axes.push(await runAxis(routeSearch, (t) => checkRouteSearch(baseUrl, routeSearch, t), {
-    maxMs: Math.max(3000, budgetMs * 0.2),
-    delayMs: 2000,
-  }));
+  axes.push(await runAxisOnce(
+    routeApiClosure,
+    (t) => checkRouteApiClosure(baseUrl, routeApiClosure, t),
+    Math.min(10000, Math.max(2000, budgetMs * 0.2)),
+  ));
   axes.push(await runAxis(adminLogin, (t) => checkAdminLogin(baseUrl, adminLogin, t), {
     maxMs: Math.max(2000, budgetMs * 0.1),
     delayMs: 2000,

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "gate": "post-deploy-smoke",
   "issue": 1688,
-  "descriptionKo": "매 백엔드 배포 직후 핵심 4축이 배포 URL에서 실제 동작하는지 확인하는 경량 스모크 계약. 대표 OD·필수 응답 필드가 바뀌면 스크립트가 아니라 이 파일만 갱신한다.",
+  "descriptionKo": "매 백엔드 배포 직후 핵심 4축이 배포 URL에서 실제 동작하는지 확인하는 경량 스모크 계약. 경로검색 공개 API는 production에서 폐쇄 상태를 검증한다.",
   "axes": {
     "readiness": {
       "id": "readiness",
@@ -12,29 +12,41 @@
       "expectStatusField": "status",
       "expectStatusValue": "UP"
     },
-    "routeSearch": {
-      "id": "route-search",
-      "titleKo": "경로 탐색 (북극성)",
+    "routeApiClosure": {
+      "id": "route-api-closure",
+      "titleKo": "경로검색 공개 API 폐쇄",
       "deploymentAttributed": true,
-      "method": "POST",
-      "path": "/api/v2/routes/search",
-      "request": {
-        "originStationId": "station-sangnoksu",
-        "destinationStationId": "station-sadang",
-        "mobilityType": "SENIOR",
-        "constraintMode": "ALLOW_WITH_WARNINGS",
-        "useRealtime": false,
-        "maxTransfers": 3,
-        "alternativeCount": 3
-      },
-      "departureLocalTime": "09:15:00",
-      "departureUtcOffset": "+09:00",
-      "expectedContractVersion": "ROUTE_SEARCH_V2",
-      "minItineraries": 1,
-      "legEtaSourceField": "etaSource",
-      "acceptedNoServiceStatuses": ["NO_TIMETABLE_SERVICE"],
-      "noServiceNoteKo": "커버리지 게이트(#1838) 이후: 시간표 미적재/비커버 O/D는 graph 검색으로 폴백(FOUND)하고, NO_TIMETABLE_SERVICE는 커버 코리도의 막차후(현재 서비스 없음)에 국한된다. 스모크는 유효한 V2 응답이면 엔드포인트 건강성으로 PASS하며 두 status 모두 허용, 데이터 완성도는 #1415가 담당한다.",
-      "downgradeLadderNoteKo": "강등 사다리 존중: leg의 etaSource가 REALTIME이 아니어도(PLANNED·STATIC_BACKEND_ESTIMATE 등) 실패로 처리하지 않는다. 실시간 provider 상태에 의존하는 flaky 게이트를 만들지 않기 위해 useRealtime=false로 고정한다."
+      "acceptedStatuses": [403, 404],
+      "endpoints": [
+        {
+          "method": "POST",
+          "path": "/api/v1/routes/search",
+          "request": {
+            "originStationId": "closure-probe",
+            "destinationStationId": "closure-probe",
+            "mobilityType": "SENIOR"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v2/routes/search",
+          "request": {
+            "originStationId": "closure-probe",
+            "destinationStationId": "closure-probe",
+            "departureTime": "2026-07-15T09:15:00+09:00",
+            "mobilityType": "SENIOR",
+            "constraintMode": "ALLOW_WITH_WARNINGS",
+            "useRealtime": false,
+            "maxTransfers": 3,
+            "alternativeCount": 1
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v2/routes/closure-probe/refresh",
+          "request": {}
+        }
+      ]
     },
     "adminLogin": {
       "id": "admin-login",
