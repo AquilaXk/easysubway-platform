@@ -120,6 +120,19 @@ require_positive_postgres_integer() {
 	fi
 }
 
+require_bounded_positive_integer() {
+	local name="$1"
+	local maximum="$2"
+	local raw
+	raw="$(value "${name}")"
+	if [[ ! "${raw}" =~ ^[1-9][0-9]*$ \
+		|| "${#raw}" -gt "${#maximum}" \
+		|| ( "${#raw}" -eq "${#maximum}" && "${raw}" > "${maximum}" ) ]]; then
+		printf 'invalid or relaxed Route V2 limit: %s\n' "${name}" >&2
+		exit 1
+	fi
+}
+
 require_bool() {
 	local name="$1"
 	local raw
@@ -154,6 +167,18 @@ if grep -qx 'EASYSUBWAY_ADS_EVENT_DAILY_CAP=' "${env_values_file}"; then
 fi
 require_nonempty EASYSUBWAY_ADS_EVENT_DAILY_CAP
 require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
+require_nonempty EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET
+require_nonempty EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256
+require_nonempty EASYSUBWAY_PLAY_INTEGRITY_CREDENTIALS_BASE64
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_MAX_REQUESTS 50
+if [[ ! "$(value EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET)" =~ ^[A-Za-z0-9_-]{43,128}$ ]]; then
+	printf 'invalid Route V2 origin secret\n' >&2
+	exit 1
+fi
+if [[ ! "$(value EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256)" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+	printf 'invalid Play Integrity certificate SHA-256\n' >&2
+	exit 1
+fi
 
 if [[ "$(value EASYSUBWAY_BACKEND_BIND)" != "127.0.0.1" ]]; then
 	printf 'backend bind must be 127.0.0.1\n' >&2
