@@ -589,6 +589,15 @@ jobs:
           docker tag "${IMAGE}@${DEPLOY_IMAGE_DIGEST}" "easysubway-backend:${DEPLOY_SHA}"
           echo "DEPLOY_IMAGE_DIGEST=${DEPLOY_IMAGE_DIGEST}" >> "${GITHUB_ENV}"
 
+      - name: CD Deploy / Rehearse PR1 image rollback after V51
+        if: ${{ steps.route-purge.outputs.required == 'true' && steps.dotenv.outputs.source == 'secret' }}
+        shell: bash
+        env:
+          DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+          CURRENT_DEPLOYED_SHA: ${{ steps.route-purge.outputs.current_sha }}
+          BACKEND_ENV_FILE: ${{ steps.split-env.outputs.dir }}/backend.env
+        run: bash tools/ops/route-search-purge-rollback-rehearsal.sh
+
       - name: CD Deploy / Decide remote deploy readiness
         id: remote
         shell: bash
