@@ -367,9 +367,23 @@ jobs:
 
           marker_status="$(marker_value status)"
           marker_request_sha="$(marker_value snapshot_request_sha)"
-          marker_current_sha="$(marker_value current_sha)"
+          marker_deployed_sha="$(marker_value deployed_sha)"
+          marker_image_revision="$(marker_value image_revision)"
+          marker_postgresql_major="$(marker_value postgresql_major)"
+          marker_schema_version="$(marker_value schema_version)"
+          marker_purge_sql_sha="$(marker_value purge_sql_sha256)"
           backup_file="$(marker_value backup_file)"
           marker_backup_sha="$(marker_value backup_sha256)"
+
+          current_image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "easysubway-backend:${CURRENT_DEPLOYED_SHA}")"
+          current_postgresql_version_num="$(docker exec easysubway-postgres sh -lc \
+            'psql -X -v ON_ERROR_STOP=1 -A -t -U "$POSTGRES_USER" "$POSTGRES_DB" -c "SHOW server_version_num;"' \
+            | tr -d '[:space:]')"
+          current_postgresql_major="${current_postgresql_version_num:0:2}"
+          current_schema_version="$(docker exec easysubway-postgres sh -lc \
+            'psql -X -v ON_ERROR_STOP=1 -A -t -U "$POSTGRES_USER" "$POSTGRES_DB" -c "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank DESC LIMIT 1;"' \
+            | tr -d '[:space:]')"
+          current_purge_sql_sha="$(sha256sum tools/ops/route-search-purge.sql | awk '{print $1}')"
 
           if [[ "${marker_status}" != "snapshot-complete" ]]; then
             echo "route purge snapshot marker is incomplete" >&2
@@ -379,8 +393,24 @@ jobs:
             echo "snapshot marker request SHA does not match deploy SHA" >&2
             exit 1
           fi
-          if [[ "${marker_current_sha}" != "${CURRENT_DEPLOYED_SHA}" ]]; then
+          if [[ "${marker_deployed_sha}" != "${CURRENT_DEPLOYED_SHA}" ]]; then
             echo "snapshot marker source SHA does not match current production SHA" >&2
+            exit 1
+          fi
+          if [[ "${marker_image_revision}" != "${current_image_revision}" ]]; then
+            echo "snapshot marker image revision does not match current production" >&2
+            exit 1
+          fi
+          if [[ "${marker_postgresql_major}" != "${current_postgresql_major}" ]]; then
+            echo "snapshot marker PostgreSQL major does not match current production" >&2
+            exit 1
+          fi
+          if [[ "${marker_schema_version}" != "${current_schema_version}" ]]; then
+            echo "snapshot marker schema version does not match current production" >&2
+            exit 1
+          fi
+          if [[ "${marker_purge_sql_sha}" != "${current_purge_sql_sha}" ]]; then
+            echo "snapshot marker purge SQL checksum does not match deploy target" >&2
             exit 1
           fi
           case "${backup_file}" in
