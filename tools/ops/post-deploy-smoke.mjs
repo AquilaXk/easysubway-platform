@@ -65,13 +65,13 @@ function joinUrl(base, pathname) {
   return `${base.replace(/\/+$/, "")}${pathname}`;
 }
 
-async function checkReadiness(baseUrl, axis, timeoutMs) {
+async function checkHealth(baseUrl, axis, timeoutMs) {
   const url = joinUrl(baseUrl, axis.path);
   const { status, text } = await httpRequest(url, { timeoutMs });
-  if (status !== 200) throw new Error(`readiness returned HTTP ${status}`);
-  const body = parseJson(text, "readiness");
+  if (status !== 200) throw new Error(`${axis.id} returned HTTP ${status}`);
+  const body = parseJson(text, axis.id);
   if (body[axis.expectStatusField] !== axis.expectStatusValue) {
-    throw new Error(`readiness ${axis.expectStatusField} was ${body[axis.expectStatusField]}, expected ${axis.expectStatusValue}`);
+    throw new Error(`${axis.id} ${axis.expectStatusField} was ${body[axis.expectStatusField]}, expected ${axis.expectStatusValue}`);
   }
 }
 
@@ -180,14 +180,18 @@ async function main() {
 
   const contractPath = argValue(args, "--contract", DEFAULT_CONTRACT);
   const contract = JSON.parse(await readFile(contractPath, "utf8"));
-  const { readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
+  const { liveness, readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
 
   const datapackBaseUrl = argValue(args, "--datapack-base-url", datapack.baseUrl);
   const budgetMs = Number(argValue(args, "--timeout-seconds", "90")) * 1000;
 
   const axes = [];
-  axes.push(await runAxis(readiness, (t) => checkReadiness(baseUrl, readiness, t), {
-    maxMs: Math.max(6000, budgetMs * 0.55),
+  axes.push(await runAxis(liveness, (t) => checkHealth(baseUrl, liveness, t), {
+    maxMs: Math.max(2000, budgetMs * 0.1),
+    delayMs: 2000,
+  }));
+  axes.push(await runAxis(readiness, (t) => checkHealth(baseUrl, readiness, t), {
+    maxMs: Math.max(6000, budgetMs * 0.45),
     delayMs: 3000,
   }));
   axes.push(await runAxisOnce(

@@ -144,6 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${IMAGE}:sha-${DEPLOY_SHA}"
+          metadata_file="${RUNNER_TEMP}/backend-build-metadata.json"
 
           # Idempotent re-deploy: reuse the existing digest if this SHA tag was
           # already pushed (e.g. a workflow_dispatch redeploy) — issue #1686.
@@ -152,30 +153,54 @@ jobs:
             echo "reusing existing digest ${digest} for ${tag}"
           else
             # Native arm64 build on the ubuntu-24.04-arm runner (OCI A1 target).
-            docker build \
+            docker buildx create --use
+            docker buildx build \
+              --platform linux/arm64 \
               -f backend/Dockerfile \
               --label "org.opencontainers.image.revision=${DEPLOY_SHA}" \
               --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --attest type=sbom \
+              --provenance=true \
+              --metadata-file "${metadata_file}" \
+              --push \
               -t "${tag}" \
               backend
 
-            # An amd64 image would not even start on the aarch64 server, so gate
-            # the architecture before publishing.
-            arch="$(docker image inspect "${tag}" --format '{{.Os}}/{{.Architecture}}')"
-            if [[ "${arch}" != "linux/arm64" ]]; then
-              echo "built image arch ${arch}, expected linux/arm64" >&2
+            digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.digest}}')"
+            if ! grep -Eq '"containerimage\.digest"[[:space:]]*:[[:space:]]*"'"${digest}"'"' "${metadata_file}"; then
+              echo "Buildx metadata digest does not match the pushed manifest" >&2
               exit 1
             fi
+          fi
 
-            docker push "${tag}"
-            # RepoDigests is populated by the push; take the digest after the '@'.
-            repo_digest="$(docker image inspect "${tag}" --format '{{index .RepoDigests 0}}')"
-            digest="${repo_digest##*@}"
+          # A failed build may leave its SHA tag in GHCR. Gate both new and
+          # reused tags before accepting their digest for deployment.
+          arch="$(docker buildx imagetools inspect "${tag}" --format '{{range .Manifest.manifests}}{{if eq .platform.os "linux"}}{{.platform.os}}/{{.platform.architecture}}{{end}}{{end}}')"
+          if [[ "${arch}" != "linux/arm64" ]]; then
+            echo "built image arch ${arch}, expected linux/arm64" >&2
+            exit 1
           fi
 
           if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "failed to resolve pushed image digest" >&2
             exit 1
+          fi
+          evidence_dir="${RUNNER_TEMP}/backend-image-evidence"
+          mkdir -p "${evidence_dir}"
+          base_image="$(sed -n 's/^FROM //p' backend/Dockerfile)"
+          if [[ ! "${base_image}" =~ ^eclipse-temurin:21-jre@sha256:[0-9a-f]{64}$ ]]; then
+            echo "backend runtime base image is not digest-pinned" >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "${tag}" --raw > "${evidence_dir}/image-index.json"
+          {
+            printf 'git_sha=%s\n' "${DEPLOY_SHA}"
+            printf 'base_image=%s\n' "${base_image}"
+            printf 'image_tag=%s\n' "${tag}"
+            printf 'image_digest=%s\n' "${digest}"
+          } > "${evidence_dir}/identity.env"
+          if [[ -f "${metadata_file}" ]]; then
+            cp "${metadata_file}" "${evidence_dir}/build-metadata.json"
           fi
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
           {
@@ -184,6 +209,14 @@ jobs:
             echo "- digest: \`${digest}\`"
             echo "- arch: linux/arm64"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: CD Build image / Upload immutable identity evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backend-image-identity-${{ needs.plan.outputs.sha }}
+          path: ${{ runner.temp }}/backend-image-evidence
+          if-no-files-found: error
+          retention-days: 14
 
   deploy:
     name: CD Deploy

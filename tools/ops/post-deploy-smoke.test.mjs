@@ -13,6 +13,7 @@ const script = "tools/ops/post-deploy-smoke.mjs";
 
 function defaultRoutes() {
   return {
+    liveness: () => ({ status: 200, body: { status: "UP" } }),
     readiness: () => ({ status: 200, body: { status: "UP" } }),
     routeV1Search: () => ({ status: 403, body: {} }),
     routeV2Search: () => ({ status: 403, body: {} }),
@@ -26,7 +27,8 @@ async function withServer(routes, fn) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     let handler;
-    if (url.pathname === "/actuator/health/readiness") handler = routes.readiness;
+    if (url.pathname === "/actuator/health/liveness") handler = routes.liveness;
+    else if (url.pathname === "/actuator/health/readiness") handler = routes.readiness;
     else if (url.pathname === "/api/v1/routes/search" && req.method === "POST") handler = routes.routeV1Search;
     else if (url.pathname === "/api/v2/routes/search" && req.method === "POST") handler = routes.routeV2Search;
     else if (url.pathname === "/api/v2/routes/closure-probe/refresh" && req.method === "POST") handler = routes.routeRefresh;
@@ -91,17 +93,27 @@ function axis(report, id) {
   return report.axes.find((entry) => entry.id === id);
 }
 
-test("post-deploy smoke passes when all four axes respond correctly", async () => {
+test("post-deploy smoke passes when all five axes respond correctly", async () => {
   await withServer(defaultRoutes(), async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl);
     assert.equal(code, 0);
     assert.equal(report.overall, "PASS");
-    assert.equal(report.axes.length, 4);
-    for (const id of ["readiness", "route-api-closure", "admin-login", "datapack"]) {
+    assert.equal(report.axes.length, 5);
+    for (const id of ["liveness", "readiness", "route-api-closure", "admin-login", "datapack"]) {
       assert.equal(axis(report, id).result, "PASS", `${id} should pass`);
     }
     assert.equal(axis(report, "datapack").deploymentAttributed, false);
     assert.equal(axis(report, "readiness").deploymentAttributed, true);
+  });
+});
+
+test("post-deploy smoke fails when liveness is not UP", async () => {
+  const routes = defaultRoutes();
+  routes.liveness = () => ({ status: 503, body: { status: "DOWN" } });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.equal(axis(report, "liveness").result, "FAIL");
   });
 });
 
@@ -191,7 +203,10 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
   assert.equal(contract.gate, "post-deploy-smoke");
   assert.equal(contract.issue, 1688);
 
-  const { readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
+  const { liveness, readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
+  assert.equal(liveness.deploymentAttributed, true);
+  assert.equal(liveness.path, "/actuator/health/liveness");
+  assert.equal(liveness.expectStatusValue, "UP");
   assert.equal(readiness.deploymentAttributed, true);
   assert.equal(readiness.path, "/actuator/health/readiness");
   assert.equal(readiness.expectStatusValue, "UP");

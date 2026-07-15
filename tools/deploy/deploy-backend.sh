@@ -272,6 +272,45 @@ start_observability_services() {
 	fi
 }
 
+verify_runtime_hardening() {
+	local service="$1"
+	local container_id=""
+	local runtime_config=""
+	local uid=""
+	local gid=""
+	local process_status=""
+	local cap_eff=""
+	local no_new_privs=""
+
+	container_id="$(compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" ps -q "${service}" 2>/dev/null || true)"
+	[[ -n "${container_id}" ]] || return 1
+	runtime_config="$(docker inspect --format '{{.Config.User}}|{{.HostConfig.ReadonlyRootfs}}|{{json .HostConfig.Tmpfs}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.SecurityOpt}}' "${container_id}")"
+	[[ "${runtime_config}" == '10001:10001|true|{"/tmp":"rw,nosuid,nodev"}|["ALL"]|["no-new-privileges:true"]' ]] || return 1
+
+	uid="$(docker exec "${container_id}" id -u)"
+	gid="$(docker exec "${container_id}" id -g)"
+	[[ "${uid}:${gid}" == "10001:10001" ]] || return 1
+	if docker exec "${container_id}" touch /app/app.jar >/dev/null 2>&1; then
+		return 1
+	fi
+	docker exec "${container_id}" sh -c 'probe="$(mktemp /tmp/easysubway-hardening.XXXXXX)" && rm -f "$probe"' || return 1
+
+	process_status="$(docker exec "${container_id}" cat /proc/1/status)"
+	cap_eff="$(awk '$1 == "CapEff:" { print $2 }' <<<"${process_status}")"
+	no_new_privs="$(awk '$1 == "NoNewPrivs:" { print $2 }' <<<"${process_status}")"
+	[[ "${cap_eff}" == "0000000000000000" && "${no_new_privs}" == "1" ]] || return 1
+
+	printf 'runtime_hardening service=%s uid=%s gid=%s rootfs=read-only tmpfs=/tmp cap_eff=%s no_new_privs=%s image_digest=%s\n' \
+		"${service}" "${uid}" "${gid}" "${cap_eff}" "${no_new_privs}" "${DEPLOY_IMAGE_DIGEST}"
+}
+
+runtime_services_hardened() {
+	local service
+	for service in "${RUNTIME_SERVICES[@]}"; do
+		verify_runtime_hardening "${service}" || return 1
+	done
+}
+
 compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" config --quiet
 
 LEGACY_BACKEND_UNIT="easysubway-backend.service"
@@ -439,7 +478,8 @@ fi
 
 if [[ "${current_sha}" == "${DEPLOY_SHA}" && "${current_env_hash}" == "${target_env_hash}" ]]; then
 	if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${backend_port}/actuator/health/readiness" >/dev/null 2>&1 \
-		&& compose_services_running "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}"; then
+		&& compose_services_running "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}" \
+		&& runtime_services_hardened; then
 		write_phase "completed"
 		write_result "noop" "same_sha_same_env_services_ready"
 		exit 0
@@ -564,6 +604,10 @@ if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/
 fi
 if ! start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${recreate_alertmanager}" "${recreate_observability_config}"; then
 	fail_backend_deployment "observability_start_failed"
+	exit 1
+fi
+if ! runtime_services_hardened; then
+	fail_backend_deployment "runtime_hardening_failed"
 	exit 1
 fi
 
