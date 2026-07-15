@@ -250,6 +250,161 @@ jobs:
           echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
           echo "DEPLOY_SHA=${deploy_sha}" >> "${GITHUB_ENV}"
 
+      - name: CD Deploy / Detect route purge migration
+        id: route-purge
+        shell: bash
+        env:
+          DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+        run: |
+          set -euo pipefail
+
+          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
+          if [[ ! "${DEPLOY_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ || "${DEPLOY_ROOT}" == *..* ]]; then
+            echo "DEPLOY_ROOT is invalid" >&2
+            exit 1
+          fi
+          if [[ ! -f "${DEPLOY_ROOT}/shared/current-sha" ]]; then
+            echo "required=false" >> "${GITHUB_OUTPUT}"
+            echo "current_sha=" >> "${GITHUB_OUTPUT}"
+            echo "route purge snapshot is not required without a managed deployment baseline" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          current_sha="$(<"${DEPLOY_ROOT}/shared/current-sha")"
+          if [[ ! "${current_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "deployed SHA marker is invalid" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${current_sha}^{commit}"; then
+            echo "deployed SHA is unavailable in the repository" >&2
+            exit 1
+          fi
+
+          route_purge_changes="${RUNNER_TEMP}/route-purge-migration-changes.txt"
+          git diff --name-only "${current_sha}" "${DEPLOY_SHA}" -- \
+            backend/src/main/resources/db/migration/postgresql \
+            backend/src/main/resources/db/migration/h2 \
+            > "${route_purge_changes}"
+          target_migrations="${RUNNER_TEMP}/target-migrations.txt"
+          git ls-tree -r --name-only "${DEPLOY_SHA}" -- \
+            backend/src/main/resources/db/migration/postgresql \
+            backend/src/main/resources/db/migration/h2 \
+            > "${target_migrations}"
+
+          required=false
+          if grep -Eq '^backend/src/main/resources/db/migration/(postgresql|h2)/V51__' "${route_purge_changes}" && \
+             grep -Eq '^backend/src/main/resources/db/migration/(postgresql|h2)/V51__' "${target_migrations}"; then
+            required=true
+          fi
+          echo "required=${required}" >> "${GITHUB_OUTPUT}"
+          echo "current_sha=${current_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: CD Deploy / Require route purge snapshot evidence
+        if: ${{ steps.route-purge.outputs.required == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+          CURRENT_DEPLOYED_SHA: ${{ steps.route-purge.outputs.current_sha }}
+        run: |
+          set -euo pipefail
+
+          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
+          if [[ ! "${DEPLOY_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ || "${DEPLOY_ROOT}" == *..* ]]; then
+            echo "DEPLOY_ROOT is invalid" >&2
+            exit 1
+          fi
+          if [[ ! "${CURRENT_DEPLOYED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "snapshot source deployed SHA is invalid" >&2
+            exit 1
+          fi
+
+          snapshot_runs_file="${RUNNER_TEMP}/route-purge-snapshot-runs.json"
+          snapshot_wait_deadline="$((SECONDS + 3600))"
+          while true; do
+            if curl -fsS \
+              --connect-timeout 5 \
+              --max-time 20 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --output "${snapshot_runs_file}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/production-route-api-closure-evidence.yml/runs?head_sha=${DEPLOY_SHA}&branch=main&status=success&per_page=20"; then
+              if node tools/ci/require-successful-workflow-run.mjs \
+                "${snapshot_runs_file}" \
+                "${DEPLOY_SHA}" \
+                "Production route API closure evidence" \
+                "push,workflow_dispatch" \
+                main \
+                3600; then
+                break
+              fi
+            else
+              echo "snapshot evidence query failed; retrying within bounded deadline" >&2
+            fi
+            if (( SECONDS >= snapshot_wait_deadline )); then
+              echo "timed out waiting for route purge snapshot evidence" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
+          marker_file="${DEPLOY_ROOT}/shared/1913-route-purge-snapshot/snapshot-${DEPLOY_SHA}.env"
+          if [[ ! -f "${marker_file}" ]]; then
+            echo "route purge snapshot marker is missing" >&2
+            exit 1
+          fi
+
+          marker_value() {
+            local key="${1:?marker key is required}"
+            local value
+            value="$(sed -n "s/^${key}=//p" "${marker_file}")"
+            if [[ -z "${value}" || "${value}" == *$'\n'* ]]; then
+              echo "snapshot marker field ${key} is missing or duplicated" >&2
+              exit 1
+            fi
+            printf '%s\n' "${value}"
+          }
+
+          marker_status="$(marker_value status)"
+          marker_request_sha="$(marker_value snapshot_request_sha)"
+          marker_current_sha="$(marker_value current_sha)"
+          backup_file="$(marker_value backup_file)"
+          marker_backup_sha="$(marker_value backup_sha256)"
+
+          if [[ "${marker_status}" != "snapshot-complete" ]]; then
+            echo "route purge snapshot marker is incomplete" >&2
+            exit 1
+          fi
+          if [[ "${marker_request_sha}" != "${DEPLOY_SHA}" ]]; then
+            echo "snapshot marker request SHA does not match deploy SHA" >&2
+            exit 1
+          fi
+          if [[ "${marker_current_sha}" != "${CURRENT_DEPLOYED_SHA}" ]]; then
+            echo "snapshot marker source SHA does not match current production SHA" >&2
+            exit 1
+          fi
+          case "${backup_file}" in
+            "${DEPLOY_ROOT}/backups/postgres/1913-route-purge/"*.dump) ;;
+            *)
+              echo "snapshot marker backup path is invalid" >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! -f "${backup_file}" || ! -f "${backup_file}.sha256" ]]; then
+            echo "snapshot marker backup is missing" >&2
+            exit 1
+          fi
+          if [[ ! "${marker_backup_sha}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "snapshot marker backup checksum is invalid" >&2
+            exit 1
+          fi
+          actual_backup_sha="$(sha256sum "${backup_file}" | awk '{print $1}')"
+          if [[ "${marker_backup_sha}" != "${actual_backup_sha}" ]]; then
+            echo "snapshot marker backup checksum mismatch" >&2
+            exit 1
+          fi
+          echo "validated_route_purge_snapshot_sha=${DEPLOY_SHA}" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: CD Deploy / Validate manual dispatch CI
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
