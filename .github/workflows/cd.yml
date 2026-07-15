@@ -148,8 +148,8 @@ jobs:
 
           # Idempotent re-deploy: reuse the existing digest if this SHA tag was
           # already pushed (e.g. a workflow_dispatch redeploy) — issue #1686.
-          # {{.Manifest.digest}} is the documented descriptor digest accessor.
-          if digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.digest}}' 2>/dev/null)" && [[ -n "${digest}" ]]; then
+          # Buildx templates expose OCI descriptor fields with Go field names.
+          if digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}' 2>/dev/null)" && [[ -n "${digest}" ]]; then
             echo "reusing existing digest ${digest} for ${tag}"
           else
             # Native arm64 build on the ubuntu-24.04-arm runner (OCI A1 target).
@@ -166,7 +166,7 @@ jobs:
               -t "${tag}" \
               backend
 
-            digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.digest}}')"
+            digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
             if ! grep -Eq '"containerimage\.digest"[[:space:]]*:[[:space:]]*"'"${digest}"'"' "${metadata_file}"; then
               echo "Buildx metadata digest does not match the pushed manifest" >&2
               exit 1
@@ -175,7 +175,7 @@ jobs:
 
           # A failed build may leave its SHA tag in GHCR. Gate both new and
           # reused tags before accepting their digest for deployment.
-          arch="$(docker buildx imagetools inspect "${tag}" --format '{{range .Manifest.manifests}}{{if eq .platform.os "linux"}}{{.platform.os}}/{{.platform.architecture}}{{end}}{{end}}')"
+          arch="$(docker buildx imagetools inspect "${tag}" --format '{{range .Manifest.Manifests}}{{if eq .Platform.OS "linux"}}{{.Platform.OS}}/{{.Platform.Architecture}}{{end}}{{end}}')"
           if [[ "${arch}" != "linux/arm64" ]]; then
             echo "built image arch ${arch}, expected linux/arm64" >&2
             exit 1
