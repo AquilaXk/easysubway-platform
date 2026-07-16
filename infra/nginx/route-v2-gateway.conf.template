@@ -1,0 +1,55 @@
+set_real_ip_from 127.0.0.1;
+set_real_ip_from ${EASYSUBWAY_ROUTE_V2_TRUSTED_PROXY_CIDR};
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+
+limit_req_zone $binary_remote_addr zone=route_session_ip:10m rate=${EASYSUBWAY_ROUTE_V2_SESSION_RATE_PER_MINUTE}r/m;
+limit_req_zone $binary_remote_addr zone=route_search_ip:10m rate=${EASYSUBWAY_ROUTE_V2_SEARCH_RATE_PER_MINUTE}r/m;
+limit_req_zone $http_authorization zone=route_search_token:10m rate=${EASYSUBWAY_ROUTE_V2_SEARCH_RATE_PER_MINUTE}r/m;
+log_format route_v2_session_rate_limited escape=json '{"event":"route_v2_rate_limited","scope":"session","status":429}';
+log_format route_v2_search_rate_limited escape=json '{"event":"route_v2_rate_limited","scope":"search","status":429}';
+error_log /dev/stderr crit;
+
+server {
+	listen 8081;
+	server_tokens off;
+	access_log off;
+	limit_req_status 429;
+	limit_req_log_level info;
+
+	location = /api/v2/routes/session {
+		client_max_body_size 20k;
+		error_page 429 = @route_session_rate_limited;
+		limit_req zone=route_session_ip burst=${EASYSUBWAY_ROUTE_V2_SESSION_BURST} nodelay;
+		proxy_pass http://backend:8080;
+		include /tmp/nginx-conf.d/route-v2-proxy-headers.inc;
+	}
+
+	location = /api/v2/routes/search {
+		error_page 429 = @route_search_rate_limited;
+		limit_req zone=route_search_ip burst=${EASYSUBWAY_ROUTE_V2_SEARCH_BURST} nodelay;
+		limit_req zone=route_search_token burst=${EASYSUBWAY_ROUTE_V2_SEARCH_BURST} nodelay;
+		proxy_pass http://backend:8080;
+		include /tmp/nginx-conf.d/route-v2-proxy-headers.inc;
+	}
+
+	location @route_session_rate_limited {
+		access_log /dev/stdout route_v2_session_rate_limited;
+		default_type application/json;
+		add_header Retry-After 60 always;
+		add_header Cache-Control "private, no-store" always;
+		return 429 '{"success":false,"code":"ROUTE_RATE_LIMITED","message":"잠시 후 다시 시도"}';
+	}
+
+	location @route_search_rate_limited {
+		access_log /dev/stdout route_v2_search_rate_limited;
+		default_type application/json;
+		add_header Retry-After 60 always;
+		add_header Cache-Control "private, no-store" always;
+		return 429 '{"success":false,"code":"ROUTE_RATE_LIMITED","message":"잠시 후 다시 시도"}';
+	}
+
+	location / {
+		return 404;
+	}
+}

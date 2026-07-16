@@ -16,7 +16,11 @@ function defaultRoutes() {
     liveness: () => ({ status: 200, body: { status: "UP" } }),
     readiness: () => ({ status: 200, body: { status: "UP" } }),
     routeV1Search: () => ({ status: 403, body: {} }),
-    routeV2Search: () => ({ status: 403, body: {} }),
+    routeV2Session: () => ({
+      status: 403,
+      body: { success: false, code: "ROUTE_SESSION_ATTESTATION_REJECTED", message: "ITX 시간표를 불러올 수 없어요" },
+    }),
+    routeV2Search: () => ({ status: 401, body: {} }),
     routeRefresh: () => ({ status: 404, body: {} }),
     adminLogin: () => ({ status: 200, body: "<html><body><form method=\"post\">login</form></body></html>", raw: true }),
     datapack: () => ({ status: 200, body: { packs: [{ id: "capital", version: "2026.07.01" }] } }),
@@ -30,6 +34,7 @@ async function withServer(routes, fn) {
     if (url.pathname === "/actuator/health/liveness") handler = routes.liveness;
     else if (url.pathname === "/actuator/health/readiness") handler = routes.readiness;
     else if (url.pathname === "/api/v1/routes/search" && req.method === "POST") handler = routes.routeV1Search;
+    else if (url.pathname === "/api/v2/routes/session" && req.method === "POST") handler = routes.routeV2Session;
     else if (url.pathname === "/api/v2/routes/search" && req.method === "POST") handler = routes.routeV2Search;
     else if (url.pathname === "/api/v2/routes/closure-probe/refresh" && req.method === "POST") handler = routes.routeRefresh;
     else if (url.pathname === "/admin/login") handler = routes.adminLogin;
@@ -62,6 +67,9 @@ async function runSmoke(baseUrl, extraArgs = []) {
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
   const reportPath = path.join(dir, "report.json");
+  const ingressArgs = extraArgs.includes("--route-v2-ingress-enabled")
+    ? []
+    : ["--route-v2-ingress-enabled", "true"];
   const args = [
     script,
     "--base-url",
@@ -70,6 +78,7 @@ async function runSmoke(baseUrl, extraArgs = []) {
     baseUrl,
     "--timeout-seconds",
     "4",
+    ...ingressArgs,
     "--report",
     reportPath,
     ...extraArgs,
@@ -117,13 +126,84 @@ test("post-deploy smoke fails when liveness is not UP", async () => {
   });
 });
 
-test("post-deploy smoke accepts one-shot 403/404 for every closed route endpoint", async () => {
+test("post-deploy smoke accepts 401 for authenticated V2 search and keeps closed endpoints at 403/404", async () => {
   const routes = defaultRoutes();
   await withServer(routes, async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl);
     assert.equal(code, 0);
     assert.equal(axis(report, "route-api-closure").result, "PASS");
     assert.equal(axis(report, "route-api-closure").attempts, 1);
+  });
+});
+
+test("post-deploy smoke requires enabled session ingress to reach exact attestation rejection", async () => {
+  const routes = defaultRoutes();
+  routes.routeV2Session = () => ({ status: 404, body: {} });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.match(axis(report, "route-api-closure").detail, /POST \/api\/v2\/routes\/session returned HTTP 404/);
+  });
+
+  routes.routeV2Session = () => ({ status: 403, body: { success: false, code: "WRONG_CODE" } });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.match(axis(report, "route-api-closure").detail, /code was WRONG_CODE/);
+  });
+});
+
+test("post-deploy smoke rejects Play Integrity provider unavailability", async () => {
+  const routes = defaultRoutes();
+  routes.routeV2Session = () => ({
+    status: 503,
+    body: { success: false, code: "ROUTE_SESSION_ATTESTATION_UNAVAILABLE" },
+  });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.match(axis(report, "route-api-closure").detail, /POST \/api\/v2\/routes\/session returned HTTP 503/);
+  });
+});
+
+test("post-deploy smoke requires enabled ingress to return 401 instead of 404", async () => {
+  const routes = defaultRoutes();
+  routes.routeV2Search = () => ({ status: 404, body: {} });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.equal(axis(report, "route-api-closure").result, "FAIL");
+    assert.match(axis(report, "route-api-closure").detail, /POST \/api\/v2\/routes\/search returned HTTP 404/);
+  });
+});
+
+test("post-deploy smoke requires disabled ingress to return 404 instead of 401", async () => {
+  const routes = defaultRoutes();
+  routes.routeV2Session = () => ({ status: 404, body: {} });
+  routes.routeV2Search = () => ({ status: 404, body: {} });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl, ["--route-v2-ingress-enabled", "false"]);
+    assert.equal(code, 0);
+    assert.equal(axis(report, "route-api-closure").result, "PASS");
+  });
+
+  routes.routeV2Search = () => ({ status: 401, body: {} });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl, ["--route-v2-ingress-enabled", "false"]);
+    assert.equal(code, 1);
+    assert.equal(axis(report, "route-api-closure").result, "FAIL");
+    assert.match(axis(report, "route-api-closure").detail, /POST \/api\/v2\/routes\/search returned HTTP 401/);
+  });
+});
+
+test("post-deploy smoke does not weaken v1 closure to 401", async () => {
+  const routes = defaultRoutes();
+  routes.routeV1Search = () => ({ status: 401, body: {} });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.equal(axis(report, "route-api-closure").result, "FAIL");
+    assert.match(axis(report, "route-api-closure").detail, /POST \/api\/v1\/routes\/search returned HTTP 401/);
   });
 });
 
@@ -149,8 +229,11 @@ test("post-deploy smoke shares one timeout budget across closed route endpoints"
   const delayedForbidden = () => new Promise((resolve) => {
     setTimeout(() => resolve({ status: 403, body: {} }), 900);
   });
+  const delayedUnauthorized = () => new Promise((resolve) => {
+    setTimeout(() => resolve({ status: 401, body: {} }), 900);
+  });
   routes.routeV1Search = delayedForbidden;
-  routes.routeV2Search = delayedForbidden;
+  routes.routeV2Search = delayedUnauthorized;
   routes.routeRefresh = delayedForbidden;
 
   await withServer(routes, async (baseUrl) => {
@@ -214,10 +297,29 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
   assert.equal(routeApiClosure.deploymentAttributed, true);
   assert.equal(routeApiClosure.id, "route-api-closure");
   assert.deepEqual(routeApiClosure.acceptedStatuses, [403, 404]);
+  const authenticatedV2Search = routeApiClosure.endpoints.find(
+    ({ path: endpointPath }) => endpointPath === "/api/v2/routes/search",
+  );
+  assert.deepEqual(authenticatedV2Search.acceptedStatusesByIngress, {
+    true: [401],
+    false: [404],
+  });
+  const session = routeApiClosure.endpoints.find(
+    ({ path: endpointPath }) => endpointPath === "/api/v2/routes/session",
+  );
+  assert.deepEqual(session.acceptedStatusesByIngress, {
+    true: [403],
+    false: [404],
+  });
+  assert.deepEqual(session.expectedJsonFieldsByIngress.true, {
+    success: false,
+    code: "ROUTE_SESSION_ATTESTATION_REJECTED",
+  });
   assert.deepEqual(
     routeApiClosure.endpoints.map(({ method, path: endpointPath }) => `${method} ${endpointPath}`),
     [
       "POST /api/v1/routes/search",
+      "POST /api/v2/routes/session",
       "POST /api/v2/routes/search",
       "POST /api/v2/routes/closure-probe/refresh",
     ],
@@ -240,4 +342,14 @@ test("post-deploy smoke requires an explicit base url", async () => {
     execFileAsync(process.execPath, [script, "--datapack-base-url", "https://example.com"], { cwd: root }),
     /--base-url is required/,
   );
+});
+
+test("post-deploy smoke requires an explicit Route V2 ingress state", async () => {
+  const error = await execFileAsync(
+    process.execPath,
+    [script, "--base-url", "https://example.invalid"],
+    { cwd: root },
+  ).then(() => null, (reason) => reason);
+  assert.notEqual(error, null);
+  assert.match(error.stderr, /--route-v2-ingress-enabled must be true or false/);
 });

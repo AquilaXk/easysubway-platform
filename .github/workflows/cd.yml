@@ -240,6 +240,7 @@ jobs:
     outputs:
       sha: ${{ steps.target.outputs.sha }}
       deploy_ready: ${{ steps.remote.outputs.deploy_ready }}
+      route_v2_ingress_enabled: ${{ steps.ingress-state.outputs.enabled }}
 
     steps:
       - name: CD Deploy / Checkout repository
@@ -692,6 +693,21 @@ jobs:
             INCOMING_DIR="${incoming}" \
             bash "${incoming}/deploy-backend.sh"
 
+      - name: CD Deploy / Expose deployed Route V2 ingress state
+        id: ingress-state
+        if: ${{ steps.remote.outputs.deploy_ready == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          state_file="${DEPLOY_ROOT}/shared/current-route-v2-ingress-enabled"
+          state="$(<"${state_file}")"
+          if [[ "${state}" != "true" && "${state}" != "false" ]]; then
+            echo "deployed Route V2 ingress state is invalid" >&2
+            exit 1
+          fi
+          echo "enabled=${state}" >> "${GITHUB_OUTPUT}"
+
       # Public readiness is now one axis of the post-deploy-smoke job (below),
       # which runs on ubuntu-latest so it also verifies true external
       # reachability of the deployed URL (issue #1688). Local readiness is
@@ -745,6 +761,7 @@ jobs:
         shell: bash
         env:
           DEPLOY_PUBLIC_API_BASE_URL: ${{ vars.DEPLOY_PUBLIC_API_BASE_URL }}
+          ROUTE_V2_INGRESS_ENABLED: ${{ needs.deploy.outputs.route_v2_ingress_enabled }}
         run: |
           set -euo pipefail
 
@@ -766,6 +783,7 @@ jobs:
           # is the larger risk. The job fails and notify-slack-cd-result alerts.
           node tools/ops/post-deploy-smoke.mjs \
             --base-url "${DEPLOY_PUBLIC_API_BASE_URL}" \
+            --route-v2-ingress-enabled "${ROUTE_V2_INGRESS_ENABLED}" \
             --timeout-seconds 90 \
             --report "${RUNNER_TEMP}/post-deploy-smoke-report.json" | tee -a "${GITHUB_STEP_SUMMARY}"
 

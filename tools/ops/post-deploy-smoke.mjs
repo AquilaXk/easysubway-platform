@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Post-deploy smoke: verifies the deployed backend and the independent datapack
 // URL after a deploy (issue #1688). The route axis proves that production route
-// APIs stay closed; it must never retry an observed 2xx into a later PASS.
+// v1/refresh stay closed and Route V2 matches the deployed ingress toggle; it
+// must never retry an observed 2xx or mismatched ingress status into a later PASS.
 //
 // Design constraints (see issue #1688):
 // - The datapack axis is a DIFFERENT failure domain than the backend deploy; the
@@ -75,15 +76,16 @@ async function checkHealth(baseUrl, axis, timeoutMs) {
   }
 }
 
-async function checkRouteApiClosure(baseUrl, axis, timeoutMs) {
+async function checkRouteApiClosure(baseUrl, axis, timeoutMs, routeV2IngressEnabled) {
   const deadline = Date.now() + timeoutMs;
   for (const endpoint of axis.endpoints) {
     const context = `${endpoint.method} ${endpoint.path}`;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new Error(`${context} check failed: timeout budget exhausted`);
     let status;
+    let text;
     try {
-      ({ status } = await httpRequest(joinUrl(baseUrl, endpoint.path), {
+      ({ status, text } = await httpRequest(joinUrl(baseUrl, endpoint.path), {
         method: endpoint.method,
         headers: { "content-type": "application/json" },
         body: JSON.stringify(endpoint.request),
@@ -92,8 +94,20 @@ async function checkRouteApiClosure(baseUrl, axis, timeoutMs) {
     } catch (error) {
       throw new Error(`${context} check failed: ${error.message}`, { cause: error });
     }
-    if (!axis.acceptedStatuses.includes(status)) {
+    const acceptedStatuses = endpoint.acceptedStatusesByIngress?.[String(routeV2IngressEnabled)]
+      ?? endpoint.acceptedStatuses
+      ?? axis.acceptedStatuses;
+    if (!acceptedStatuses.includes(status)) {
       throw new Error(`${context} returned HTTP ${status}`);
+    }
+    const expectedJsonFields = endpoint.expectedJsonFieldsByIngress?.[String(routeV2IngressEnabled)];
+    if (expectedJsonFields) {
+      const body = parseJson(text, context);
+      for (const [field, expected] of Object.entries(expectedJsonFields)) {
+        if (body[field] !== expected) {
+          throw new Error(`${context} ${field} was ${String(body[field])}, expected ${String(expected)}`);
+        }
+      }
     }
   }
 }
@@ -177,6 +191,11 @@ async function main() {
   const args = process.argv.slice(2);
   const baseUrl = argValue(args, "--base-url");
   if (!baseUrl) throw new Error("--base-url is required");
+  const routeV2IngressEnabledRaw = argValue(args, "--route-v2-ingress-enabled");
+  if (routeV2IngressEnabledRaw !== "true" && routeV2IngressEnabledRaw !== "false") {
+    throw new Error("--route-v2-ingress-enabled must be true or false");
+  }
+  const routeV2IngressEnabled = routeV2IngressEnabledRaw === "true";
 
   const contractPath = argValue(args, "--contract", DEFAULT_CONTRACT);
   const contract = JSON.parse(await readFile(contractPath, "utf8"));
@@ -196,7 +215,7 @@ async function main() {
   }));
   axes.push(await runAxisOnce(
     routeApiClosure,
-    (t) => checkRouteApiClosure(baseUrl, routeApiClosure, t),
+    (t) => checkRouteApiClosure(baseUrl, routeApiClosure, t, routeV2IngressEnabled),
     Math.min(10000, Math.max(2000, budgetMs * 0.2)),
   ));
   axes.push(await runAxis(adminLogin, (t) => checkAdminLogin(baseUrl, adminLogin, t), {
@@ -226,6 +245,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     baseUrl,
     datapackBaseUrl: datapackBaseUrl || null,
+    routeV2IngressEnabled,
     overall: axes.some((axis) => axis.result === "FAIL") ? "FAIL" : "PASS",
     axes,
   };

@@ -144,6 +144,15 @@ require_bool() {
 	esac
 }
 
+require_route_v2_trusted_proxy_cidr() {
+	local raw
+	raw="$(value EASYSUBWAY_ROUTE_V2_TRUSTED_PROXY_CIDR)"
+	if [[ "${raw}" != "172.16.0.0/12" ]]; then
+		printf 'invalid Route V2 trusted proxy CIDR\n' >&2
+		exit 1
+	fi
+}
+
 is_truthy() {
 	local name="$1"
 	case "$(printf '%s' "$(value "${name}")" | tr '[:upper:]' '[:lower:]')" in
@@ -170,6 +179,13 @@ require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
 require_nonempty EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET
 require_nonempty EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256
 require_nonempty EASYSUBWAY_PLAY_INTEGRITY_CREDENTIALS_BASE64
+require_port EASYSUBWAY_ROUTE_V2_GATEWAY_PORT
+require_bool EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED
+require_route_v2_trusted_proxy_cidr
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_RATE_PER_MINUTE 5
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_BURST 2
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SEARCH_RATE_PER_MINUTE 10
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SEARCH_BURST 3
 require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_MAX_REQUESTS 50
 if [[ ! "$(value EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET)" =~ ^[A-Za-z0-9_-]{43,128}$ ]]; then
 	printf 'invalid Route V2 origin secret\n' >&2

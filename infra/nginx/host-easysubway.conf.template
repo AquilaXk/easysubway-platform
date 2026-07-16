@@ -1,0 +1,49 @@
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name easysubway-api.aquilaxk.site;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type text/plain;
+    }
+
+    location / {
+        return 308 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+
+    ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/easysubway-api.aquilaxk.site/privkey.pem;
+
+    return 444;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name easysubway-api.aquilaxk.site;
+
+    ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/easysubway-api.aquilaxk.site/privkey.pem;
+
+    location = /api/v2/routes/session {
+        __ROUTE_V2_ACTION__
+        include /etc/nginx/snippets/easysubway-route-v2-proxy.conf;
+    }
+
+    location = /api/v2/routes/search {
+        __ROUTE_V2_ACTION__
+        include /etc/nginx/snippets/easysubway-route-v2-proxy.conf;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        include /etc/nginx/snippets/easysubway-default-proxy.conf;
+    }
+}

@@ -45,7 +45,7 @@ LOCK_FILE="${DEPLOY_ROOT}/deploy.lock"
 
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
-RUNTIME_SERVICES=(backend back-worker)
+RUNTIME_SERVICES=(backend back-worker route-v2-gateway)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana)
 OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana)
 
@@ -220,6 +220,20 @@ ensure_backend_env_value EASYSUBWAY_ADMIN_MASTER_DATA_VERSION "${DEPLOY_SHA}"
 
 backend_port="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_BACKEND_PORT)"
 backend_port="${backend_port:-8080}"
+route_v2_gateway_port="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ROUTE_V2_GATEWAY_PORT)"
+route_v2_gateway_port="${route_v2_gateway_port:-8081}"
+route_v2_ingress_enabled="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED | tr '[:upper:]' '[:lower:]')"
+case "${route_v2_ingress_enabled}" in
+	true|on|yes|1)
+		route_v2_ingress_enabled_normalized=true
+		route_v2_host_action="proxy_pass http://127.0.0.1:${route_v2_gateway_port};"
+		;;
+	""|false|off|no|0)
+		route_v2_ingress_enabled_normalized=false
+		route_v2_host_action="return 404;"
+		;;
+	*) printf 'invalid Route V2 ingress enabled value\n' >&2; exit 2 ;;
+esac
 report_upload_bucket="$(read_env_value "${BACKEND_ENV}" EASYSUBWAY_REPORT_UPLOAD_BUCKET)"
 if [[ -z "${report_upload_bucket}" ]]; then
 	write_result "blocked" "missing_report_upload_bucket"
@@ -578,7 +592,7 @@ fail_backend_deployment() {
 		ln -sfn "$(readlink "${SHARED_DIR}/previous-env")" "${SHARED_DIR}/current-env.next"
 		mv -Tf "${SHARED_DIR}/current-env.next" "${SHARED_DIR}/current-env"
 		ensure_rollback_image "${current_sha}" || true
-		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}" || true
+		compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" up -d --no-deps --no-build --force-recreate "${RUNTIME_SERVICES[@]}" || true
 		start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${current_sha}" "${recreate_alertmanager}" "${recreate_observability_config}" || true
 		write_result "failed" "${detail}_rollback_attempted"
 	else
@@ -598,7 +612,7 @@ fail_backend_deployment() {
 }
 
 write_phase "restarting"
-if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build "${RUNTIME_SERVICES[@]}"; then
+if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build --force-recreate "${RUNTIME_SERVICES[@]}"; then
 	fail_backend_deployment "backend_start_failed"
 	exit 1
 fi
@@ -647,6 +661,110 @@ if [[ "${ready}" -ne 1 ]]; then
 	fail_backend_deployment "readiness_failed"
 	exit 1
 fi
+
+install_route_v2_host_ingress() {
+	local site_target="/etc/nginx/sites-available/easysubway"
+	local route_snippet_target="/etc/nginx/snippets/easysubway-route-v2-proxy.conf"
+	local default_snippet_target="/etc/nginx/snippets/easysubway-default-proxy.conf"
+	local candidate site_backup route_snippet_backup default_snippet_backup
+	local site_existed=0 route_snippet_existed=0 default_snippet_existed=0
+	local install_failed=0 restore_failed=0
+	if ! candidate="$(mktemp)"; then
+		return 1
+	fi
+	if ! site_backup="$(mktemp)"; then
+		rm -f "${candidate}"
+		return 1
+	fi
+	if ! route_snippet_backup="$(mktemp)"; then
+		rm -f "${candidate}" "${site_backup}"
+		return 1
+	fi
+	if ! default_snippet_backup="$(mktemp)"; then
+		rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}"
+		return 1
+	fi
+	if ! sed \
+		-e "s/__BACKEND_PORT__/${backend_port}/g" \
+		-e "s|__ROUTE_V2_ACTION__|${route_v2_host_action}|g" \
+		infra/nginx/host-easysubway.conf.template > "${candidate}"; then
+		rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+		return 1
+	fi
+	if sudo test -f "${site_target}"; then
+		if ! sudo cp "${site_target}" "${site_backup}"; then
+			rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+			return 1
+		fi
+		site_existed=1
+	fi
+	if sudo test -f "${route_snippet_target}"; then
+		if ! sudo cp "${route_snippet_target}" "${route_snippet_backup}"; then
+			rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+			return 1
+		fi
+		route_snippet_existed=1
+	fi
+	if sudo test -f "${default_snippet_target}"; then
+		if ! sudo cp "${default_snippet_target}" "${default_snippet_backup}"; then
+			rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+			return 1
+		fi
+		default_snippet_existed=1
+	fi
+	if ! sudo install -m 0644 infra/nginx/host-route-v2-proxy.conf "${route_snippet_target}"; then
+		install_failed=1
+	fi
+	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 infra/nginx/host-default-proxy.conf "${default_snippet_target}"; then
+		install_failed=1
+	fi
+	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 "${candidate}" "${site_target}"; then
+		install_failed=1
+	fi
+	if [[ "${install_failed}" -eq 0 ]] && ! sudo nginx -t >/dev/null 2>&1; then
+		install_failed=1
+	fi
+	if [[ "${install_failed}" -eq 0 ]] && ! sudo systemctl reload nginx; then
+		install_failed=1
+	fi
+	if [[ "${install_failed}" -ne 0 ]]; then
+		if [[ "${site_existed}" -eq 1 ]]; then
+			if ! sudo install -m 0644 "${site_backup}" "${site_target}"; then restore_failed=1; fi
+		else
+			if ! sudo rm -f "${site_target}"; then restore_failed=1; fi
+		fi
+		if [[ "${route_snippet_existed}" -eq 1 ]]; then
+			if ! sudo install -m 0644 "${route_snippet_backup}" "${route_snippet_target}"; then restore_failed=1; fi
+		else
+			if ! sudo rm -f "${route_snippet_target}"; then restore_failed=1; fi
+		fi
+		if [[ "${default_snippet_existed}" -eq 1 ]]; then
+			if ! sudo install -m 0644 "${default_snippet_backup}" "${default_snippet_target}"; then restore_failed=1; fi
+		else
+			if ! sudo rm -f "${default_snippet_target}"; then restore_failed=1; fi
+		fi
+		if [[ "${restore_failed}" -eq 0 ]] && ! sudo nginx -t >/dev/null 2>&1; then
+			restore_failed=1
+		fi
+		if [[ "${restore_failed}" -eq 0 ]] && ! sudo systemctl reload nginx; then
+			restore_failed=1
+		fi
+		rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+		if [[ "${restore_failed}" -ne 0 ]]; then
+			printf 'failed to restore Route V2 host ingress\n' >&2
+		fi
+		return 1
+	fi
+	rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+}
+
+if ! install_route_v2_host_ingress; then
+	fail_backend_deployment "route_v2_host_ingress_failed"
+	exit 1
+fi
+
+printf '%s\n' "${route_v2_ingress_enabled_normalized}" > "${SHARED_DIR}/current-route-v2-ingress-enabled"
+chmod 600 "${SHARED_DIR}/current-route-v2-ingress-enabled"
 
 legacy_restore_on_error=0
 trap - ERR INT TERM HUP
