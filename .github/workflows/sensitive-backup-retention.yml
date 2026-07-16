@@ -1,0 +1,49 @@
+name: Sensitive backup retention
+
+on:
+  schedule:
+    - cron: "47 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    name: Prune expired sensitive backups
+    runs-on:
+      - self-hosted
+      - easysubway-production
+    timeout-minutes: 5
+    concurrency:
+      group: sensitive-backup-retention-production
+      cancel-in-progress: false
+    environment:
+      name: production
+    env:
+      DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+
+    steps:
+      - name: Sensitive backup retention / Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Sensitive backup retention / Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+
+      - name: Sensitive backup retention / Prune expired copies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
+          if [[ ! "${DEPLOY_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ || "${DEPLOY_ROOT}" == *..* ]]; then
+            echo "DEPLOY_ROOT is invalid" >&2
+            exit 1
+          fi
+          node tools/ops/prune-sensitive-backups.mjs \
+            --root "${DEPLOY_ROOT}/backups" \
+            --retention-days "30"

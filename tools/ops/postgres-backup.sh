@@ -41,4 +41,7 @@ else
 fi
 chmod 600 "${backup_file}" "${backup_file}.sha256"
 trap - EXIT
+node "${ROOT_DIR}/tools/ops/prune-sensitive-backups.mjs" \
+	--root "${BACKUP_DIR}" \
+	--retention-days "30"
 printf '%s\n' "${backup_file}"
