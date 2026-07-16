@@ -106,6 +106,7 @@ services:
     restart: unless-stopped
     user: "10001:10001"
     entrypoint: ["/bin/sh", "/etc/nginx/route-v2-entrypoint.sh"]
+    command: ["nginx", "-g", "daemon off;"]
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev
