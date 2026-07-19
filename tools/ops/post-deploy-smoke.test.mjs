@@ -22,6 +22,36 @@ function defaultRoutes() {
     }),
     routeV2Search: () => ({ status: 401, body: {} }),
     routeRefresh: () => ({ status: 404, body: {} }),
+    trainSeoulStations: () => ({
+      status: 200,
+      body: { success: true, data: [{ id: "NAT010000", name: "서울" }] },
+    }),
+    trainDaejeonStations: () => ({
+      status: 200,
+      body: { success: true, data: [{ id: "NAT011668", name: "대전" }] },
+    }),
+    trainSearch: () => ({
+      status: 200,
+      body: {
+        success: true,
+        data: {
+          observedAt: "2026-07-19T04:00:00Z",
+          outbound: [{
+            trainNumber: "001",
+            trainType: "KTX",
+            departureStationId: "NAT010000",
+            departureStationName: "서울",
+            departureAt: "2026-07-19T09:00:00+09:00",
+            arrivalStationId: "NAT011668",
+            arrivalStationName: "대전",
+            arrivalAt: "2026-07-19T10:00:00+09:00",
+            durationMinutes: 60,
+            adultFareWon: 23700,
+          }],
+          inbound: [],
+        },
+      },
+    }),
     adminLogin: () => ({ status: 200, body: "<html><body><form method=\"post\">login</form></body></html>", raw: true }),
     datapack: () => ({ status: 200, body: { packs: [{ id: "capital", version: "2026.07.01" }] } }),
   };
@@ -37,6 +67,9 @@ async function withServer(routes, fn) {
     else if (url.pathname === "/api/v2/routes/session" && req.method === "POST") handler = routes.routeV2Session;
     else if (url.pathname === "/api/v2/routes/search" && req.method === "POST") handler = routes.routeV2Search;
     else if (url.pathname === "/api/v2/routes/closure-probe/refresh" && req.method === "POST") handler = routes.routeRefresh;
+    else if (url.pathname === "/api/v1/trains/stations" && url.searchParams.get("query") === "서울") handler = routes.trainSeoulStations;
+    else if (url.pathname === "/api/v1/trains/stations" && url.searchParams.get("query") === "대전") handler = routes.trainDaejeonStations;
+    else if (url.pathname === "/api/v1/trains/search") handler = routes.trainSearch;
     else if (url.pathname === "/admin/login") handler = routes.adminLogin;
     else if (url.pathname === "/catalog/current.json") handler = routes.datapack;
 
@@ -62,7 +95,7 @@ async function withServer(routes, fn) {
   }
 }
 
-async function runSmoke(baseUrl, extraArgs = []) {
+async function runSmoke(baseUrl, extraArgs = [], timeoutSeconds = "4") {
   const dir = path.join(tmpdir(), `smoke-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
@@ -77,7 +110,7 @@ async function runSmoke(baseUrl, extraArgs = []) {
     "--datapack-base-url",
     baseUrl,
     "--timeout-seconds",
-    "4",
+    timeoutSeconds,
     ...ingressArgs,
     "--report",
     reportPath,
@@ -102,17 +135,92 @@ function axis(report, id) {
   return report.axes.find((entry) => entry.id === id);
 }
 
-test("post-deploy smoke passes when all five axes respond correctly", async () => {
+test("post-deploy smoke passes when all six axes respond correctly", async () => {
   await withServer(defaultRoutes(), async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl);
     assert.equal(code, 0);
     assert.equal(report.overall, "PASS");
-    assert.equal(report.axes.length, 5);
-    for (const id of ["liveness", "readiness", "route-api-closure", "admin-login", "datapack"]) {
+    assert.equal(report.axes.length, 6);
+    for (const id of ["liveness", "readiness", "route-api-closure", "train-search", "admin-login", "datapack"]) {
       assert.equal(axis(report, id).result, "PASS", `${id} should pass`);
     }
     assert.equal(axis(report, "datapack").deploymentAttributed, false);
     assert.equal(axis(report, "readiness").deploymentAttributed, true);
+  });
+});
+
+test("post-deploy smoke retries a temporary train catalog 503 during cold start", async () => {
+  const routes = defaultRoutes();
+  let stationCalls = 0;
+  routes.trainSeoulStations = () => {
+    stationCalls += 1;
+    return stationCalls === 1
+      ? { status: 503, body: { success: false, data: { code: "TRAIN_SEARCH_UNAVAILABLE" } } }
+      : { status: 200, body: { success: true, data: [{ id: "NAT010000", name: "서울" }] } };
+  };
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 0);
+    assert.equal(axis(report, "train-search").result, "PASS");
+    assert.equal(axis(report, "train-search").attempts, 2);
+    assert.equal(stationCalls, 2);
+  });
+});
+
+test("post-deploy smoke does not retry a permanent train catalog 400", async () => {
+  const routes = defaultRoutes();
+  let stationCalls = 0;
+  routes.trainSeoulStations = () => {
+    stationCalls += 1;
+    return { status: 400, body: { success: false, data: { code: "TRAIN_SEARCH_INVALID_ARGUMENT" } } };
+  };
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.equal(axis(report, "train-search").attempts, 1);
+    assert.equal(stationCalls, 1);
+  });
+});
+
+test("post-deploy smoke keeps every sequential axis inside one global timeout", async () => {
+  const routes = defaultRoutes();
+  routes.liveness = () => new Promise((resolve) => {
+    setTimeout(() => resolve({ status: 200, body: { status: "UP" } }), 3000);
+  });
+  await withServer(routes, async (baseUrl) => {
+    const startedAt = Date.now();
+    const { code, report } = await runSmoke(baseUrl, [], "1");
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.equal(code, 1);
+    assert.ok(elapsedMs < 1800, `global timeout took ${elapsedMs}ms`);
+    assert.equal(report.axes.length, 6);
+    assert.match(axis(report, "train-search").detail, /global timeout budget exhausted/);
+    assert.equal(axis(report, "train-search").attempts, 0);
+  });
+});
+
+test("post-deploy smoke fails when nationwide train search cannot return a Seoul-Daejeon KTX fare", async () => {
+  const routes = defaultRoutes();
+  routes.trainSearch = () => ({
+    status: 503,
+    body: { success: false, data: { code: "TRAIN_SEARCH_UNAVAILABLE" } },
+  });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.equal(axis(report, "train-search").result, "FAIL");
+    assert.match(axis(report, "train-search").detail, /train search returned HTTP 503/);
+  });
+});
+
+test("post-deploy smoke rejects a train result without an approved KTX fare row", async () => {
+  const routes = defaultRoutes();
+  routes.trainSearch = () => ({ status: 200, body: { success: true, data: { outbound: [] } } });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl);
+    assert.equal(code, 1);
+    assert.match(axis(report, "train-search").detail, /approved Seoul-Daejeon KTX fare row/);
   });
 });
 
@@ -286,7 +394,7 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
   assert.equal(contract.gate, "post-deploy-smoke");
   assert.equal(contract.issue, 1688);
 
-  const { liveness, readiness, routeApiClosure, adminLogin, datapack } = contract.axes;
+  const { liveness, readiness, routeApiClosure, trainSearch, adminLogin, datapack } = contract.axes;
   assert.equal(liveness.deploymentAttributed, true);
   assert.equal(liveness.path, "/actuator/health/liveness");
   assert.equal(liveness.expectStatusValue, "UP");
@@ -324,6 +432,12 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
       "POST /api/v2/routes/closure-probe/refresh",
     ],
   );
+
+  assert.equal(trainSearch.deploymentAttributed, true);
+  assert.equal(trainSearch.id, "train-search");
+  assert.deepEqual(trainSearch.stationQueries, ["서울", "대전"]);
+  assert.equal(trainSearch.searchPath, "/api/v1/trains/search");
+  assert.equal(trainSearch.trainType, "KTX");
 
   assert.equal(adminLogin.deploymentAttributed, true);
   assert.equal(adminLogin.path, "/admin/login");

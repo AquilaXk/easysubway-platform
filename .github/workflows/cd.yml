@@ -523,6 +523,8 @@ jobs:
                 drop["EASYSUBWAY_SEOUL_TOPIS_CALL_LIMIT_PER_DAY"] = 1
                 drop["EASYSUBWAY_TAGO_TRAIN_CALL_LIMIT_PER_MINUTE"] = 1
                 drop["EASYSUBWAY_TAGO_TRAIN_CALL_LIMIT_PER_DAY"] = 1
+                drop["EASYSUBWAY_TRAIN_SEARCH_RATE_LIMIT_PER_DAY"] = 1
+                drop["EASYSUBWAY_TRUSTED_PROXY_CIDRS"] = 1
                 if (drop_topis_key == "true") {
                   drop["EASYSUBWAY_SEOUL_TOPIS_SERVICE_KEY"] = 1
                 }
@@ -552,6 +554,8 @@ jobs:
             fi
             printf 'EASYSUBWAY_TAGO_TRAIN_CALL_LIMIT_PER_MINUTE=60\n' >> "${env_file}"
             printf 'EASYSUBWAY_TAGO_TRAIN_CALL_LIMIT_PER_DAY=1000\n' >> "${env_file}"
+            printf 'EASYSUBWAY_TRAIN_SEARCH_RATE_LIMIT_PER_DAY=64\n' >> "${env_file}"
+            printf 'EASYSUBWAY_TRUSTED_PROXY_CIDRS=172.16.0.0/12\n' >> "${env_file}"
             echo "source=secret" >> "${GITHUB_OUTPUT}"
           else
             cp .env.example "${env_file}"
@@ -617,6 +621,13 @@ jobs:
 
           EASYSUBWAY_BACKEND_ENV_FILE="${PREPARED_ENV_DIR}/backend.env" \
             docker compose --env-file "${PREPARED_ENV_DIR}/compose.env" -f infra/docker-compose.yml config --quiet
+
+      - name: CD Deploy / Validate TAGO train provider credential
+        if: ${{ steps.dotenv.outputs.source == 'secret' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --env-file="${PREPARED_ENV_DIR}/backend.env" tools/ops/probe-tago-train-provider.mjs
 
       - name: CD Deploy / Log in to GHCR
         uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567

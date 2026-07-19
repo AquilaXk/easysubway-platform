@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "gate": "post-deploy-smoke",
   "issue": 1688,
-  "descriptionKo": "매 백엔드 배포 직후 핵심 5축이 배포 URL에서 실제 동작하는지 확인하는 경량 스모크 계약. 경로검색 공개 API는 production에서 폐쇄 상태를 검증한다.",
+  "descriptionKo": "매 백엔드 배포 직후 핵심 6축이 배포 URL에서 실제 동작하는지 확인하는 경량 스모크 계약. 경로검색 공개 API는 production에서 폐쇄 상태를 검증한다.",
   "axes": {
     "liveness": {
       "id": "liveness",
@@ -77,6 +77,15 @@
           "request": {}
         }
       ]
+    },
+    "trainSearch": {
+      "id": "train-search",
+      "titleKo": "전국 여객열차 검색",
+      "deploymentAttributed": true,
+      "stationPath": "/api/v1/trains/stations",
+      "stationQueries": ["서울", "대전"],
+      "searchPath": "/api/v1/trains/search",
+      "trainType": "KTX"
     },
     "adminLogin": {
       "id": "admin-login",
