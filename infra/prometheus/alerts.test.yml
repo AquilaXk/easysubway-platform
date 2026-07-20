@@ -1,0 +1,64 @@
+# promtool test rules infra/prometheus/alerts.test.yml
+# 운행표 snapshot 잔여 유효기간 경보의 T-24h/T-6h 임계값을 시뮬레이션으로 검증한다.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: T-24h warning fires but not critical
+    input_series:
+      - series: 'easysubway_timetable_snapshot_remaining_seconds'
+        values: '43200x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT24h
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-timetable-snapshot
+            exp_annotations:
+              summary: Timetable snapshot freshUntil expires within 24 hours
+              description: The server timetable snapshot freshUntil deadline is less than 24h away. The automatic re-collection workflow must have already run; owner regeneration/deploy may still be required.
+              title_ko: "운행표 snapshot 만료 24시간 전"
+              impact_ko: "재수집·재산출이 완료되지 않으면 만료 후 재시작 시 부팅 실패 위험이 있습니다."
+              action_ko: "timetable-auto-refresh 워크플로 실행 결과를 확인하고, UNCHANGED_AUTO 승격 산출물로 재산출·배포를 진행하세요."
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT6h
+        exp_alerts: []
+
+  - interval: 1m
+    name: T-6h critical fires and warning suppressed
+    input_series:
+      - series: 'easysubway_timetable_snapshot_remaining_seconds'
+        values: '10800x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT6h
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: aquila-timetable-snapshot
+            exp_annotations:
+              summary: Timetable snapshot freshUntil expires within 6 hours
+              description: The server timetable snapshot freshUntil deadline is less than 6h away or already passed. Regeneration and deploy of a refreshed snapshot are required before expiry.
+              title_ko: "운행표 snapshot 만료 6시간 전"
+              impact_ko: "만료 시점 이후 재시작하면 부팅 hard fail로 서비스 중단 위험이 있습니다."
+              action_ko: "즉시 재산출된 snapshot을 배포하거나 break-glass override 절차를 검토하세요."
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT24h
+        exp_alerts: []
+
+  - interval: 1m
+    name: healthy snapshot stays silent
+    input_series:
+      - series: 'easysubway_timetable_snapshot_remaining_seconds'
+        values: '500000x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT24h
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT6h
+        exp_alerts: []
