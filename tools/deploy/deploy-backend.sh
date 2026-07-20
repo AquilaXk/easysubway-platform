@@ -706,6 +706,54 @@ cleanup_standby() {
 	compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" rm -f -s backend-standby || true
 }
 
+# --- Post-success local image hygiene (issue #2397) -------------------------
+# Reclaims host disk AFTER a deploy is already recorded as a success. On
+# 2026-07-20 the operational host's 48G root filled to 100% from 268
+# accumulated easysubway-backend images (44.7GB) + build cache (15.7GB),
+# cutting off the CD runner. GHCR remote images are already trimmed to the
+# newest 10 by actions-storage-cleanup.yml (#1686); this applies the same
+# "keep newest 10" retention to host-local easysubway-backend images (plus
+# every image ID still backing a running container — never removed regardless
+# of age) and then prunes dangling images + build cache. Best-effort by
+# contract: it is only ever called from the success epilogue below, after all
+# traps are disarmed and last-result.env already reads success, and its whole
+# body runs in an errexit-off subshell that always returns 0 — a cleanup error
+# can never fire a trap or flip a successful deploy to failed (issue #2397).
+prune_stale_backend_images() {
+	(
+		set +e
+		# Image IDs of every currently-running container are always preserved,
+		# regardless of repo or age, so nothing is removed out from under a
+		# live container (canonical backend, back-worker, observability, …).
+		running_ids="$(docker ps -q | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null | sort -u)"
+		# docker images lists newest-first; dedupe by full ID and keep the 10
+		# most-recently-created as rollback candidates (mirrors #1686).
+		all_ids="$(docker images easysubway-backend --no-trunc --format '{{.ID}}' 2>/dev/null | awk '!seen[$0]++')"
+		keep_ids="$(printf '%s\n' "${all_ids}" | head -n 10)"
+
+		removed=0
+		while IFS= read -r id; do
+			[[ -z "${id}" ]] && continue
+			grep -qxF "${id}" <<<"${running_ids}" && continue
+			grep -qxF "${id}" <<<"${keep_ids}" && continue
+			# -f: a stale image ID can carry multiple repository/tag and GHCR
+			# RepoDigest references; plain rmi refuses to delete those, so force
+			# removal (safe — running + newest 10 are already excluded above).
+			if docker rmi -f "${id}" >/dev/null 2>&1; then
+				removed=$((removed + 1))
+			fi
+		done <<<"${all_ids}"
+
+		kept="$(grep -c . <<<"${keep_ids}")"
+		images_reclaimed="$(docker image prune -f 2>/dev/null | awk -F': ' '/Total reclaimed space/ {print $2}')"
+		builder_reclaimed="$(docker builder prune -af 2>/dev/null | awk -F': ' '/Total reclaimed space/ {print $2}')"
+
+		printf 'image-cleanup(#2397): removed %s stale easysubway-backend image(s), kept %s newest + running; dangling reclaimed %s, build-cache reclaimed %s\n' \
+			"${removed}" "${kept:-0}" "${images_reclaimed:-0B}" "${builder_reclaimed:-0B}"
+	) || true
+	return 0
+}
+
 abort_deploy() {
 	local detail="$1"
 	write_result "failed" "${detail}"
@@ -1038,3 +1086,9 @@ printf '%s\n' "${DEPLOY_IMAGE_DIGEST}" > "${SHARED_DIR}/current-image-digest"
 chmod 600 "${SHARED_DIR}/current-sha" "${SHARED_DIR}/current-image-digest"
 write_phase "completed"
 write_result "success" "backend_ready"
+
+# Deploy is now recorded as a success; reclaim host disk from accumulated
+# local backend images + build cache. Best-effort and non-fatal by contract
+# (see prune_stale_backend_images above) — must never change the result
+# written just above (issue #2397).
+prune_stale_backend_images
