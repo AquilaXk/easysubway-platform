@@ -18,9 +18,9 @@ set -Eeuo pipefail
 # landing here would corrupt/break the schema out from under the live
 # canonical backend during the standby boot window, independent of whether
 # Stage 1's readiness check subsequently passes or fails — standby-stage
-# abort does not roll back a committed migration. Automated destructive-DDL
-# detection is tracked as a follow-up candidate under epic #2329, not part of
-# this script.
+# abort does not roll back a committed migration. This expand/contract contract
+# is mechanically enforced by tools/ci/check-migration-ddl-compat.mjs in both PR
+# CI and this deploy job's pre-checks (issue #2365), not by this script.
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
 DEPLOY_REPO_URL="${DEPLOY_REPO_URL:-https://github.com/AquilaXk/easysubway.git}"
 DEPLOY_COMPOSE_PROJECT="${DEPLOY_COMPOSE_PROJECT:?DEPLOY_COMPOSE_PROJECT is required}"
