@@ -55,6 +55,13 @@ image_digest_hex="${DEPLOY_IMAGE_DIGEST#sha256:}"
 # GHCR repository the CD build-image job pushes to; used as the rollback source
 # of truth when a previous image is no longer in the server-local cache.
 GHCR_IMAGE="${DEPLOY_GHCR_IMAGE:-ghcr.io/aquilaxk/easysubway-backend}"
+# Safety margin (seconds) for the timetable snapshot freshness precheck. If the
+# candidate image's bundled snapshot expires within "now + margin", the new
+# container would fail closed at boot or shortly after the deploy completes, so
+# we abort before touching the running backend (issue #2330). 2h upper-bounds the
+# build restart + propagation + health-check window.
+SNAPSHOT_FRESHNESS_PRECHECK_MARGIN_SECONDS="${SNAPSHOT_FRESHNESS_PRECHECK_MARGIN_SECONDS:-7200}"
+SNAPSHOT_EVIDENCE_PATH="backend/src/main/resources/timetable/server-timetable-snapshot-evidence.json"
 
 for file in "${COMPOSE_ENV}" "${BACKEND_ENV}"; do
 	[[ -f "${file}" ]] || { printf 'missing staged file: %s\n' "${file}" >&2; exit 2; }
@@ -516,6 +523,20 @@ fi
 image_revision="$(docker image inspect "easysubway-backend:${DEPLOY_SHA}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
 if [[ "${image_revision}" != "${DEPLOY_SHA}" ]]; then
 	write_result "blocked" "image_revision_mismatch"
+	exit 1
+fi
+
+# Timetable snapshot freshness precheck (issue #2330). The candidate commit's
+# bundled snapshot evidence is what gets baked into the image; if its freshUntil
+# is already past or expires within the deploy-completion margin, booting the new
+# container fails closed and would destroy the running service. Run this before
+# any container swap — the running backend is still untouched here (postgres and
+# object-storage were only started idempotently), so a stale candidate aborts the
+# deploy with the existing backend left intact. Fail closed on any error.
+if ! node tools/deploy/check-snapshot-freshness-precheck.mjs \
+	"${SNAPSHOT_EVIDENCE_PATH}" \
+	--margin-seconds "${SNAPSHOT_FRESHNESS_PRECHECK_MARGIN_SECONDS}"; then
+	write_result "blocked" "stale_snapshot_precheck_failed"
 	exit 1
 fi
 
