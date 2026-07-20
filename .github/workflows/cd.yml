@@ -231,7 +231,7 @@ jobs:
       contents: read
       packages: read
     environment:
-      name: production
+      name: production-cd
       url: ${{ vars.DEPLOY_PUBLIC_API_BASE_URL }}
     concurrency:
       group: cd-production-deploy
