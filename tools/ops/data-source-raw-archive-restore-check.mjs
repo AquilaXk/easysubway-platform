@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { parseCsv } from "./data-source-raw-archive-csv.mjs";
+import { codepointCompare } from "../lib/codepoint-compare.mjs";
 
 const archiveDir = resolveArchiveDirectory(process.env.EASYSUBWAY_DATA_SOURCE_RESTORE_DIR);
 
@@ -97,5 +98,5 @@ function resolveArchiveDirectory(value) {
 }
 
 function compareStrings(left, right) {
-  return left.localeCompare(right);
+  return codepointCompare(left, right);
 }
