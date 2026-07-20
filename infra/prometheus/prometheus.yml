@@ -41,6 +41,17 @@ scrape_configs:
       - target_label: __address__
         replacement: public-edge-probe:9115
 
+  # backend actuator Prometheus 메트릭 직접 scrape(#2376). actuator는 공개 노출하지 않고(nginx 공개
+  # 경로에서 /actuator/* 차단, readiness/liveness probe만 예외), 이 job은 compose 내부 DNS로
+  # backend:8080/actuator/prometheus 에 직접 접근해 easysubway_timetable_snapshot_remaining_seconds 등
+  # 앱 메트릭을 수집한다. 임시 blue/green standby(backend-standby)는 상시 대상이 아니라 down 노이즈를
+  # 유발하므로 넣지 않는다.
+  - job_name: "backend_app_metrics"
+    metrics_path: "/actuator/prometheus"
+    static_configs:
+      - targets:
+          - "backend:8080"
+
   - job_name: "docker_runtime_probe"
     static_configs:
       - targets: ["docker-runtime-probe:8080"]

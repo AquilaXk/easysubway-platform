@@ -62,3 +62,49 @@ tests:
       - eval_time: 6m
         alertname: TimetableSnapshotFreshnessExpiringT6h
         exp_alerts: []
+
+  # NaN(활성 스냅샷 없음·파싱 불가·평가 오류)에서는 fresh_until을 알 수 없으므로 잘못된 만료 경보를 막기 위해
+  # 어떤 freshness 경보도 발화하지 않아야 한다(PromQL 비교는 NaN 표본을 걸러낸다).
+  - interval: 1m
+    name: NaN remaining seconds fires no freshness alert
+    input_series:
+      - series: 'easysubway_timetable_snapshot_remaining_seconds'
+        values: 'NaN NaN NaN NaN NaN NaN NaN'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT24h
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: TimetableSnapshotFreshnessExpiringT6h
+        exp_alerts: []
+
+  # dead-man's switch: backend_app_metrics scrape가 5분 이상 멈추면(up=0) 무음 상태를 감지해 발화한다.
+  - interval: 1m
+    name: backend app metrics scrape down fires dead-mans switch
+    input_series:
+      - series: 'up{job="backend_app_metrics", instance="backend:8080"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AquilaBackendAppMetricsScrapeDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: aquila-backend-app-metrics
+            exp_annotations:
+              summary: Backend app metrics scrape is down
+              description: Prometheus cannot scrape backend_app_metrics (backend:8080/actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
+              title_ko: "백엔드 앱 메트릭 수집 실패"
+              impact_ko: "운행표 snapshot 잔여시간 게이지가 사라져 만료 24/6시간 전 경보가 조용히 멈춥니다."
+              action_ko: "backend 컨테이너 상태와 /actuator/prometheus 응답, docker network 내부 backend:8080 접근을 확인하세요."
+
+  # backend_app_metrics가 정상 scrape되면(up=1) dead-man's switch는 조용하다.
+  - interval: 1m
+    name: backend app metrics scrape up stays silent
+    input_series:
+      - series: 'up{job="backend_app_metrics", instance="backend:8080"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AquilaBackendAppMetricsScrapeDown
+        exp_alerts: []

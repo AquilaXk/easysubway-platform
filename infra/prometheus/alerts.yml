@@ -40,10 +40,27 @@ groups:
           impact_ko: "작업 큐와 DLQ 관련 알림 평가가 늦거나 멈출 수 있습니다."
           action_ko: "back-worker 컨테이너 상태와 /actuator/health/readiness 응답을 확인하세요."
 
-      # 현재 이 시계열의 라이브 scrape 소스는 없다(#2333 범위 밖, 보안상 backend actuator
-      # 공개 노출 배제 — 오너 인프라 결정 필요). 지금의 실제 운영 경보 경로는
-      # .github/workflows/timetable-auto-refresh.yml의 T-24h/T-6h Slack 통지이며,
-      # 아래 규칙은 scrape 배선이 추가되는 즉시 활성화되도록 미리 정의해 둔 것이다.
+      # dead-man's switch(#2376): backend_app_metrics scrape가 멈추면 아래 freshness 경보가 참조하는
+      # easysubway_timetable_snapshot_remaining_seconds 시계열이 사라져 T-24h/T-6h 경보가 조용히 평가를
+      # 멈춘다. 이 경보가 그 무음 상태 자체를 감시한다.
+      - alert: AquilaBackendAppMetricsScrapeDown
+        expr: min(up{job="backend_app_metrics"}) < 1
+        for: 5m
+        labels:
+          severity: critical
+          service: aquila-backend-app-metrics
+        annotations:
+          summary: Backend app metrics scrape is down
+          description: Prometheus cannot scrape backend_app_metrics (backend:8080/actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
+          title_ko: "백엔드 앱 메트릭 수집 실패"
+          impact_ko: "운행표 snapshot 잔여시간 게이지가 사라져 만료 24/6시간 전 경보가 조용히 멈춥니다."
+          action_ko: "backend 컨테이너 상태와 /actuator/prometheus 응답, docker network 내부 backend:8080 접근을 확인하세요."
+
+      # 이 시계열은 backend actuator 메트릭에서 라이브로 scrape된다(#2376): prometheus.yml의
+      # backend_app_metrics job이 docker network 내부 backend:8080/actuator/prometheus 를 직접 수집한다.
+      # actuator는 공개 노출하지 않고 nginx 공개 경로에서 /actuator/* 를 차단하되 readiness/liveness probe만
+      # 예외로 둔다. .github/workflows/timetable-auto-refresh.yml의 T-24h/T-6h Slack 통지는 보완 경보로
+      # 병행 유지된다.
       - alert: TimetableSnapshotFreshnessExpiringT24h
         expr: min(easysubway_timetable_snapshot_remaining_seconds) <= 86400 and min(easysubway_timetable_snapshot_remaining_seconds) > 21600
         for: 5m
