@@ -241,6 +241,18 @@ case "${route_v2_ingress_enabled}" in
 		;;
 	*) printf 'invalid Route V2 ingress enabled value\n' >&2; exit 2 ;;
 esac
+# A prior signed-RC canary budget breach (issue #2095,
+# tools/ops/verify-production-route-v2-canary-rollback.sh) closes Route V2
+# ingress and leaves this lock so a routine, UNRELATED deploy cannot silently
+# re-open it by re-rendering EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED=true from
+# compose.env's stale desired state. An operator must explicitly remove the
+# lock file after investigating before ingress can open again.
+route_v2_canary_rollback_lock="${SHARED_DIR}/route-v2-canary-rollback-lock.json"
+if [[ -f "${route_v2_canary_rollback_lock}" ]]; then
+	route_v2_ingress_enabled_normalized=false
+	route_v2_host_action="return 404;"
+	printf 'Route V2 ingress forced closed by canary rollback lock: %s\n' "${route_v2_canary_rollback_lock}" >&2
+fi
 report_upload_bucket="$(read_env_value "${BACKEND_ENV}" EASYSUBWAY_REPORT_UPLOAD_BUCKET)"
 if [[ -z "${report_upload_bucket}" ]]; then
 	write_result "blocked" "missing_report_upload_bucket"

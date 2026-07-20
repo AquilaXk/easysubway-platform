@@ -714,6 +714,20 @@ jobs:
             tools/deploy/deploy-backend.sh \
             "${incoming}/"
 
+          # Enforced here, not inside the checked-out target tree: redeploying a
+          # HISTORICAL main SHA (issue #2095's rollback lock predates that SHA)
+          # copies and runs THAT SHA's own tools/deploy/deploy-backend.sh, which
+          # has no lock check at all and would silently re-open ingress from
+          # compose.env's stale EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED=true. This
+          # step's script is loaded from the ref that dispatched/triggered this
+          # CD run (not from deploy_sha), so it stays authoritative regardless of
+          # which historical deploy-backend.sh gets copied above.
+          if [[ -f "${DEPLOY_ROOT}/shared/route-v2-canary-rollback-lock.json" ]] \
+            && ! grep -Fq 'route-v2-canary-rollback-lock.json' "${incoming}/deploy-backend.sh"; then
+            echo 'Route V2 ingress is locked closed by a canary rollback lock (issue #2095), but the deploy tooling for this SHA predates lock enforcement; refusing to deploy until an operator resolves the lock or redeploys a SHA whose deploy-backend.sh enforces it' >&2
+            exit 1
+          fi
+
           DEPLOY_ROOT="${DEPLOY_ROOT}" \
             DEPLOY_COMPOSE_PROJECT="${DEPLOY_COMPOSE_PROJECT}" \
             DEPLOY_SHA="${DEPLOY_SHA}" \
