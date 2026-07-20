@@ -69,6 +69,54 @@ services:
       object-storage:
         condition: service_healthy
 
+  # Transient blue/green standby: boots the candidate image on an alternate
+  # port so deploy-backend.sh can validate it before promoting it onto the
+  # canonical "backend" container above (issue #2331). Never started by a
+  # bare `up`/`up -d` (deploy-backend.sh always names services explicitly);
+  # `restart: "no"` keeps it from lingering if the host reboots mid-deploy —
+  # every deploy run either promotes and removes it, or removes it on
+  # failure, well within the same run.
+  #
+  # This container shares the SAME Postgres datasource as canonical "backend"
+  # below (same EASYSUBWAY_DATASOURCE_URL), which is still serving live
+  # traffic while this boots. Flyway migrations and TimetableSeedLoader's
+  # snapshot swap commit here, against the live database, before canonical is
+  # touched — "old backend untouched" is a process/Nginx-level guarantee, not
+  # a data-layer one. See the migration contract comment at the top of
+  # tools/deploy/deploy-backend.sh (issue #2331 review).
+  backend-standby:
+    image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+    container_name: easysubway-backend-standby
+    restart: "no"
+    stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ${EASYSUBWAY_BACKEND_ENV_FILE:-../.env.example}
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
+      EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false"
+    ports:
+      - "${EASYSUBWAY_BACKEND_BIND:-127.0.0.1}:${EASYSUBWAY_BACKEND_STANDBY_PORT:-8082}:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+
   back-worker:
     image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
     container_name: easysubway-back-worker
