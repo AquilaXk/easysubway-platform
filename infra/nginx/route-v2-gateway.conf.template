@@ -38,7 +38,8 @@ server {
 		default_type application/json;
 		add_header Retry-After 60 always;
 		add_header Cache-Control "private, no-store" always;
-		return 429 '{"success":false,"code":"ROUTE_RATE_LIMITED","message":"잠시 후 다시 시도"}';
+		add_header X-Correlation-Id $request_id always;
+		return 429 '{"success":false,"code":"ROUTE_RATE_LIMITED","message":"잠시 후 다시 시도","correlationId":"$request_id"}';
 	}
 
 	location @route_search_rate_limited {
@@ -46,7 +47,8 @@ server {
 		default_type application/json;
 		add_header Retry-After 60 always;
 		add_header Cache-Control "private, no-store" always;
-		return 429 '{"success":false,"code":"ROUTE_RATE_LIMITED","message":"잠시 후 다시 시도"}';
+		add_header X-Correlation-Id $request_id always;
+		return 429 '{"success":false,"code":"ROUTE_RATE_LIMITED","message":"잠시 후 다시 시도","correlationId":"$request_id"}';
 	}
 
 	location / {
