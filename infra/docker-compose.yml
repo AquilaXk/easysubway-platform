@@ -36,6 +36,18 @@ services:
       retries: 5
       start_period: 20s
 
+  # One-shot root fixup so named log volumes are writable by UID 10001
+  # (empty volumes are root-owned; image chown is masked by the mount).
+  backend-logs-init:
+    image: busybox:1.37.0
+    container_name: easysubway-backend-logs-init
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /logs/backend /logs/standby /logs/worker && chown -R 10001:10001 /logs/backend /logs/standby /logs/worker"]
+    volumes:
+      - backend-logs:/logs/backend
+      - backend-standby-logs:/logs/standby
+      - back-worker-logs:/logs/worker
+
   backend:
     image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
     container_name: easysubway-backend
@@ -45,6 +57,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev
+    volumes:
+      - backend-logs:/opt/easysubway/logs
     cap_drop:
       - ALL
     security_opt:
@@ -64,6 +78,8 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
+      backend-logs-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       object-storage:
@@ -93,6 +109,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev
+    volumes:
+      - backend-standby-logs:/opt/easysubway/logs
     cap_drop:
       - ALL
     security_opt:
@@ -112,6 +130,8 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
+      backend-logs-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       object-storage:
@@ -126,6 +146,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev
+    volumes:
+      - back-worker-logs:/opt/easysubway/logs
     cap_drop:
       - ALL
     security_opt:
@@ -143,6 +165,8 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
+      backend-logs-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       object-storage:
@@ -318,3 +342,6 @@ volumes:
   prometheus-data:
   loki-data:
   grafana-data:
+  backend-logs:
+  backend-standby-logs:
+  back-worker-logs:

@@ -904,6 +904,15 @@ install_route_v2_host_ingress() {
 # deliberately no "restart the previous image" fallback here: that path is
 # exactly what this issue removes, because the standby step already proves
 # whether the candidate image can serve before anything live is touched.
+# Named log volumes are root-owned until backend-logs-init chowns them for
+# UID 10001. Stage/runtime services use `up --no-deps`, so depends_on alone
+# never runs this one-shot — invoke it explicitly before any backend process.
+write_phase "backend_logs_init"
+if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" run --rm --no-deps backend-logs-init; then
+	abort_standby_stage "backend_logs_init_failed"
+	exit 1
+fi
+
 write_phase "standby_starting"
 write_standby_state "starting" "${backend_standby_port}"
 if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build --force-recreate backend-standby; then
