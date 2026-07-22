@@ -108,3 +108,82 @@ tests:
       - eval_time: 6m
         alertname: AquilaBackendAppMetricsScrapeDown
         exp_alerts: []
+
+  # #2434: 높은 5xx + 충분한 트래픽(>1 req/min)이면 Critical multi-window burn-rate가 발화한다.
+  # interval 1m × 70표본으로 1h/5m 창을 채운다. rate()*60 ≈ 분당 증가분.
+  - interval: 1m
+    name: Backend5xxBurnRateCritical fires with high 5xx and traffic
+    input_series:
+      - series: 'http_server_requests_seconds_count{status="500",uri="/api/x",method="GET",outcome="SERVER_ERROR"}'
+        values: '0+50x70'
+      - series: 'http_server_requests_seconds_count{status="200",uri="/api/x",method="GET",outcome="SUCCESS"}'
+        values: '0+5x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: Backend5xxBurnRateCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: aquila-backend-5xx
+            exp_annotations:
+              summary: Backend 5xx burn rate exceeds critical multi-window threshold
+              description: 5xx error ratio burn rate is above 14.4x the 0.001 error budget on both the 1h and 5m windows, with traffic above 1 req/min on the 1h window.
+              title_ko: "백엔드 5xx 버짓 소진 긴급"
+              impact_ko: "짧은 시간에 오류 예산이 빠르게 소진되고 있어 사용자 요청 실패가 급증했을 수 있습니다."
+              action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
+
+  # #2434: 트래픽 가드(<1 req/min)에서는 5xx가 있어도 Critical이 발화하지 않는다.
+  - interval: 1m
+    name: Backend5xxBurnRateCritical stays silent under traffic guard
+    input_series:
+      - series: 'http_server_requests_seconds_count{status="500",uri="/api/x",method="GET",outcome="SERVER_ERROR"}'
+        values: '0+0.1x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: Backend5xxBurnRateCritical
+        exp_alerts: []
+
+  # #2434: Warning(6h+30m, 6x) — interval 5m × 85표본으로 6h/30m 창을 채운다.
+  - interval: 5m
+    name: Backend5xxBurnRateWarning fires with high 5xx and traffic
+    input_series:
+      - series: 'http_server_requests_seconds_count{status="500",uri="/api/x",method="GET",outcome="SERVER_ERROR"}'
+        values: '0+50x85'
+      - series: 'http_server_requests_seconds_count{status="200",uri="/api/x",method="GET",outcome="SUCCESS"}'
+        values: '0+5x85'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: Backend5xxBurnRateWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-backend-5xx
+            exp_annotations:
+              summary: Backend 5xx burn rate exceeds warning multi-window threshold
+              description: 5xx error ratio burn rate is above 6x the 0.001 error budget on both the 6h and 30m windows, with traffic above 1 req/min on the 6h window.
+              title_ko: "백엔드 5xx 버짓 소진 주의"
+              impact_ko: "중기 창에서 오류 예산 소진이 계속되면 SLO(99.9%) 위반으로 이어질 수 있습니다."
+              action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
+
+  # #2434: Ticket(3d+6h, 1x) — interval 1h × 80표본으로 3d/6h 창을 채운다.
+  # traffic guard: rate*60 > 1 → 1h 표본당 증가분이 60 초과여야 함(0+70/0+10 ≈ 80/h).
+  - interval: 1h
+    name: Backend5xxBurnRateTicket fires with high 5xx and traffic
+    input_series:
+      - series: 'http_server_requests_seconds_count{status="500",uri="/api/x",method="GET",outcome="SERVER_ERROR"}'
+        values: '0+70x80'
+      - series: 'http_server_requests_seconds_count{status="200",uri="/api/x",method="GET",outcome="SUCCESS"}'
+        values: '0+10x80'
+    alert_rule_test:
+      - eval_time: 75h
+        alertname: Backend5xxBurnRateTicket
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              service: aquila-backend-5xx
+            exp_annotations:
+              summary: Backend 5xx burn rate exceeds ticket multi-window threshold
+              description: 5xx error ratio burn rate is above 1x the 0.001 error budget on both the 3d and 6h windows, with traffic above 1 req/min on the 3d window.
+              title_ko: "백엔드 5xx 버짓 소진 티켓"
+              impact_ko: "장기 창에서 오류 예산이 소진되고 있어 추적·개선 작업이 필요합니다."
+              action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."

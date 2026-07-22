@@ -26,7 +26,7 @@ query_range:
 limits_config:
   allow_structured_metadata: true
   volume_enabled: true
-  retention_period: 168h
+  retention_period: 720h
 
 schema_config:
   configs:

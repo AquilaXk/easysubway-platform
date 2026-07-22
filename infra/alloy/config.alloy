@@ -1,0 +1,56 @@
+// #2434 WP4: Docker → Loki log collection (low-cardinality labels only).
+discovery.docker "linux" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "linux" {
+  targets = discovery.docker.linux.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    target_label = "env"
+    replacement  = "local"
+  }
+
+  // Keep only low-cardinality labels + docker discovery meta used by loki.source.docker.
+  rule {
+    action = "labelkeep"
+    regex  = "container|env|__.*"
+  }
+}
+
+loki.source.docker "linux" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.linux.output
+  forward_to = [loki.process.logs.receiver]
+}
+
+loki.process "logs" {
+  // Parse JSON fields for filtering; only `level` becomes a stream label.
+  // correlationId is intentionally NOT labeled (body/structured search only).
+  stage.json {
+    expressions = {
+      level         = "level",
+      correlationId = "correlationId",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

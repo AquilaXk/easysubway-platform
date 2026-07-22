@@ -86,3 +86,83 @@ groups:
           title_ko: "운행표 snapshot 만료 6시간 전"
           impact_ko: "만료 시점 이후 재시작하면 부팅 hard fail로 서비스 중단 위험이 있습니다."
           action_ko: "즉시 재산출된 snapshot을 배포하거나 break-glass override 절차를 검토하세요."
+
+      # #2434 WP4: multi-window 5xx burn-rate (SLO 99.9% → error budget 0.001).
+      # SLI = 5xx rate / total request rate. Traffic guard: long-window rate * 60 > 1 (≈ >1 req/min).
+      - alert: Backend5xxBurnRateCritical
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[1h]))
+            /
+            sum(rate(http_server_requests_seconds_count[1h]))
+          ) > (14.4 * 0.001)
+          and
+          (
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+            /
+            sum(rate(http_server_requests_seconds_count[5m]))
+          ) > (14.4 * 0.001)
+          and
+          sum(rate(http_server_requests_seconds_count[1h])) * 60 > 1
+        for: 2m
+        labels:
+          severity: critical
+          service: aquila-backend-5xx
+        annotations:
+          summary: Backend 5xx burn rate exceeds critical multi-window threshold
+          description: 5xx error ratio burn rate is above 14.4x the 0.001 error budget on both the 1h and 5m windows, with traffic above 1 req/min on the 1h window.
+          title_ko: "백엔드 5xx 버짓 소진 긴급"
+          impact_ko: "짧은 시간에 오류 예산이 빠르게 소진되고 있어 사용자 요청 실패가 급증했을 수 있습니다."
+          action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
+
+      - alert: Backend5xxBurnRateWarning
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[6h]))
+            /
+            sum(rate(http_server_requests_seconds_count[6h]))
+          ) > (6 * 0.001)
+          and
+          (
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[30m]))
+            /
+            sum(rate(http_server_requests_seconds_count[30m]))
+          ) > (6 * 0.001)
+          and
+          sum(rate(http_server_requests_seconds_count[6h])) * 60 > 1
+        for: 2m
+        labels:
+          severity: warning
+          service: aquila-backend-5xx
+        annotations:
+          summary: Backend 5xx burn rate exceeds warning multi-window threshold
+          description: 5xx error ratio burn rate is above 6x the 0.001 error budget on both the 6h and 30m windows, with traffic above 1 req/min on the 6h window.
+          title_ko: "백엔드 5xx 버짓 소진 주의"
+          impact_ko: "중기 창에서 오류 예산 소진이 계속되면 SLO(99.9%) 위반으로 이어질 수 있습니다."
+          action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
+
+      - alert: Backend5xxBurnRateTicket
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[3d]))
+            /
+            sum(rate(http_server_requests_seconds_count[3d]))
+          ) > (1 * 0.001)
+          and
+          (
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[6h]))
+            /
+            sum(rate(http_server_requests_seconds_count[6h]))
+          ) > (1 * 0.001)
+          and
+          sum(rate(http_server_requests_seconds_count[3d])) * 60 > 1
+        for: 2m
+        labels:
+          severity: info
+          service: aquila-backend-5xx
+        annotations:
+          summary: Backend 5xx burn rate exceeds ticket multi-window threshold
+          description: 5xx error ratio burn rate is above 1x the 0.001 error budget on both the 3d and 6h windows, with traffic above 1 req/min on the 3d window.
+          title_ko: "백엔드 5xx 버짓 소진 티켓"
+          impact_ko: "장기 창에서 오류 예산이 소진되고 있어 추적·개선 작업이 필요합니다."
+          action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
