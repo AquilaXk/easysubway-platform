@@ -354,8 +354,13 @@ services:
     depends_on:
       loki:
         condition: service_healthy
+    # grafana/alloy 이미지에 wget/curl이 없어 bash /dev/tcp로 ready를 판정한다 (#2449).
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:12345/-/ready"]
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/localhost/12345; printf \"GET /-/ready HTTP/1.0\\r\\n\\r\\n\" >&3; grep -q \"Alloy is ready\" <&3'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
