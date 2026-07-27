@@ -107,3 +107,6 @@ apps/mobile/ios/DerivedData/
 !**/terraform.tfvars.example
 
 .worktrees/
+
+# svg-crop 렌더 산출물(로컬 전용)
+tools/route-map/svg-crop/.out/
