@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { codepointCompare } from "../lib/codepoint-compare.mjs";
 
 export function argValue(args, name, fallback) {
   const index = args.indexOf(name);
@@ -23,7 +24,7 @@ export function collectStrings(value, path = "$", out = []) {
 }
 
 export function stableFlatJson(value) {
-  return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))));
+  return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => codepointCompare(a, b))));
 }
 
 export async function readJson(path) {
