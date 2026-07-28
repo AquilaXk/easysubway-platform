@@ -1,7 +1,7 @@
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    server_name easysubway-api.aquilaxk.site;
+    server_name easysubway-api.aquilaxk.site easysubway.aquilaxk.site;
     access_log off;
 
     location ^~ /.well-known/acme-challenge/ {
@@ -29,7 +29,7 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    server_name easysubway-api.aquilaxk.site;
+    server_name easysubway-api.aquilaxk.site easysubway.aquilaxk.site;
     access_log off;
 
     ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
