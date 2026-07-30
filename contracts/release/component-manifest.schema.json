@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Release component manifest",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "component", "repository", "gitSha", "artifactIdentity", "contractVersion", "evidenceSha256", "issueRefs"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "component": { "const": "mobile" }, "repository": { "type": "string", "minLength": 1 }, "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "artifactIdentity": { "type": "object", "additionalProperties": false, "required": ["versionName", "versionCode", "aabSha256", "bundledDataManifestSha256"], "properties": { "versionName": { "type": "string", "minLength": 1 }, "versionCode": { "type": "integer", "minimum": 1 }, "aabSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "bundledDataManifestSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" } } },
+        "contractVersion": { "type": "string", "minLength": 1 }, "evidenceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "issueRefs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^AquilaXk/(easysubway|easysubway-data|easysubway-platform|easysubway-backend|easysubway-mobile)#[1-9][0-9]*$" } }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "component", "repository", "gitSha", "artifactIdentity", "contractVersion", "evidenceSha256", "issueRefs"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "component": { "const": "backend" }, "repository": { "type": "string", "minLength": 1 }, "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "artifactIdentity": { "type": "object", "additionalProperties": false, "required": ["imageDigest", "apiContractVersion"], "properties": { "imageDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }, "apiContractVersion": { "type": "string", "minLength": 1 } } },
+        "contractVersion": { "type": "string", "minLength": 1 }, "evidenceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "issueRefs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^AquilaXk/(easysubway|easysubway-data|easysubway-platform|easysubway-backend|easysubway-mobile)#[1-9][0-9]*$" } }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "component", "repository", "gitSha", "artifactIdentity", "contractVersion", "evidenceSha256", "issueRefs"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "component": { "const": "data" }, "repository": { "type": "string", "minLength": 1 }, "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "artifactIdentity": { "type": "object", "additionalProperties": false, "required": ["dataVersion", "releaseSequence", "manifestSha256", "sourceSnapshotSetHash"], "properties": { "dataVersion": { "type": "string", "minLength": 1 }, "releaseSequence": { "type": "integer", "minimum": 0 }, "manifestSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "sourceSnapshotSetHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" } } },
+        "contractVersion": { "type": "string", "minLength": 1 }, "evidenceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "issueRefs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^AquilaXk/(easysubway|easysubway-data|easysubway-platform|easysubway-backend|easysubway-mobile)#[1-9][0-9]*$" } }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "component", "repository", "gitSha", "artifactIdentity", "contractVersion", "evidenceSha256", "issueRefs"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "component": { "const": "platform" }, "repository": { "type": "string", "minLength": 1 }, "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "artifactIdentity": { "type": "object", "additionalProperties": false, "required": ["environment", "deployedImageDigest", "deploymentEvidenceSha256"], "properties": { "environment": { "type": "string", "minLength": 1 }, "deployedImageDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }, "deploymentEvidenceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" } } },
+        "contractVersion": { "type": "string", "minLength": 1 }, "evidenceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "issueRefs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^AquilaXk/(easysubway|easysubway-data|easysubway-platform|easysubway-backend|easysubway-mobile)#[1-9][0-9]*$" } }
+      }
+    }
+  ]
+}
