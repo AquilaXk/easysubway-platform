@@ -3,7 +3,7 @@ name: CD
 on:
   workflow_run:
     workflows:
-      - CI
+      - Release Artifacts
     types:
       - completed
     branches:
@@ -22,6 +22,10 @@ on:
         description: "배포할 main 커밋 SHA. 비우면 현재 workflow SHA를 사용합니다."
         required: false
         type: string
+      rollback_image_digest:
+        description: "exact release artifact가 없는 긴급 rollback용 immutable sha256 digest"
+        required: false
+        type: string
 
 jobs:
   plan:
@@ -33,6 +37,8 @@ jobs:
     outputs:
       deploy_target_relevant: ${{ steps.changes.outputs.deploy }}
       sha: ${{ steps.target.outputs.sha }}
+      producer_run_id: ${{ steps.target.outputs.producer_run_id }}
+      image_digest: ${{ steps.manifest.outputs.image_digest || steps.target.outputs.rollback_image_digest }}
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
 
     steps:
@@ -48,16 +54,76 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
           DISPATCH_SHA: ${{ inputs.deploy_sha }}
           DISPATCH_MODE: ${{ inputs.mode }}
+          ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
+          rollback_image_digest=""
           if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
             deploy_sha="${WORKFLOW_RUN_SHA}"
+            producer_run_id="${WORKFLOW_RUN_ID}"
             mode="deploy"
           else
             deploy_sha="${DISPATCH_SHA:-${GITHUB_SHA}}"
+            if [[ ! "${deploy_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "invalid deploy sha: ${deploy_sha}" >&2
+              exit 1
+            fi
+            producer_runs="${RUNNER_TEMP}/release-artifacts-runs.json"
+            curl -fsS \
+              --connect-timeout 5 \
+              --max-time 20 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --output "${producer_runs}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/release-artifacts.yml/runs?head_sha=${deploy_sha}&branch=main&event=push&status=success&per_page=20"
+            producer_run_id=""
+            if validated_run="$(node tools/ci/require-successful-workflow-run.mjs \
+              "${producer_runs}" "${deploy_sha}" "Release Artifacts" "push" main 1209600)"; then
+              producer_run_id="${validated_run#validated_workflow_run_id=}"
+            else
+              run_status="$?"
+              if (( run_status == 3 )); then
+                :
+              else
+                exit "${run_status}"
+              fi
+            fi
+            if [[ -n "${producer_run_id}" ]]; then
+              artifact_name="easysubway-backend-release-${deploy_sha}"
+              producer_artifacts="${RUNNER_TEMP}/backend-release-artifacts.json"
+              curl -fsS \
+                --connect-timeout 5 \
+                --max-time 20 \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                --output "${producer_artifacts}" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${producer_run_id}/artifacts?name=${artifact_name}&per_page=100"
+              if node tools/ci/require-workflow-artifact.mjs \
+                "${producer_artifacts}" "${artifact_name}" "${producer_run_id}" "${deploy_sha}"; then
+                :
+              else
+                artifact_status="$?"
+                if (( artifact_status == 3 )); then
+                  producer_run_id=""
+                else
+                  exit "${artifact_status}"
+                fi
+              fi
+            fi
+            if [[ -z "${producer_run_id}" ]]; then
+              rollback_image_digest="${ROLLBACK_IMAGE_DIGEST}"
+              if [[ ! "${rollback_image_digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+                echo "manual rollback without an exact Release Artifacts run requires rollback_image_digest" >&2
+                exit 1
+              fi
+            fi
             mode="${DISPATCH_MODE:-deploy}"
           fi
 
@@ -73,6 +139,8 @@ jobs:
           fi
 
           echo "sha=${deploy_sha}" >> "${GITHUB_OUTPUT}"
+          echo "producer_run_id=${producer_run_id}" >> "${GITHUB_OUTPUT}"
+          echo "rollback_image_digest=${rollback_image_digest}" >> "${GITHUB_OUTPUT}"
           echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
 
       - name: CD Plan / Detect deployment changes
@@ -97,132 +165,49 @@ jobs:
           fi
           bash tools/ci/detect-changed-paths.sh changed-files.txt
 
-  build-image:
-    name: CD Build image
-    needs: plan
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: read
-      packages: write
-    if: ${{ needs.plan.outputs.deploy_target_relevant == 'true' }}
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-    steps:
-      - name: CD Build image / Checkout target SHA
-        # Not fork code: workflow_run is gated to same-repo main CI by the plan
-        # job's `if`, and the ref is a plan-verified main-ancestor SHA.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # NOSONAR
+      - name: CD Plan / Download exact backend release artifact
+        if: ${{ steps.changes.outputs.deploy == 'true' && steps.target.outputs.rollback_image_digest == '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
+          name: easysubway-backend-release-${{ steps.target.outputs.sha }}
+          path: ${{ runner.temp }}/backend-release
+          run-id: ${{ steps.target.outputs.producer_run_id }}
+          github-token: ${{ github.token }}
 
-      - name: CD Build image / Set up Java
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
-
-      - name: CD Build image / Build bootJar
-        working-directory: backend
-        shell: bash
-        run: ./gradlew bootJar --no-daemon
-
-      - name: CD Build image / Log in to GHCR
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: CD Build image / Build and push arm64 image
-        id: push
+      - name: CD Plan / Validate backend component manifest
+        id: manifest
+        if: ${{ steps.changes.outputs.deploy == 'true' && steps.target.outputs.rollback_image_digest == '' }}
         shell: bash
         env:
-          IMAGE: ghcr.io/aquilaxk/easysubway-backend
-          DEPLOY_SHA: ${{ needs.plan.outputs.sha }}
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+          MANIFEST_PATH: ${{ runner.temp }}/backend-release/backend-component-manifest.json
+          EVIDENCE_PATH: ${{ runner.temp }}/backend-release/release-metadata.txt
         run: |
           set -euo pipefail
-          tag="${IMAGE}:sha-${DEPLOY_SHA}"
-          metadata_file="${RUNNER_TEMP}/backend-build-metadata.json"
-
-          # Idempotent re-deploy: reuse the existing digest if this SHA tag was
-          # already pushed (e.g. a workflow_dispatch redeploy) — issue #1686.
-          # Buildx templates expose OCI descriptor fields with Go field names.
-          if digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}' 2>/dev/null)" && [[ -n "${digest}" ]]; then
-            echo "reusing existing digest ${digest} for ${tag}"
-          else
-            # Native arm64 build on the ubuntu-24.04-arm runner (OCI A1 target).
-            docker buildx create --use
-            docker buildx build \
-              --platform linux/arm64 \
-              -f backend/Dockerfile \
-              --label "org.opencontainers.image.revision=${DEPLOY_SHA}" \
-              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-              --attest type=sbom \
-              --provenance=true \
-              --metadata-file "${metadata_file}" \
-              --push \
-              -t "${tag}" \
-              backend
-
-            digest="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
-            if ! grep -Eq '"containerimage\.digest"[[:space:]]*:[[:space:]]*"'"${digest}"'"' "${metadata_file}"; then
-              echo "Buildx metadata digest does not match the pushed manifest" >&2
-              exit 1
-            fi
-          fi
-
-          # A failed build may leave its SHA tag in GHCR. Gate both new and
-          # reused tags before accepting their digest for deployment.
-          arch="$(docker buildx imagetools inspect "${tag}" --format '{{range .Manifest.Manifests}}{{if eq .Platform.OS "linux"}}{{.Platform.OS}}/{{.Platform.Architecture}}{{end}}{{end}}')"
-          if [[ "${arch}" != "linux/arm64" ]]; then
-            echo "built image arch ${arch}, expected linux/arm64" >&2
-            exit 1
-          fi
-
-          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "failed to resolve pushed image digest" >&2
-            exit 1
-          fi
-          evidence_dir="${RUNNER_TEMP}/backend-image-evidence"
-          mkdir -p "${evidence_dir}"
-          base_image="$(sed -n 's/^FROM //p' backend/Dockerfile)"
-          if [[ ! "${base_image}" =~ ^eclipse-temurin:21-jre@sha256:[0-9a-f]{64}$ ]]; then
-            echo "backend runtime base image is not digest-pinned" >&2
-            exit 1
-          fi
-          docker buildx imagetools inspect "${tag}" --raw > "${evidence_dir}/image-index.json"
-          {
-            printf 'git_sha=%s\n' "${DEPLOY_SHA}"
-            printf 'base_image=%s\n' "${base_image}"
-            printf 'image_tag=%s\n' "${tag}"
-            printf 'image_digest=%s\n' "${digest}"
-          } > "${evidence_dir}/identity.env"
-          if [[ -f "${metadata_file}" ]]; then
-            cp "${metadata_file}" "${evidence_dir}/build-metadata.json"
-          fi
-          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
-          {
-            echo "### CD Build image"
-            echo "- tag: \`${tag}\`"
-            echo "- digest: \`${digest}\`"
-            echo "- arch: linux/arm64"
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: CD Build image / Upload immutable identity evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: backend-image-identity-${{ needs.plan.outputs.sha }}
-          path: ${{ runner.temp }}/backend-image-evidence
-          if-no-files-found: error
-          retention-days: 14
+          node --input-type=module - <<'NODE' >> "${GITHUB_OUTPUT}"
+          import { createHash } from "node:crypto";
+          import { readFile } from "node:fs/promises";
+          const manifest = JSON.parse(await readFile(process.env.MANIFEST_PATH, "utf8"));
+          const evidence = await readFile(process.env.EVIDENCE_PATH);
+          const digest = manifest?.artifactIdentity?.imageDigest;
+          if (
+            manifest?.schemaVersion !== 1 ||
+            manifest?.component !== "backend" ||
+            manifest?.repository !== process.env.GITHUB_REPOSITORY ||
+            manifest?.gitSha !== process.env.DEPLOY_SHA ||
+            manifest?.contractVersion !== "1.0.0" ||
+            manifest?.artifactIdentity?.apiContractVersion !== manifest.contractVersion ||
+            !/^sha256:[a-f0-9]{64}$/.test(digest ?? "") ||
+            !/^[a-f0-9]{64}$/.test(manifest?.evidenceSha256 ?? "") ||
+            createHash("sha256").update(evidence).digest("hex") !== manifest.evidenceSha256
+          ) throw new Error("backend component manifest is invalid for the exact producer run");
+          process.stdout.write(`image_digest=${digest}\n`);
+          NODE
 
   deploy:
     name: CD Deploy
     needs:
       - plan
-      - build-image
     runs-on:
       - self-hosted
       - easysubway-production
@@ -654,12 +639,12 @@ jobs:
         shell: bash
         env:
           IMAGE: ghcr.io/aquilaxk/easysubway-backend
-          DEPLOY_IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
+          DEPLOY_IMAGE_DIGEST: ${{ needs.plan.outputs.image_digest }}
         run: |
           set -euo pipefail
 
           if [[ ! "${DEPLOY_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "build-image did not produce a valid digest" >&2
+            echo "plan did not produce a valid backend component digest" >&2
             exit 1
           fi
 
@@ -668,6 +653,11 @@ jobs:
           # so their --no-build and image-drift contracts are unchanged (#1686).
           docker pull "${IMAGE}@${DEPLOY_IMAGE_DIGEST}"
           docker tag "${IMAGE}@${DEPLOY_IMAGE_DIGEST}" "easysubway-backend:${DEPLOY_SHA}"
+          image_revision="$(docker image inspect "easysubway-backend:${DEPLOY_SHA}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          if [[ "${image_revision}" != "${DEPLOY_SHA}" ]]; then
+            echo "backend image revision does not match deploy SHA" >&2
+            exit 1
+          fi
           echo "DEPLOY_IMAGE_DIGEST=${DEPLOY_IMAGE_DIGEST}" >> "${GITHUB_ENV}"
 
       - name: CD Deploy / Rehearse PR1 image rollback after V51
@@ -772,13 +762,15 @@ jobs:
       - name: CD Deploy / Summarize deployment result
         if: ${{ always() }}
         shell: bash
+        env:
+          IMAGE_DIGEST: ${{ needs.plan.outputs.image_digest }}
         run: |
           set -euo pipefail
 
           {
             echo "### CD Deploy"
             echo "- target sha: ${DEPLOY_SHA:-unknown}"
-            echo "- image digest: ${{ needs.build-image.outputs.digest || 'unknown' }}"
+            echo "- image digest: ${IMAGE_DIGEST:-unknown}"
             echo "- dotenv source: ${{ steps.dotenv.outputs.source || 'unknown' }}"
             echo "- mode: ${{ steps.target.outputs.mode || 'unknown' }}"
             echo "- remote deployment: ${{ steps.remote.outputs.deploy_ready == 'true' && 'started' || 'not_started' }}"
@@ -901,7 +893,6 @@ jobs:
     permissions: {}
     needs:
       - plan
-      - build-image
       - deploy
       - record-deploy
       - post-deploy-smoke
