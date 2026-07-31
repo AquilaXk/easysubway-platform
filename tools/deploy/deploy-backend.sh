@@ -78,6 +78,7 @@ OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana alloy)
 # The image content sha (digest hex) replaces the former jar sha256 as the
 # deployed-artifact identity; it flows into the compose metadata label.
 image_digest_hex="${DEPLOY_IMAGE_DIGEST#sha256:}"
+backend_image="ghcr.io/aquilaxk/easysubway-backend@${DEPLOY_IMAGE_DIGEST}"
 # Safety margin (seconds) for the timetable snapshot freshness precheck. If the
 # candidate image's bundled snapshot expires within "now + margin", the new
 # container would fail closed at boot or shortly after the deploy completes, so
@@ -320,10 +321,9 @@ fi
 compose() {
 	local backend_env="$1"
 	local compose_env="$2"
-	local image_tag="$3"
 	shift 3
 	EASYSUBWAY_BACKEND_ENV_FILE="${backend_env}" \
-	EASYSUBWAY_BACKEND_IMAGE_TAG="${image_tag}" \
+	EASYSUBWAY_BACKEND_IMAGE="${backend_image}" \
 	EASYSUBWAY_BACKEND_JAR_SHA256="${image_digest_hex}" \
 	EASYSUBWAY_ALERTMANAGER_CONFIG_FILE="${SHARED_DIR}/current-env/alertmanager.yml" \
 	docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${compose_env}" -f infra/docker-compose.yml "$@"
@@ -477,7 +477,7 @@ stop_legacy_backend_service() {
 }
 
 EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
-EASYSUBWAY_BACKEND_IMAGE_TAG="${DEPLOY_SHA}" \
+EASYSUBWAY_BACKEND_IMAGE="${backend_image}" \
 EASYSUBWAY_BACKEND_JAR_SHA256="${image_digest_hex}" \
 	timeout 600 docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${COMPOSE_ENV}" -f infra/docker-compose.yml up -d --no-build postgres object-storage
 
