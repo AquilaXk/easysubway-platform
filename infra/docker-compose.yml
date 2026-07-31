@@ -49,7 +49,7 @@ services:
       - back-worker-logs:/logs/worker
 
   backend:
-    image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+    image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
     container_name: easysubway-backend
     restart: unless-stopped
     stop_grace_period: 30s
@@ -101,7 +101,7 @@ services:
   # a data-layer one. See the migration contract comment at the top of
   # tools/deploy/deploy-backend.sh (issue #2331 review).
   backend-standby:
-    image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+    image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
     container_name: easysubway-backend-standby
     restart: "no"
     stop_grace_period: 30s
@@ -138,7 +138,7 @@ services:
         condition: service_healthy
 
   back-worker:
-    image: easysubway-backend:${EASYSUBWAY_BACKEND_IMAGE_TAG:-local}
+    image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
     container_name: easysubway-back-worker
     restart: unless-stopped
     stop_grace_period: 30s

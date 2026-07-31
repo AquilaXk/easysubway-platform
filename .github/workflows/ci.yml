@@ -1,0 +1,61 @@
+name: Platform CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    name: Platform CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24
+
+      - name: Stage pinned contracts
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location \
+            --output "${RUNNER_TEMP}/platform-contracts.json" \
+            https://raw.githubusercontent.com/AquilaXk/easysubway/main/contracts/bundles/platform-contracts-v1.0.0.json
+          node tools/platform/stage-contracts.mjs \
+            --lock contracts.lock.json \
+            --input "${RUNNER_TEMP}/platform-contracts.json" \
+            --output build/contracts
+
+      - name: Test platform contracts
+        run: |
+          node --test tools/platform/stage-contracts.test.mjs
+          node --test tools/platform/validate-deployment-input.test.mjs
+
+      - name: Validate production Compose
+        env:
+          EASYSUBWAY_BACKEND_ENV_FILE: /dev/null
+          EASYSUBWAY_BACKEND_IMAGE: ghcr.io/aquilaxk/easysubway-backend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET: ci-only
+        run: docker compose -f infra/docker-compose.yml config --quiet
+
+      - name: Check shell syntax
+        run: |
+          bash -n infra/nginx/route-v2-entrypoint.sh
+          bash -n tools/deploy/deploy-backend.sh
+          bash -n tools/deploy/prepare-deployment-env.sh
+          bash -n tools/ops/data-source-raw-archive.sh
+          bash -n tools/ops/facility-report-photo-backup.sh
+          bash -n tools/ops/postgres-backup.sh
+          bash -n tools/ops/postgres-restore-rehearsal.sh
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive infra/terraform
