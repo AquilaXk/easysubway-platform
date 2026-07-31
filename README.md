@@ -16,4 +16,4 @@ EasySubway가 예측 가능하게 배포되고, 상태를 확인하며, 필요�
 
 ## 문의
 
-Platform 운영 관련 문의나 개선 제안은 [GitHub Issues](https://github.com/AquilaXk/easysubway-platform/issues)로 남겨주세요.
+Platform 운영 관련 문의나 개선 제안은 [aquila@aquilaxk.site](mailto:aquila@aquilaxk.site)로 남겨주세요.
