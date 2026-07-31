@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -44,6 +44,15 @@ test("rejects mutable images, wrong identity, and changed evidence", () => {
       fixture.cleanup();
     }
   }
+});
+
+test("deploy adapter derives the full image from the verified digest", () => {
+  const root = new URL("../..", import.meta.url);
+  const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
+  const allowlist = readFileSync(new URL("tools/deploy/compose-server-env.allowlist", root), "utf8");
+  assert.match(deploy, /backend_image="ghcr\.io\/aquilaxk\/easysubway-backend@\$\{DEPLOY_IMAGE_DIGEST\}"/);
+  assert.doesNotMatch(deploy, /EASYSUBWAY_BACKEND_IMAGE_TAG/);
+  assert.doesNotMatch(allowlist, /EASYSUBWAY_BACKEND_IMAGE(?:_TAG)?/);
 });
 
 function makeFixture(options = {}) {

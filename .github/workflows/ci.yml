@@ -28,6 +28,8 @@ jobs:
         shell: bash
         run: |
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-delay 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 60 \
             --output "${RUNNER_TEMP}/platform-contracts.json" \
             https://raw.githubusercontent.com/AquilaXk/easysubway/main/contracts/bundles/platform-contracts-v1.0.0.json
           node tools/platform/stage-contracts.mjs \
@@ -59,6 +61,8 @@ jobs:
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: 1.14.6
 
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive infra/terraform
