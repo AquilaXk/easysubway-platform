@@ -57,5 +57,8 @@ jobs:
           bash -n tools/ops/postgres-backup.sh
           bash -n tools/ops/postgres-restore-rehearsal.sh
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+
       - name: Check Terraform formatting
         run: terraform fmt -check -recursive infra/terraform
