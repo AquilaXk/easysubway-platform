@@ -2,7 +2,7 @@
 
 ## 관련 이슈
 
-<!-- umbrella `Refs #N` 또는 `이슈 없음(C등급)` 명기. 빈 칸 금지. -->
+<!-- 단일 PR은 `Closes #N`, umbrella는 `Refs #N`, C등급 issue 생략 시 `이슈 없음(C등급)` 명기. 빈 칸 금지. -->
 
 Refs #
 
@@ -16,8 +16,8 @@ Refs #
 
 ## 영향
 
-- [ ] 운영 위험 없음 (deploy/rollback/backup·restore/observability/secret·auth 아님)
-- [ ] 배포 경로·실행 환경(`tools/deploy/**`, `infra/docker-compose.yml`, `infra/nginx/**`, `infra/terraform/**`) 영향 없음
+- [ ] 운영 위험 없음 (deploy/rollback/backup·restore/observability/secret·env allowlist/auth 아님)
+- [ ] 배포 경로·실행 환경(`tools/deploy/**`(env allowlist 포함), `tools/platform/**`, `infra/docker-compose.yml`, `infra/nginx/**`, `infra/terraform/**`) 영향 없음
 - [ ] 백업·복구 절차(`tools/ops/**`) 영향 없음
 - [ ] 관측성(`infra/prometheus/**`, `infra/grafana/**`, `infra/loki/**`, `infra/alloy/**`, `infra/alertmanager/**`) 영향 없음
 - [ ] contract pin(`contracts.lock.json`, `contracts/**`)·CI/CD workflow 변경 없음 (있으면 full.md로 전환)
