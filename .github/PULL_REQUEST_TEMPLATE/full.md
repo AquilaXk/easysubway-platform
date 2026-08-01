@@ -35,6 +35,7 @@ close #
 - [ ] infra provisioning (Terraform) change
 - [ ] secret·env allowlist change
 - [ ] contract pin change
+- [ ] CI/CD workflow change (.github/workflows/**)
 
 ## Contract pin gate impact
 
