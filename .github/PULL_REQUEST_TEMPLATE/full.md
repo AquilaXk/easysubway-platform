@@ -1,5 +1,7 @@
 ## 관련 이슈
 
+<!-- 단일 완결 PR은 close #N, 스택 중간/umbrella 소속 PR은 Refs #N. 타 레포 이슈는 AquilaXk/easysubway#N 형태로 명기. -->
+
 close #
 
 ## 작업 배경
@@ -29,6 +31,7 @@ close #
 - [ ] rollback / standby promotion change
 - [ ] backup·restore procedure change
 - [ ] observability (metric/log/alert/dashboard) change
+- [ ] auth·접근 제어(ingress·관측 스택 인증) 변경
 - [ ] infra provisioning (Terraform) change
 - [ ] secret·env allowlist change
 - [ ] contract pin change

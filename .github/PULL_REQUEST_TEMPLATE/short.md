@@ -1,4 +1,4 @@
-<!-- B/C등급(일반 코드 변경·낮은 위험 maintenance) 전용. A등급(운영 위험, contract pin·CI/CD workflow 변경)은 full.md를 사용합니다. -->
+<!-- B/C등급(일반 코드 변경·낮은 위험 maintenance) 전용. A등급(운영 위험, auth·접근 제어(ingress·관측 스택 인증), contract pin·CI/CD workflow 변경)은 full.md를 사용합니다. -->
 
 ## 관련 이슈
 
