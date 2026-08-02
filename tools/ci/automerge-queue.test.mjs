@@ -142,7 +142,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
   const workflow = await readWorkflow();
 
   const reviewProgram = workflow.match(
-    /# review-state-filter-begin\n[\s\S]*?if ! jq -e --arg head "\$\{head\}" --arg author "\$\{pr_author\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
+    /# review-state-filter-begin\n[\s\S]*?if ! jq -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
   )?.[1];
   assert.ok(reviewProgram, 'review state jq program must stay testable');
 
@@ -158,15 +158,11 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     user: { login: 'reviewer' },
     ...overrides,
   });
-  const runReviewFilter = (reviews, author = 'pr-author') => {
-    const result = spawnSync(
-      'jq',
-      ['-e', '--arg', 'head', 'head', '--arg', 'author', author, reviewProgram],
-      {
-        input: JSON.stringify([reviews]),
-        encoding: 'utf8',
-      },
-    );
+  const runReviewFilter = (reviews) => {
+    const result = spawnSync('jq', ['-e', '--arg', 'head', 'head', reviewProgram], {
+      input: JSON.stringify([reviews]),
+      encoding: 'utf8',
+    });
     // jq -e는 결과가 false/null이면 1, 컴파일 오류면 3, 런타임 오류면 5를 낸다.
     // 0/1만 판정으로 인정해야 프로그램 파손이 "차단 성공"으로 새지 않는다.
     assert.ok(
@@ -339,47 +335,15 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     0,
   );
 
-  // PR 작성자 본인의 리뷰는 신뢰 집합에서 빠진다. GitHub은 자기 PR에 APPROVED를 막지만
-  // COMMENTED는 허용하므로, 폴백 양식 본문을 스스로 붙여 게이트를 통과시키는 경로가
-  // 열려 있었다. 셀프 리뷰 금지가 이 큐의 전제다.
-  assert.notEqual(
-    runReviewFilter(
-      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+  // PR 작성자가 게시한 리뷰도 게이트에서 인정한다. 형제 저장소(backend·mobile)와 판정을
+  // 일치시키기 위한 오너 결정이며, 네 저장소가 같은 입력에 같은 판정을 내야 한다.
+  // 신뢰 기준은 author_association 하나다.
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
         user: { login: 'pr-author' },
-      })],
-      'pr-author',
-    ),
-    0,
-  );
-  // 작성자 리뷰가 섞여 있어도 다른 리뷰어의 긍정 리뷰는 그대로 인정된다.
-  assert.equal(
-    runReviewFilter(
-      [
-        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
-          user: { login: 'pr-author' },
-        }),
-        review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', {
-          user: { login: 'reviewer-two' },
-        }),
-      ],
-      'pr-author',
-    ),
-    0,
-  );
-  // 작성자가 남긴 CHANGES_REQUESTED도 신뢰 집합 밖이므로 큐를 막지 않는다(GitHub이 애초에
-  // 허용하지 않는 상태이며, 허용되더라도 셀프 판정이 되어선 안 된다).
-  assert.equal(
-    runReviewFilter(
-      [
-        review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', '', {
-          user: { login: 'pr-author' },
-        }),
-        review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', {
-          user: { login: 'reviewer-two' },
-        }),
-      ],
-      'pr-author',
-    ),
+      }),
+    ]),
     0,
   );
 });
@@ -767,7 +731,6 @@ const makeRunQueue =
     writeFileSync(
       join(dir, `pr-${pr.number}.json`),
       JSON.stringify({
-        author: { login: 'pr-author' },
         state: pr.state ?? 'OPEN',
         isDraft: false,
         baseRefName: 'main',
@@ -890,7 +853,7 @@ const makeRunQueue =
     mergedPr: merged ? Number(merged) : null,
     // 후보 평가 1건당 1회만 세야 한다. bounded wait의 headRefOid 조회까지 세면 같은
     // 후보가 두 번 잡혀 "실행당 실제 동작 최대 한 건" 계약이 헐거워진다.
-    evaluated: [...calls.matchAll(/gh pr view (\d+) --repo [^\n]*--json author,baseRefName/g)].map((m) =>
+    evaluated: [...calls.matchAll(/gh pr view (\d+) --repo [^\n]*--json baseRefName/g)].map((m) =>
       Number(m[1]),
     ),
     updatedBranch: calls.includes('update-branch'),
