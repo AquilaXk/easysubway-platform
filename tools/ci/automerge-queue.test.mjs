@@ -625,10 +625,21 @@ test('required context 판정은 후보별 건너뛰기로 수렴하고 실패�
   assert.equal(missing.reached, false);
   assert.equal(missing.dispatchedCi, true, 'required context 부재는 CI dispatch로 푼다');
 
-  // BEHIND는 제외한다. 그 경로가 base를 갱신하면서 어차피 새 head에 CI를 쏜다.
+  // BEHIND는 여기서 쏘지 않는다. 대신 병합 분기로 내려보내 base 갱신이 일어나게 한다.
+  // 여기서 건너뛰면 base가 영영 갱신되지 않고, base가 갱신되지 않으면 required context도
+  // 영영 붙지 않는다 — 방금 라벨이 붙어 아직 CI가 없는 behind PR이 그대로 정체한다.
   const missingBehind = runContextLoop([], 'BEHIND');
   assert.equal(missingBehind.status, 0);
   assert.equal(missingBehind.dispatchedCi, false, 'BEHIND는 base 갱신 경로가 맡는다');
+  assert.equal(
+    missingBehind.reached,
+    true,
+    'BEHIND + context 부재는 base 갱신 분기로 내려가야 한다',
+  );
+  // 부재가 아닌 사유(대기·실패)는 BEHIND라도 내려보내지 않는다. 대기는 곧 끝나고,
+  // 실패는 사람이 고칠 상태다.
+  assert.equal(runContextLoop(run(null), 'BEHIND').reached, false);
+  assert.equal(runContextLoop(run('failure'), 'BEHIND').reached, false);
   // 명시적 실패도 실행을 죽이지 않고 이 후보만 건너뛰되, 신호는 남긴다.
   const failed = runContextLoop(run('failure'));
   assert.equal(failed.status, 0);
@@ -1031,6 +1042,17 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
       `required context ${checkState} must skip only that candidate`,
     );
   }
+  // BEHIND인데 required context가 아직 없는 후보는 base 갱신 분기까지 내려가야 한다.
+  // 여기서 건너뛰면 base 갱신도, CI도 영영 일어나지 않는다.
+  const behindMissing = runQueue([
+    { number: 1, mergeStateStatus: 'BEHIND', checkState: 'missing' },
+    { number: 2, mergeStateStatus: 'CLEAN' },
+  ]);
+  assert.equal(behindMissing.status, 0);
+  assert.equal(behindMissing.updatedBranch, true, 'BEHIND + 부재는 base를 갱신해야 한다');
+  assert.equal(behindMissing.mergedPr, null);
+  assert.deepEqual(behindMissing.evaluated, [1], 'base 갱신도 한 실행에 한 건이다');
+
   // 부재는 건너뛰기만 하는 것이 아니라 CI를 쏴서 교착을 푼다. 그러면서도 뒤의 병합 가능한
   // 후보를 굶기지 않아야 한다 — 이 dispatch는 실행을 끝내지 않는다.
   const missingContext = runQueue([

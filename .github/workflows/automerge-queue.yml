@@ -423,9 +423,14 @@ jobs:
               # 이 dispatch는 병합·base 갱신과 달리 실행을 끝내지 않는다. 병합 직렬화와
               # 무관하고, 여기서 실행을 끝내면 뒤의 병합 가능한 후보가 다시 굶는다.
               # missing-context-dispatch-begin
-              if [[ "${contexts_missing}" == true &&
-                "${merge_state}" != "BEHIND" &&
-                "${head_repo}" == "${repo}" ]]; then
+              behind_missing=false
+              if [[ "${contexts_missing}" == true && "${merge_state}" == "BEHIND" ]]; then
+                # BEHIND는 base 갱신이 먼저다. 아래 BEHIND 분기가 update-branch 후 새 head에
+                # CI를 쏘므로 여기서는 쏘지 않고 그 분기로 내려보낸다. 여기서 건너뛰면
+                # base가 영영 갱신되지 않고, base가 갱신되지 않으면 required context도 영영
+                # 붙지 않는다 — 방금 라벨이 붙어 아직 CI가 없는 behind PR이 그대로 정체한다.
+                behind_missing=true
+              elif [[ "${contexts_missing}" == true && "${head_repo}" == "${repo}" ]]; then
                 if gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"; then
                   echo "PR #${pr}: required context missing; CI dispatched."
                 else
@@ -433,8 +438,9 @@ jobs:
                   echo "::warning::PR #${pr} CI dispatch failed for a missing required context; retrying on the next trigger."
                 fi
               fi
+              # BEHIND + context 부재만 아래 병합 분기로 내려간다. 나머지는 이 후보를 건너뛴다.
+              [[ "${behind_missing}" == true ]] || continue
               # missing-context-dispatch-end
-              continue
             fi
             # required-context-loop-end
 
