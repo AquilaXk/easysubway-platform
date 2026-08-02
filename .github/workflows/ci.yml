@@ -1,6 +1,10 @@
 name: Platform CI
 
 on:
+  # automerge coordinator가 BEHIND PR의 base를 GITHUB_TOKEN으로 갱신하면 synchronize
+  # 이벤트가 뜨지 않아 새 head에 required context(Platform CI)가 붙지 않는다.
+  # 그 경로를 잇는 유일한 수단이 명시 dispatch다.
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -18,6 +22,16 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
+
+      - name: Lint workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 워크플로를 실제 YAML 파서로 읽는 유일한 게이트다. run 블록의 block scalar가
+          # 깨져 스크립트 일부가 YAML 구조로 새어 나가는 파손은 텍스트 기반 계약 테스트로는
+          # 잡히지 않는다. 이미지는 다른 pin과 같은 규칙으로 digest 고정한다.
+          docker run --rm -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
@@ -39,6 +53,7 @@ jobs:
 
       - name: Test platform contracts
         run: |
+          node --test tools/ci/automerge-queue.test.mjs
           node --test tools/platform/stage-contracts.test.mjs
           node --test tools/platform/validate-deployment-input.test.mjs
 
