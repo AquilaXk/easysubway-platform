@@ -1,0 +1,541 @@
+name: Automerge Queue
+
+# 다중 세션 병합 경합 해소용 best-effort FIFO 코디네이터.
+# automerge 라벨이 붙은 PR을 오래된 순으로 훑되, 지금 병합할 수 없는 후보는 사유를 남기고
+# 건너뛴다. 라벨은 merge-workflow 규약 4단계(코드리뷰 게이트) 완료 후에만 붙인다.
+#
+# 인증은 github.token 하나뿐이다. GITHUB_TOKEN이 만든 이벤트는 새 workflow run을
+# 만들지 않고 예외는 workflow_dispatch와 repository_dispatch뿐이다. 이 저장소에서 그
+# 제약에 걸리는 체인은 하나뿐이라 명시 dispatch도 하나만 둔다.
+#   - update-branch 후 PR CI: head_ref로 ci.yml dispatch
+# ci.yml의 main push 실행도 되살리지 않는다. 형제 저장소 실측(2026-08-02): backend·mobile
+# coordinator 어느 쪽도 main CI를 dispatch하지 않고, 코디네이터가 병합한 SHA에는 main push
+# CI 실행이 0건이다(mobile aacec74·d794582, backend 26b0b68. 세 PR 모두 mergedBy가
+# app/github-actions). 사람이 병합한 SHA(mobile 226a220, backend 5045069)에만 push 실행이
+# 있다. main ruleset이 strict required status checks라 PR head는 병합 직전 main과 동기화된
+# 상태에서 검증되고 squash 결과 트리가 그 head와 같으므로, main push 실행은 같은 트리를 한 번
+# 더 도는 셈이다. 네 저장소의 병합 경로를 일치시키기 위해 이 억제를 그대로 수용한다.
+# 병합 후 실행되어야 하는 producer는 없다(2026-08-02 실측). cd.yml은 backend_image
+# 입력이 필수인 운영자 dispatch 전용이고, sensitive-backup-retention.yml은 schedule
+# 전용이며, ci.yml의 main push 실행은 artifact를 만들지 않는 사후 확인이다. 형제 저장소
+# backend가 명시 dispatch로 이은 immutable image producer 같은 체인이 이 저장소에는
+# 없다. push 트리거 producer가 새로 생기면 tools/ci/automerge-queue.test.mjs의
+# "병합 후 dispatch가 필요한 producer가 없다" 계약이 깨져 이 판정을 다시 하게 된다.
+# 트리거 공백은 schedule cron이 메운다.
+
+on:
+  pull_request_target:
+    types: [labeled]
+  workflow_run:
+    workflows: [Platform CI]
+    types: [completed]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: automerge-queue
+  cancel-in-progress: false
+
+jobs:
+  coordinate:
+    name: Automerge Queue
+    if: github.event_name != 'pull_request_target' || github.event.label.name == 'automerge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      checks: read
+      contents: write
+      pull-requests: write
+      statuses: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Coordinate eligible pull requests
+        shell: bash
+        run: |
+          # shellcheck disable=SC2016
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY}"
+          owner="${repo%%/*}"
+          name="${repo#*/}"
+
+          # required context는 main ruleset이 정본이다. 하드코딩 폴백을 두면 ruleset
+          # 변경이나 조회 실패가 그대로 게이트 완화가 되므로 조회 실패는 fail closed다.
+          # 후보마다 다시 물을 이유가 없어 루프 밖에서 한 번만 읽는다.
+          rules="$(gh api "repos/${repo}/rules/branches/main")"
+          required="$(jq -c '
+            [.[] |
+              select(.type == "required_status_checks") |
+              .parameters.required_status_checks[] |
+              {context, integration_id: (.integration_id // null)}] |
+            unique_by(.context, .integration_id)
+          ' <<<"${rules}")"
+          jq -e 'length > 0' <<<"${required}" >/dev/null
+
+          # draft는 선택 단계에서 걸러낸다. `gh pr list`는 draft를 필터하지 않는다.
+          # 이 필터는 아래 창 산출보다 반드시 앞서야 한다. 뒤로 미루면 draft가 창 자리를
+          # 차지해 한 실행에서 실제로 평가되는 후보 수가 window보다 줄어든다.
+          candidates="$(gh pr list --repo "${repo}" --base main --state open --label automerge \
+            --limit 1000 --json number,createdAt,isDraft \
+            --jq '[.[] | select(.isDraft == false)] | [sort_by(.createdAt)[].number]')"
+
+          # 큐는 strict FIFO가 아니라 best-effort FIFO다. 오래된 순으로 후보를 훑되 병합할 수
+          # 없는 후보는 사유를 남기고 건너뛴다. head 하나만 처리하면 그 한 건이 막혔을 때 뒤의
+          # PR이 전부 굶는다. 건너뛰기는 병합을 하지 않는 방향이라 게이트를 약화시키지 않으며,
+          # 각 후보는 리뷰 객체·미해결 thread·required context 검증을 그대로 통과해야 한다.
+          # 실제 동작(병합 또는 base 갱신)은 한 실행에 최대 한 건이므로 병합 직렬화는
+          # concurrency group과 함께 그대로 유지된다.
+          #
+          # 병합할 수 없는 사유를 실행 종료 코드로 표현하지 않는다. exit 1은 큐 전체를 멈춰
+          # 뒤의 후보를 굶기고, 그 실패가 이 워크플로의 check로 남아 다음 판정 입력을
+          # 오염시킨다. 대신 사람이 봐야 하는 상태(DIRTY·fork head·미지 enum·required
+          # context 실패)는 ::warning:: annotation으로 run 요약에 남긴다.
+          # queue-loop-begin
+          # 한 실행에서 평가할 후보 수에는 상한이 필요하다. 상한은 아래 세 기준을 모두
+          # 만족해야 하고 가장 작은 쪽이 구속한다. 형제 저장소 상수를 그대로 옮기면 안 된다.
+          #
+          #  - API 예산 지분. GITHUB_TOKEN 한도는 저장소당 시간당 1,000회이고 이 저장소의
+          #    다른 워크플로와 공유한다. 실행당 청구는 ruleset 1 + gh pr list 1 + 고정 비용
+          #    15 + 후보당 11 * window_max이고, window_max=4면 61회로 한도의 6.1%다. 이
+          #    저장소에는 큐 밖에서 GITHUB_TOKEN REST를 상시로 쓰는 워크플로가 없다 —
+          #    ci.yml은 raw.githubusercontent와 registry만 받고 API를 부르지 않으며, cd.yml과
+          #    sensitive-backup-retention.yml은 운영자 dispatch·schedule 전용이다. 그래서
+          #    형제 저장소 data(5.0%)보다는 넓게, 그러나 한 실행이 한도를 독점하지 않는
+          #    7% 선 아래로 잡았다. 후보 한 건당 호출은 5회지만 요청은 그보다 많을 수 있다.
+          #    `gh pr view --json`(GraphQL)과 reviewThreads(GraphQL)는 페이지네이션이 없고
+          #    (reviewThreads는 first: 100 + hasNextPage fail closed), reviews·check-runs·
+          #    statuses(REST)는 페이지 상한 3(아래 paginated-read)까지 읽는다. 그래서 후보당
+          #    청구는 11회다 — pr view 1 + reviewThreads 1 + REST 3종 * 3페이지. `--paginate`를
+          #    쓰지 않는 이유가 이것이다: 페이지 수에 상한이 없으면 이력이 유난히 긴 후보
+          #    하나가 예산 모델을 통째로 넘긴다. 상한을 넘는 후보는 판정을 포기하고 건너뛴다.
+          #    required context별 jq는 로컬 계산이라 요청을 쓰지 않는다. 후보 평가 밖의 고정
+          #    비용은 BEHIND 경로가 정한다(update-branch 1 + 반영 확인 12 + ci dispatch 1 +
+          #    여유 1 = 15).
+          #
+          #    이 예산을 "실행 빈도"로 나누지 않는다. 빈도는 강제되지 않는다 — concurrency
+          #    그룹은 cancel-in-progress: false라 대기 중인 실행만 접을 뿐 실행이 시작되는
+          #    빈도에는 상한을 두지 않고, 반대로 cron */10은 best-effort라 정시성을 약속하지
+          #    않는다. 그래서 창은 가정이 아니라 남은 예산을 매 실행 실측해서 정한다.
+          #    `GET /rate_limit`은 한도를 소비하지 않으므로 이 조회 자체가 공짜이고, 이 job이
+          #    실제로 쓰는 토큰의 REST·GraphQL 잔량을 그대로 준다. 두 버킷의 최솟값에 후보당
+          #    9회를 청구하면 실제 지출(REST 3 + 페이지, GraphQL 2)보다 많이 떼므로 어느 쪽
+          #    버킷도 계산보다 먼저 마르지 않는다. 두 값 중 하나가 비정상이면 최솟값을 내지
+          #    않고 큐를 건너뛴다 — 후보 평가는 두 버킷을 다 쓰므로 한쪽을 모르는 것은 예산
+          #    전체를 모르는 것과 같다.
+          #
+          #    잔량에서 reserve를 먼저 뗀다. 이 저장소에는 큐가 지켜 줘야 할 producer
+          #    dispatch 체인이 없지만, 큐가 공유 한도를 다 쓰면 코디네이터 자신의 다음 실행이
+          #    창을 0으로 만들어 큐가 스스로를 굶기고 운영자의 cd.yml preflight dispatch와
+          #    조회까지 함께 막힌다. 실행당 고정 비용은 17회(ruleset 1 + gh pr list 1 +
+          #    고정 비용 15)이므로 200회면 최소 11회 실행분이 남는다.
+          #  - job timeout. 이 job은 5분(300초)이고 producer dispatch 스텝이 없어 고정 비용은
+          #    BEHIND 경로의 bounded wait 최대 60초(이 경로는 루프를 끝내므로 실행당 한 번)와
+          #    러너·스텝 오버헤드 30초뿐이다. 남는 210초를 후보당 5회 * 1초(비관적 왕복)로
+          #    나누면 42건이고, API가 느린 날을 감안해 2배 여유를 두면 21건이다.
+          #  - 실측 큐 깊이. 2026-08-02 기준 이 저장소의 열린 PR은 6건이고(dependabot 5건 +
+          #    사람 1건) 저장소 생성(2026-07-31) 이후 누적 PR은 10건이다. dependabot이 배치로
+          #    PR을 만드는 저장소라 큐 깊이가 한 번에 5건까지 뛴다. 창 4면 그 배치의 대부분이
+          #    한 실행에 들어오고, 남는 1건은 아래 회전이 다음 실행에서 집는다.
+          #
+          # 구속하는 쪽은 API 예산 지분이므로 window_max=4이고, 실제 창은 실행마다
+          # min(window_max, (잔량 - reserve - 고정 비용) / 후보당 요청)으로 정한다. 잔량이
+          # reserve에 닿으면 창이 0이 되어 이번 실행의 큐만 건너뛴다. 창을 정한 뒤에도 후보마다
+          # 잔량을 다시 읽어 예약선에서 멈추므로, 창은 상한이지 지출 약속이 아니다. 형제 저장소
+          # 값 6이나 20을 그대로 쓰면 실행당 청구가 각각 83회·237회로 위 지분 기준을 깬다.
+          #
+          # 다만 창을 큐 앞쪽에 고정하면 창 밖의 후보는 매 실행 제외되어, 없애려던 head
+          # 차단이 1건에서 window건 규모로 옮겨갈 뿐이다. 그래서 창 시작점을 실행마다
+          # 새로 고른다.
+          #
+          # 시작점은 실행 컨텍스트 값이 아니라 균등 난수로 뽑는다. 실행 컨텍스트 기반
+          # 결정적 회전은 "실행 간격"에 취약하기 때문이다. 이 job은 automerge가 아닌 라벨
+          # 이벤트에서 if 조건에 걸려 건너뛰고 concurrency가 대기 실행을 버리기도 하므로,
+          # 실제 coordinator 실행 사이의 run number 간격 d는 1이 아니다. 시작점을 run
+          # number의 함수로 두면 유효 보폭에 d가 곱해지고, gcd(유효 보폭, total) > window인
+          # 조합에서 시작점이 고정된다(total = 2 * window, d가 그 약수인 시퀀스에서 앞쪽
+          # window건만 영원히 평가되고 뒤쪽은 병합 준비가 끝나도 대기). 난수 시작점은 어떤
+          # 값도 읽지 않으므로 이 취약점이 원리적으로 없다.
+          #
+          # 보장: 후보 하나가 한 실행에서 창에 들 확률은 window/total 이상이며 실행 간격·
+          # 건너뛴 실행·concurrency 폐기와 무관하게 일정하다. 따라서 N회 연속 제외될 확률은
+          # (1 - window/total)^N로 지수 감소하고, 큐 크기가 그대로면 기대 total/window회
+          # 안에 평가된다(total=8이면 2회). 다만 그 몇 회가 실제로 몇 분인지는 트리거가
+          # 정하고 cron은 best-effort라 근거로 쓸 수 없다. 실무상 소요를 좌우하는 것은
+          # workflow_run(Platform CI 완료)·push·labeled다. 굶주림이 남는 실행 시퀀스가 아예
+          # 존재하지 않는다는 점이 결정적 회전과의 차이다.
+          #
+          # 대안과 실패 모드:
+          #  - 지속 커서: 결정적 상한을 주지만 저장소가 필요하다. repository variable은
+          #    GITHUB_TOKEN으로 못 쓰고 PAT이 필요하며(이 워크플로는 PAT-free가 방향),
+          #    Actions cache는 LRU 축출·미사용 만료가 있어 보장이 다시 소프트해지고,
+          #    artifact는 보존 기간과 조회 비용이 붙는다. 상태 추가는 마지막 수단으로 둔다.
+          #  - GITHUB_RUN_ID: 간격이 크고 불규칙해 실무상 앨리어싱은 어렵지만, 간격이 total의
+          #    배수로 유지되는 시퀀스에서는 여전히 고정된다. "실행 간격과 무관"이 아니다.
+          #  - stride를 total과 서로소로 고르기: 유효 보폭에 d가 곱해지므로 d 쪽에서 여전히
+          #    고정을 만들 수 있다.
+          #  - 창을 버리고 시간 예산만 두기: 시작점이 여전히 큐 앞쪽에 고정되므로 예산이
+          #    닿지 않는 뒤쪽 후보의 굶주림이 그대로 남고, API 호출량 상한도 못 받는다.
+          #
+          # RANDOM은 0..32767이고 total은 --limit 1000으로 상한이 잡히므로 modulo 편향이
+          # 남지만, 모든 시작점의 확률이 0보다 크게 유지되므로 위 보장에는 영향이 없다.
+          # 후보가 창 안에 다 들어오면(total <= window) 시작점을 0으로 고정해, 회전이
+          # 필요 없는 평상시에는 오래된 순 그대로 훑는다. 회전이 걸린 실행에서도 선택된
+          # 후보를 원래 순서(오래된 순)로 되돌려 평가하므로, 한 실행 안에서 "평가한 후보
+          # 중 가장 오래된 병합 가능 후보가 이긴다"는 성질은 유지된다.
+          # candidate-budget-begin
+          # budget-constants-begin
+          window_max=4
+          reserve=200
+          fixed_cost=15
+          per_candidate=11
+          # 두 버킷이 모두 숫자일 때만 값을 낸다. 한쪽이 없거나 비정상인데 남은 하나로
+          # 진행하면, 후보 평가가 실제로 소비하는 두 버킷 중 하나의 잔량을 모른 채 쓰는
+          # 것이라 "모르는 예산은 쓰지 않는다"가 성립하지 않는다. 어느 쪽이든 비정상이면
+          # 빈 출력이 되어 아래 fail-closed 분기로 떨어진다.
+          budget_query='
+            [.resources.core.remaining, .resources.graphql.remaining] |
+            if length == 2 and all(.[]; type == "number") then min else empty end
+          '
+          # budget-constants-end
+          # /rate_limit은 한도를 소비하지 않으므로 매 실행 물어도 공짜다. 조회가 실패하거나
+          # 응답이 숫자가 아니면 잔량을 모르는 것이고, 모르는 예산은 쓰지 않는다.
+          budget="$(gh api rate_limit --jq "${budget_query}")" || true
+          if [[ ! "${budget}" =~ ^[0-9]+$ ]]; then
+            echo "::warning::GITHUB_TOKEN 잔량을 읽지 못했다; 이번 실행은 큐를 건너뛴다."
+            exit 0
+          fi
+          window=$(( (budget - reserve - fixed_cost) / per_candidate ))
+          if [[ "${window}" -gt "${window_max}" ]]; then
+            window="${window_max}"
+          fi
+          if [[ "${window}" -lt 1 ]]; then
+            echo "::warning::GITHUB_TOKEN 잔량 ${budget}회가 예약분 ${reserve}회에 닿았다; 남은 몫을 두고 큐를 건너뛴다."
+            exit 0
+          fi
+          # candidate-budget-end
+          # candidate-offset-begin
+          total="$(jq 'length' <<<"${candidates}")"
+          offset=0
+          if [[ "${total}" -gt "${window}" ]]; then
+            offset="$(( RANDOM % total ))"
+          fi
+          # candidate-offset-end
+          # paginated-read-begin
+          # 페이지를 직접 돌며 상한을 둔다. `gh api --paginate`는 페이지 수에 상한이 없어
+          # 이력이 유난히 긴 후보 하나가 위 예산 모델을 통째로 넘길 수 있다. 상한에 닿으면
+          # 판정을 포기한다 — 모르는 이력 위에서 병합하지 않는다(fail closed). 상한 3이
+          # 후보당 청구 11회의 근거다.
+          page_limit=3
+          read_pages() {
+            local endpoint="$1" page=1 body count pages='[]'
+            while [[ "${page}" -le "${page_limit}" ]]; do
+              body="$(gh api -H 'Accept: application/vnd.github+json' \
+                "${endpoint}?per_page=100&page=${page}")" || return 1
+              pages="$(jq -c --argjson page_body "${body}" '. + [$page_body]' <<<"${pages}")"
+              # 목록 엔드포인트는 배열, check-runs는 객체를 준다. 두 모양 모두 다룬다.
+              count="$(jq 'if type == "array" then length else (.check_runs | length) end' <<<"${body}")"
+              if [[ "${count}" -lt 100 ]]; then
+                printf '%s' "${pages}"
+                return 0
+              fi
+              page=$((page + 1))
+            done
+            return 2
+          }
+          # paginated-read-end
+          while IFS= read -r pr; do
+            # budget-recheck-begin
+            # per_candidate은 --paginate 추가 페이지까지 덮으라고 잡은 여유값이지 실측이
+            # 아니다. 이력이 그 여유를 넘는 후보 하나가 예약분을 침범할 수 있으므로 후보마다
+            # 잔량을 다시 읽는다. /rate_limit은 한도를 소비하지 않아 이 재확인은 공짜이고,
+            # 여유값은 "한 번의 반복이 예약선을 넘지 않게" 하는 몫만 담당하며 그 이상은
+            # 다음 반복의 재측정이 잡는다. 잔량을 못 읽는 것도 예산 소진과 같게 취급한다.
+            budget="$(gh api rate_limit --jq "${budget_query}")" || true
+            if [[ ! "${budget}" =~ ^[0-9]+$ ]] ||
+              [[ "$(( budget - fixed_cost - per_candidate ))" -lt "${reserve}" ]]; then
+              echo "::warning::GITHUB_TOKEN 잔량이 예약분 ${reserve}회에 닿았다; 남은 몫을 두고 이번 실행의 후보 평가를 여기서 멈춘다."
+              exit 0
+            fi
+            # budget-recheck-end
+            info="$(gh pr view "${pr}" --repo "${repo}" \
+              --json baseRefName,headRefName,headRefOid,headRepository,isDraft,labels,mergeStateStatus,state)"
+            if ! jq -e '
+              .state == "OPEN" and
+              .isDraft == false and
+              .baseRefName == "main" and
+              any(.labels[]; .name == "automerge")
+            ' <<<"${info}" >/dev/null; then
+              echo "PR #${pr}: no longer an open labeled pull request against main; skipping."
+              continue
+            fi
+
+            head="$(jq -r '.headRefOid' <<<"${info}")"
+            head_ref="$(jq -r '.headRefName' <<<"${info}")"
+            head_repo="$(jq -r '.headRepository.nameWithOwner // ""' <<<"${info}")"
+            merge_state="$(jq -r '.mergeStateStatus' <<<"${info}")"
+
+            reviews="$(read_pages "repos/${repo}/pulls/${pr}/reviews")" || {
+              echo "PR #${pr}: review history exceeds the page budget; skipping."
+              continue
+            }
+            # review-state-filter-begin
+            # 신뢰 기준은 author_association 하나다. PR 작성자 리뷰를 따로 배제하지 않는
+            # 것은 형제 저장소(backend·mobile)와 게이트 판정을 일치시키기 위한 결정이다 —
+            # 네 저장소가 같은 입력에 같은 판정을 내야 한다.
+            if ! jq -e --arg head "${head}" '
+              [flatten[] |
+                select(
+                  .author_association == "OWNER" or
+                  .author_association == "MEMBER" or
+                  .author_association == "COLLABORATOR"
+                )] as $trusted |
+              ($trusted | map(select(.commit_id == $head))) as $current |
+              ($trusted |
+              sort_by(.submitted_at, .id) |
+              reduce .[] as $review ({};
+                if $review.state == "COMMENTED" then
+                  .[$review.user.login] //= "COMMENTED"
+                elif $review.state == "DISMISSED" then
+                  del(.[$review.user.login])
+                else
+                  .[$review.user.login] = $review.state
+                end
+              )) as $states |
+              ($states | length > 0 and all(.[]; . == "APPROVED" or . == "COMMENTED")) and
+              any($current[];
+                .state == "APPROVED" or
+                (.state == "COMMENTED" and
+                  (.body // "" | startswith("**Actionable comments posted: ")) and
+                  (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:"))))
+            ' <<<"${reviews}" >/dev/null; then
+              echo "PR #${pr}: no trusted review on the current head, or an active change request is open; skipping."
+              continue
+            fi
+            # review-state-filter-end
+
+            # shellcheck disable=SC2016
+            threads="$(gh api graphql -f owner="${owner}" -f name="${name}" -F number="${pr}" -f query='
+              query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    reviewThreads(first: 100) {
+                      nodes { isResolved }
+                      pageInfo { hasNextPage }
+                    }
+                  }
+                }
+              }
+            ')"
+            if ! jq -e '
+              .data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage == false and
+              all(.data.repository.pullRequest.reviewThreads.nodes[]; .isResolved)
+            ' <<<"${threads}" >/dev/null; then
+              echo "PR #${pr}: unresolved review threads remain; skipping."
+              continue
+            fi
+
+            checks="$(read_pages "repos/${repo}/commits/${head}/check-runs")" || {
+              echo "PR #${pr}: check-run history exceeds the page budget; skipping."
+              continue
+            }
+            statuses="$(read_pages "repos/${repo}/commits/${head}/statuses")" || {
+              echo "PR #${pr}: commit status history exceeds the page budget; skipping."
+              continue
+            }
+            # required-context-loop-begin
+            contexts_ok=true
+            contexts_missing=false
+            while IFS= read -r required_check; do
+              # 아직 끝나지 않은 check는 계약 위반이 아니다. 진행 중(conclusion null)이나
+              # 새 head에 아직 안 붙은 상태를 실패로 처리하면 그 신호가 그대로 오해를 만든다.
+              # 명시적 실패만 위반이고, 위반이든 대기든 이 후보만 건너뛴다.
+              # required-context-filter-begin
+              context_state="$(jq -r --argjson required_check "${required_check}" --argjson statuses "${statuses}" '
+                ($statuses | flatten) as $status_records |
+                ([.[].check_runs[] |
+                  select(.name == $required_check.context) |
+                  select($required_check.integration_id == null or .app.id == $required_check.integration_id)] |
+                  sort_by(.started_at, .id) |
+                  last) as $run |
+                ([$status_records[] | select(.context == $required_check.context)] |
+                  sort_by((.updated_at // .created_at // ""), .id) |
+                  last) as $status |
+                (if $run == null then null
+                 elif $run.conclusion == null then "pending"
+                 elif $run.conclusion == "success" then "success"
+                 else "failure" end) as $run_state |
+                (if $required_check.integration_id != null or $status == null then null
+                 elif $status.state == "success" then "success"
+                 elif $status.state == "pending" then "pending"
+                 else "failure" end) as $status_state |
+                # 같은 이름의 check run과 classic status가 함께 있으면 둘 다 봐야 한다.
+                # 하나만 보면 나머지 하나가 실패·대기여도 병합이 진행된다. 결합 규칙은
+                # "실패가 하나라도 있으면 실패, 전부 성공이어야 성공, 나머지는 대기"다.
+                [$run_state, $status_state] | map(select(. != null)) as $observed |
+                if ($observed | length) == 0 then "missing"
+                elif ($observed | any(. == "failure")) then "failure"
+                elif ($observed | all(. == "success")) then "success"
+                else "pending"
+                end
+              ' <<<"${checks}")"
+              # required-context-filter-end
+              context_name="$(jq -r '.context' <<<"${required_check}")"
+              case "${context_state}" in
+                success) ;;
+                pending)
+                  contexts_ok=false
+                  echo "PR #${pr}: required context pending: ${context_name}; skipping."
+                  break
+                  ;;
+                missing)
+                  contexts_ok=false
+                  contexts_missing=true
+                  echo "PR #${pr}: required context missing: ${context_name}."
+                  break
+                  ;;
+                *)
+                  # 실패는 사람이 봐야 하는 상태다. 실행을 실패시키면 큐 전체가 멈추므로
+                  # annotation으로만 드러내고 이 후보는 건너뛴다.
+                  echo "::warning::PR #${pr} has a failing required context (${context_name}); skipping until it is green."
+                  contexts_ok=false
+                  break
+                  ;;
+              esac
+            done < <(jq -c '.[]' <<<"${required}")
+            if [[ "${contexts_ok}" != true ]]; then
+              # 부재는 대기와 다르다. GITHUB_TOKEN의 update-branch push는 synchronize를
+              # 만들지 못하므로, BEHIND 경로의 bounded wait보다 늦게 base 갱신이 반영되면
+              # 새 head에는 required context가 영영 붙지 않는다. 그 상태의 PR은 더 이상
+              # BEHIND가 아니라 이 게이트에서 걸리므로, 여기서 CI를 쏘지 않으면 아무도
+              # 쏘지 않는다(영구 대기). 대기(pending)는 이미 붙은 check가 끝나기를 기다리는
+              # 상태라 쏘지 않는다.
+              #
+              # BEHIND는 제외한다. 그 경로가 base를 갱신하면서 어차피 새 head에 CI를 쏜다.
+              # fork head에는 base 저장소 CI를 쏘지 않는다. 쏜 CI가 pending check를 만들어
+              # 다음 실행은 위 pending 분기로 떨어지므로 head당 한 번만 쏘게 된다.
+              # 이 dispatch는 병합·base 갱신과 달리 실행을 끝내지 않는다. 병합 직렬화와
+              # 무관하고, 여기서 실행을 끝내면 뒤의 병합 가능한 후보가 다시 굶는다.
+              # missing-context-dispatch-begin
+              behind_missing=false
+              if [[ "${contexts_missing}" == true && "${merge_state}" == "BEHIND" ]]; then
+                # BEHIND는 base 갱신이 먼저다. 아래 BEHIND 분기가 update-branch 후 새 head에
+                # CI를 쏘므로 여기서는 쏘지 않고 그 분기로 내려보낸다. 여기서 건너뛰면
+                # base가 영영 갱신되지 않고, base가 갱신되지 않으면 required context도 영영
+                # 붙지 않는다 — 방금 라벨이 붙어 아직 CI가 없는 behind PR이 그대로 정체한다.
+                behind_missing=true
+              elif [[ "${contexts_missing}" == true && "${head_repo}" == "${repo}" ]]; then
+                if gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"; then
+                  echo "PR #${pr}: required context missing; CI dispatched."
+                else
+                  # 호출 실패는 다음 트리거가 다시 판정한다. 큐를 세우지 않는다.
+                  echo "::warning::PR #${pr} CI dispatch failed for a missing required context; retrying on the next trigger."
+                fi
+              fi
+              # BEHIND + context 부재만 아래 병합 분기로 내려간다. 나머지는 이 후보를 건너뛴다.
+              [[ "${behind_missing}" == true ]] || continue
+              # missing-context-dispatch-end
+            fi
+            # required-context-loop-end
+
+            # required context 검증이 병합 가능 여부의 정본이다. mergeStateStatus는 여기서
+            # 실제로 병합이 불가능한 상태(base 갱신 필요·충돌)를 가려내는 데만 쓴다.
+            # merge-state-dispatch-begin
+            case "${merge_state}" in
+              CLEAN | HAS_HOOKS | UNSTABLE)
+                # UNSTABLE은 "mergeable하지만 필수가 아닌 check가 green이 아님"이다.
+                # ruleset이 필수로 두지 않은 check로 병합을 막지 않는다.
+                #
+                # 이 저장소는 allow_auto_merge가 꺼져 있어(실측) `--auto`가 API 오류로
+                # 실패한다. 형제 저장소와 달리 즉시 병합을 호출하는데, 이 분기는 리뷰 객체·
+                # 미해결 thread·required context를 모두 통과한 뒤에만 닿으므로 `--auto`가
+                # 대신 기다려 줄 대상이 남아 있지 않다. --match-head-commit이 판정 시점
+                # 이후의 head 변경을 서버에서 거른다.
+                if ! gh pr merge --squash "${pr}" --repo "${repo}" \
+                  --match-head-commit "${head}"; then
+                  # 판정 이후 head가 바뀌었거나 서버가 거부했다. 셋 다(head 변경·ruleset
+                  # 거부·일시적 API 오류) 다음 트리거에서 다시 판정하면 되는 상태이고,
+                  # 여기서 실행을 죽이면 그 실패가 이 워크플로의 check로 남아 다음 판정
+                  # 입력을 오염시킨다.
+                  echo "::warning::PR #${pr} merge call failed; retrying on the next trigger."
+                  exit 0
+                fi
+                echo "PR #${pr}: merged (${merge_state})."
+                exit 0
+                ;;
+              BEHIND)
+                if [[ "${head_repo}" != "${repo}" ]]; then
+                  echo "::warning::PR #${pr} uses a fork head; refusing base-repository CI dispatch."
+                  continue
+                fi
+                if ! gh api --method PUT "repos/${repo}/pulls/${pr}/update-branch" \
+                  -f expected_head_sha="${head}" >/dev/null; then
+                  # 병합 호출과 같은 이유로 실행을 죽이지 않는다.
+                  echo "::warning::PR #${pr} base update call failed; retrying on the next trigger."
+                  exit 0
+                fi
+                # ponytail: bounded wait only; the API applies the base merge asynchronously.
+                for _ in {1..12}; do
+                  new_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq '.headRefOid')"
+                  [[ "${new_head}" != "${head}" ]] && break
+                  sleep 5
+                done
+                if [[ "${new_head}" == "${head}" ]]; then
+                  # update-branch는 비동기라 bounded wait 안에 head가 안 바뀔 수 있다.
+                  # stale ref로 CI를 쏘지 않고 다음 트리거에서 재시도한다. bare `[[ ]]`로
+                  # 두면 bash 5에서는 아무 메시지 없이 job이 죽고 bash 3.2에서는 그냥
+                  # 통과해버린다.
+                  echo "PR #${pr}: base update has not landed yet; retrying on the next trigger."
+                  exit 0
+                fi
+                # GITHUB_TOKEN의 update-branch push는 synchronize 이벤트로 CI를 만들지
+                # 못한다. 새 head에 required context를 다시 붙이려면 명시 dispatch가 필요하다.
+                if ! gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"; then
+                  # 병합 호출과 같은 이유로 실행을 죽이지 않는다. base는 이미 갱신됐고
+                  # 다음 트리거가 같은 PR을 다시 판정한다.
+                  echo "::warning::PR #${pr} CI dispatch failed after the base update; retrying on the next trigger."
+                  exit 0
+                fi
+                echo "PR #${pr}: base updated; CI dispatched."
+                exit 0
+                ;;
+              DIRTY)
+                # 충돌은 소유 세션이 rebase 해야 풀린다. GitHub이 PR에 충돌을 직접 표시하지만
+                # 여기서도 신호를 남긴다. 실행을 실패시키지 않고 다음 후보로 넘어간다.
+                echo "::warning::PR #${pr} conflicts with the base branch; skipping until it is rebased."
+                continue
+                ;;
+              BLOCKED | UNKNOWN)
+                # UNKNOWN은 GitHub이 mergeability를 계산 중인 상태다. BLOCKED은 이 job이
+                # 검사하지 않는 네이티브 규칙(추가 승인 수·code owner 리뷰·필수 배포 승인)이
+                # 남아 있다는 뜻일 수 있다. 어느 쪽이든 이번 실행에서 할 수 있는 일이 없고,
+                # 이 후보가 뒤를 막지도 않는다.
+                echo "PR #${pr}: not mergeable yet (${merge_state}); skipping."
+                continue
+                ;;
+              *)
+                # DRAFT는 위 검증에서 이미 걸러진다. 그 밖의 값은 GitHub이 enum을 늘렸다는
+                # 뜻이라 사람이 봐야 하지만, 실행을 실패시키면 큐 전체가 멈추므로 경고만 남긴다.
+                echo "::warning::PR #${pr} has an unrecognized merge state (${merge_state}); skipping."
+                continue
+                ;;
+            esac
+            # merge-state-dispatch-end
+          # candidate-window-begin
+          done < <(jq -r --argjson window "${window}" --argjson offset "${offset}" '
+            . as $all |
+            length as $total |
+            if $total == 0 then empty
+            else [range($offset; $offset + $window) | . % $total] | unique | map($all[.])[]
+            end
+          ' <<<"${candidates}")
+          # candidate-window-end
+
+          echo "No pull request in the automerge queue is ready to merge."
+          # queue-loop-end
