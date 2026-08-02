@@ -1176,10 +1176,13 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   const perCandidate = budgetConstantOf(workflow, 'per_candidate');
   assert.equal(windowMax, 4);
   // 이 저장소에는 큐가 지켜 줘야 할 producer 체인이 없다. 예약분은 큐가 자기 다음 실행과
-  // 운영자 조회 몫까지 태우지 않게 하는 하한이다(실행당 고정 비용 17회 * 최소 11회 실행분).
+  // 운영자 조회 몫까지 태우지 않게 하는 하한이다. 실행당 고정 비용은 17회(ruleset 1 +
+  // gh pr list 1 + 아래 fixed_cost 15)이고, 200회면 그 기준으로 11회 실행분(187회)이
+  // 남는다. fixed_cost 15는 그중 BEHIND 경로 몫이다.
   assert.equal(reserve, 200, 'shared-limit reserve must stay pinned');
   assert.equal(fixedCost, 15);
-  // 후보당 청구는 호출 5회가 아니라 --paginate 추가 페이지까지 덮는 여유값이다.
+  // 후보당 청구는 호출 5회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
+  // (pr view 1 + reviewThreads 1 + REST 3종 * 3페이지). `--paginate`는 쓰지 않는다.
   assert.equal(perCandidate, 11, 'per-candidate charge must match the page-capped reads');
 
   // 응답 payload를 주고 워크플로의 jq 질의를 실제 jq로 적용해 `gh --jq`를 그대로 흉내낸다.
