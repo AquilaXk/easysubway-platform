@@ -142,7 +142,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
   const workflow = await readWorkflow();
 
   const reviewProgram = workflow.match(
-    /# review-state-filter-begin\n\s+if ! jq -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
+    /# review-state-filter-begin\n[\s\S]*?if ! jq -e --arg head "\$\{head\}" --arg author "\$\{pr_author\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
   )?.[1];
   assert.ok(reviewProgram, 'review state jq program must stay testable');
 
@@ -158,11 +158,15 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     user: { login: 'reviewer' },
     ...overrides,
   });
-  const runReviewFilter = (reviews) => {
-    const result = spawnSync('jq', ['-e', '--arg', 'head', 'head', reviewProgram], {
-      input: JSON.stringify([reviews]),
-      encoding: 'utf8',
-    });
+  const runReviewFilter = (reviews, author = 'pr-author') => {
+    const result = spawnSync(
+      'jq',
+      ['-e', '--arg', 'head', 'head', '--arg', 'author', author, reviewProgram],
+      {
+        input: JSON.stringify([reviews]),
+        encoding: 'utf8',
+      },
+    );
     // jq -e는 결과가 false/null이면 1, 컴파일 오류면 3, 런타임 오류면 5를 낸다.
     // 0/1만 판정으로 인정해야 프로그램 파손이 "차단 성공"으로 새지 않는다.
     assert.ok(
@@ -332,6 +336,50 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
         commit_id: 'previous-head',
       }),
     ]),
+    0,
+  );
+
+  // PR 작성자 본인의 리뷰는 신뢰 집합에서 빠진다. GitHub은 자기 PR에 APPROVED를 막지만
+  // COMMENTED는 허용하므로, 폴백 양식 본문을 스스로 붙여 게이트를 통과시키는 경로가
+  // 열려 있었다. 셀프 리뷰 금지가 이 큐의 전제다.
+  assert.notEqual(
+    runReviewFilter(
+      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        user: { login: 'pr-author' },
+      })],
+      'pr-author',
+    ),
+    0,
+  );
+  // 작성자 리뷰가 섞여 있어도 다른 리뷰어의 긍정 리뷰는 그대로 인정된다.
+  assert.equal(
+    runReviewFilter(
+      [
+        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+          user: { login: 'pr-author' },
+        }),
+        review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', {
+          user: { login: 'reviewer-two' },
+        }),
+      ],
+      'pr-author',
+    ),
+    0,
+  );
+  // 작성자가 남긴 CHANGES_REQUESTED도 신뢰 집합 밖이므로 큐를 막지 않는다(GitHub이 애초에
+  // 허용하지 않는 상태이며, 허용되더라도 셀프 판정이 되어선 안 된다).
+  assert.equal(
+    runReviewFilter(
+      [
+        review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', '', {
+          user: { login: 'pr-author' },
+        }),
+        review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', {
+          user: { login: 'reviewer-two' },
+        }),
+      ],
+      'pr-author',
+    ),
     0,
   );
 });
@@ -519,7 +567,13 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
   // SKIPPED를 남겨 "이 후보를 건너뛰었다"를 관측한다.
   const runDispatch = (
     mergeState,
-    { headRepo = 'o/r', newHead = 'updated-head', mergeFails = false, updateFails = false } = {},
+    {
+      headRepo = 'o/r',
+      newHead = 'updated-head',
+      mergeFails = false,
+      updateFails = false,
+      ciDispatchFails = false,
+    } = {},
   ) => {
     const result = stubbedBash([
       'set -euo pipefail',
@@ -529,6 +583,7 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
       `    *"pr view"*headRefOid*) printf '%s\\n' ${JSON.stringify(newHead)} ;;`,
       `    "pr merge"*) ${mergeFails ? 'return 1' : ':'} ;;`,
       `    *update-branch*) ${updateFails ? 'return 1' : ':'} ;;`,
+      `    "workflow run"*) ${ciDispatchFails ? 'return 1' : ':'} ;;`,
       '  esac',
       '}',
       'sleep() { :; }',
@@ -612,6 +667,11 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
   assert.equal(updateFailed.status, 0, 'update-branch failure must not fail the run');
   assert.equal(updateFailed.warned, true, 'update-branch failure must stay operator-visible');
   assert.equal(updateFailed.dispatchedCi, false, '갱신에 실패했으면 CI를 쏘지 않는다');
+
+  // CI dispatch 호출 실패도 같다. base는 이미 갱신됐고 다음 트리거가 다시 판정한다.
+  const ciDispatchFailed = runDispatch('BEHIND', { ciDispatchFails: true });
+  assert.equal(ciDispatchFailed.status, 0, 'CI dispatch failure must not fail the run');
+  assert.equal(ciDispatchFailed.warned, true, 'CI dispatch failure must stay operator-visible');
 
   // fork head에 base 저장소 CI를 dispatch하지 않는다. 거부하되 큐는 계속 진행한다.
   const fork = runDispatch('BEHIND', { headRepo: 'fork/r' });
@@ -707,6 +767,7 @@ const makeRunQueue =
     writeFileSync(
       join(dir, `pr-${pr.number}.json`),
       JSON.stringify({
+        author: { login: 'pr-author' },
         state: pr.state ?? 'OPEN',
         isDraft: false,
         baseRefName: 'main',
@@ -829,7 +890,7 @@ const makeRunQueue =
     mergedPr: merged ? Number(merged) : null,
     // 후보 평가 1건당 1회만 세야 한다. bounded wait의 headRefOid 조회까지 세면 같은
     // 후보가 두 번 잡혀 "실행당 실제 동작 최대 한 건" 계약이 헐거워진다.
-    evaluated: [...calls.matchAll(/gh pr view (\d+) --repo [^\n]*--json baseRefName/g)].map((m) =>
+    evaluated: [...calls.matchAll(/gh pr view (\d+) --repo [^\n]*--json author,baseRefName/g)].map((m) =>
       Number(m[1]),
     ),
     updatedBranch: calls.includes('update-branch'),
@@ -1401,7 +1462,11 @@ const runBlocks = (workflow) => {
 };
 
 const workflowFiles = async () => {
-  const names = (await readdir(workflowsDirUrl)).filter((name) => name.endsWith('.yml')).sort();
+  // GitHub Actions는 .yml과 .yaml을 모두 워크플로로 읽는다. 한쪽만 보면 block scalar
+  // 계약과 push 트리거 계약이 함께 헐거워진다.
+  const names = (await readdir(workflowsDirUrl))
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .sort();
   assert.ok(names.length > 0, '워크플로 디렉터리가 비었다');
   return Promise.all(
     names.map(async (name) => [name, await readFile(new URL(name, workflowsDirUrl), 'utf8')]),

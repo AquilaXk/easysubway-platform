@@ -235,7 +235,7 @@ jobs:
             fi
             # budget-recheck-end
             info="$(gh pr view "${pr}" --repo "${repo}" \
-              --json baseRefName,headRefName,headRefOid,headRepository,isDraft,labels,mergeStateStatus,state)"
+              --json author,baseRefName,headRefName,headRefOid,headRepository,isDraft,labels,mergeStateStatus,state)"
             if ! jq -e '
               .state == "OPEN" and
               .isDraft == false and
@@ -246,6 +246,7 @@ jobs:
               continue
             fi
 
+            pr_author="$(jq -r '.author.login // ""' <<<"${info}")"
             head="$(jq -r '.headRefOid' <<<"${info}")"
             head_ref="$(jq -r '.headRefName' <<<"${info}")"
             head_repo="$(jq -r '.headRepository.nameWithOwner // ""' <<<"${info}")"
@@ -254,8 +255,13 @@ jobs:
             reviews="$(gh api --paginate --slurp \
               "repos/${repo}/pulls/${pr}/reviews?per_page=100")"
             # review-state-filter-begin
-            if ! jq -e --arg head "${head}" '
+            # PR 작성자의 리뷰는 신뢰 집합에서 뺀다. GitHub은 자기 PR에 APPROVED와
+            # CHANGES_REQUESTED를 막지만 COMMENTED는 허용하므로, 작성자가 폴백 양식
+            # 본문을 스스로 붙이면 다른 리뷰어 없이 게이트를 통과시킬 수 있다. 셀프 리뷰
+            # 금지가 이 큐의 전제이므로 그 경로를 원천 차단한다.
+            if ! jq -e --arg head "${head}" --arg author "${pr_author}" '
               [flatten[] |
+                select(.user.login != $author) |
                 select(
                   .author_association == "OWNER" or
                   .author_association == "MEMBER" or
@@ -414,7 +420,12 @@ jobs:
                 fi
                 # GITHUB_TOKEN의 update-branch push는 synchronize 이벤트로 CI를 만들지
                 # 못한다. 새 head에 required context를 다시 붙이려면 명시 dispatch가 필요하다.
-                gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"
+                if ! gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"; then
+                  # 병합 호출과 같은 이유로 실행을 죽이지 않는다. base는 이미 갱신됐고
+                  # 다음 트리거가 같은 PR을 다시 판정한다.
+                  echo "::warning::PR #${pr} CI dispatch failed after the base update; retrying on the next trigger."
+                  exit 0
+                fi
                 echo "PR #${pr}: base updated; CI dispatched."
                 exit 0
                 ;;
