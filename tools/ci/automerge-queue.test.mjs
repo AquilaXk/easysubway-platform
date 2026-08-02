@@ -121,21 +121,86 @@ test('required context는 ruleset 전수 조회로만 판정한다', async () =>
   assert.doesNotMatch(workflow, /"Platform CI"\]/);
 });
 
-test('classic commit status는 전 페이지를 모아 판정한다', async () => {
+test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정을 포기한다', async () => {
   const workflow = await readWorkflow();
 
-  const statusRequest = workflow.match(/statuses="\$\(gh api ([\s\S]*?)"\)"/)?.[1];
-  assert.ok(statusRequest, 'classic status request must stay testable');
-  for (const flag of [
-    '--paginate',
-    '--slurp',
-    '/commits/${head}/statuses?per_page=100',
+  // `--paginate`는 페이지 수에 상한이 없어 이력이 긴 후보 하나가 예산 모델을 넘긴다.
+  const codeLines = workflow.split('\n').filter((line) => !/^\s*#/.test(line));
+  assert.ok(
+    !codeLines.some((line) => line.includes('--paginate')),
+    'unbounded --paginate must not come back',
+  );
+  for (const contract of [
+    'page_limit=3',
+    'read_pages() {',
+    'read_pages "repos/${repo}/pulls/${pr}/reviews"',
+    'read_pages "repos/${repo}/commits/${head}/check-runs"',
+    'read_pages "repos/${repo}/commits/${head}/statuses"',
   ]) {
-    assert.ok(statusRequest.includes(flag), `status request missing: ${flag}`);
+    assert.ok(workflow.includes(contract), `missing contract: ${contract}`);
   }
   // `/status`는 조합 결과를 단일 객체로 주고 페이지네이션되지 않는다. `/statuses`여야 한다.
-  assert.doesNotMatch(statusRequest, /\/commits\/\$\{head\}\/status\?/);
+  assert.doesNotMatch(workflow, /\/commits\/\$\{head\}\/status"/);
   assert.ok(workflow.includes('($statuses | flatten) as $status_records'));
+
+  // 헬퍼를 그대로 돌려 페이지 수집과 상한 동작을 실측한다.
+  const readPages = workflow.match(
+    /# paginated-read-begin\n([\s\S]*?)\n\s+# paginated-read-end/,
+  )?.[1];
+  assert.ok(readPages, 'paginated read helper must stay testable');
+
+  const runReadPages = (pages, { shape = 'array' } = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), 'read-pages-'));
+    pages.forEach((page, index) => {
+      writeFileSync(
+        join(dir, `page-${index + 1}.json`),
+        JSON.stringify(shape === 'array' ? page : { check_runs: page }),
+      );
+    });
+    const result = stubbedBash([
+      'set -euo pipefail',
+      `DIR=${JSON.stringify(dir)}`,
+      'gh() {',
+      `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
+      '  local all="$*"',
+      '  local page="${all##*page=}"',
+      '  cat "$DIR/page-${page}.json" 2>/dev/null || printf "[]"',
+      '}',
+      dedent(readPages),
+      'if out="$(read_pages "repos/o/r/pulls/1/reviews")"; then',
+      `  printf 'OK %s\\n' "$out"`,
+      'else',
+      `  printf 'STOPPED %s\\n' "$?"`,
+      'fi',
+    ]);
+    return {
+      status: result.status,
+      stdout: result.stdout.trim(),
+      requests: (result.calls.match(/gh api/g) ?? []).length,
+    };
+  };
+
+  const full = (count) => Array.from({ length: count }, (_, index) => ({ id: index }));
+
+  // 한 페이지로 끝나면 한 번만 부른다.
+  const single = runReadPages([full(3)]);
+  assert.equal(single.status, 0);
+  assert.equal(single.requests, 1);
+  assert.match(single.stdout, /^OK \[\[/);
+  // 100건이 꽉 차면 다음 페이지를 읽고, 덜 찬 페이지에서 멈춘다.
+  const twoPages = runReadPages([full(100), full(2)]);
+  assert.equal(twoPages.requests, 2);
+  assert.match(twoPages.stdout, /^OK /);
+  // 상한을 넘기면 판정을 포기한다. 모르는 이력 위에서 병합하지 않는다(fail closed).
+  const overflow = runReadPages([full(100), full(100), full(100), full(1)]);
+  assert.equal(overflow.requests, 3, '페이지 상한을 넘겨 요청하면 예산 모델이 무너진다');
+  assert.match(overflow.stdout, /^STOPPED 2/);
+  // check-runs는 객체 모양이라 length 계산이 다르다. 같은 상한이 적용돼야 한다.
+  const objectShape = runReadPages([full(100), full(100), full(100), full(1)], {
+    shape: 'object',
+  });
+  assert.equal(objectShape.requests, 3);
+  assert.match(objectShape.stdout, /^STOPPED 2/);
 });
 
 test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리뷰를 함께 요구한다', async () => {
@@ -439,6 +504,37 @@ test('required context 판정은 대기와 실패를 구분하고 뒤 페이지 
     ),
     'failure',
   );
+  // 같은 이름의 check run과 classic status가 함께 있으면 둘 다 본다. 하나만 보면 나머지
+  // 하나가 실패·대기여도 병합이 진행된다.
+  assert.equal(
+    classify(
+      [run({ conclusion: 'success' })],
+      [[{ id: 2, context: 'Platform CI', state: 'failure', updated_at: '2026-08-01T00:01:00Z' }]],
+    ),
+    'failure',
+  );
+  assert.equal(
+    classify(
+      [run({ conclusion: 'success' })],
+      [[{ id: 2, context: 'Platform CI', state: 'pending', updated_at: '2026-08-01T00:01:00Z' }]],
+    ),
+    'pending',
+  );
+  assert.equal(
+    classify(
+      [run({ conclusion: 'success' })],
+      [[{ id: 2, context: 'Platform CI', state: 'success', updated_at: '2026-08-01T00:01:00Z' }]],
+    ),
+    'success',
+  );
+  assert.equal(
+    classify(
+      [run({ conclusion: null })],
+      [[{ id: 2, context: 'Platform CI', state: 'failure', updated_at: '2026-08-01T00:01:00Z' }]],
+    ),
+    'failure',
+  );
+
   // integration_id가 지정된 required context는 다른 앱의 동명 check나 classic status로
   // 충족되지 않는다.
   assert.equal(
@@ -471,10 +567,17 @@ test('required context 판정은 후보별 건너뛰기로 수렴하고 실패�
   )?.[1];
   assert.ok(contextLoop, 'required context loop must stay testable');
 
-  const runContextLoop = (checkRuns) => {
+  const runContextLoop = (checkRuns, mergeState = 'CLEAN') => {
     const result = stubbedBash([
       'set -euo pipefail',
+      'gh() {',
+      `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
+      '}',
       'pr=39',
+      'repo=o/r',
+      'head_repo=o/r',
+      'head_ref=feature',
+      `merge_state=${JSON.stringify(mergeState)}`,
       `checks=${JSON.stringify(JSON.stringify([{ check_runs: checkRuns }]))}`,
       `statuses=${JSON.stringify(JSON.stringify([[]]))}`,
       `required=${JSON.stringify(JSON.stringify([{ context: 'Platform CI', integration_id: null }]))}`,
@@ -489,6 +592,7 @@ test('required context 판정은 후보별 건너뛰기로 수렴하고 실패�
       status: result.status,
       reached: result.stdout.includes('REACHED_DISPATCH'),
       warned: (result.stdout + result.stderr).includes('::warning::'),
+      dispatchedCi: result.calls.includes('workflow run ci.yml'),
       stdout: result.stdout,
     };
   };
@@ -502,15 +606,29 @@ test('required context 판정은 후보별 건너뛰기로 수렴하고 실패�
     status: 0,
     reached: true,
     warned: false,
+    dispatchedCi: false,
     stdout: 'REACHED_DISPATCH\n',
   });
-  // 진행 중(pending)과 미부착(missing)은 조용히 이 후보만 건너뛴다.
-  for (const checkRuns of [run(null), []]) {
-    const result = runContextLoop(checkRuns);
-    assert.equal(result.status, 0);
-    assert.equal(result.reached, false, '대기 상태는 병합 분기에 닿으면 안 된다');
-    assert.equal(result.warned, false, '대기 상태는 사람이 볼 신호가 아니다');
-  }
+  // 진행 중(pending)은 이미 붙은 check가 끝나기를 기다리는 상태다. 조용히 건너뛰고
+  // CI를 새로 쏘지 않는다.
+  const pending = runContextLoop(run(null));
+  assert.equal(pending.status, 0);
+  assert.equal(pending.reached, false, '대기 상태는 병합 분기에 닿으면 안 된다');
+  assert.equal(pending.warned, false, '대기 상태는 사람이 볼 신호가 아니다');
+  assert.equal(pending.dispatchedCi, false, '대기 중인 check에 CI를 또 쏘지 않는다');
+
+  // 미부착(missing)은 다르다. GITHUB_TOKEN의 update-branch push는 synchronize를 만들지
+  // 못하므로, bounded wait보다 늦게 base 갱신이 반영된 PR에는 required context가 영영
+  // 붙지 않는다. 여기서 쏘지 않으면 아무도 쏘지 않는다(영구 대기).
+  const missing = runContextLoop([]);
+  assert.equal(missing.status, 0);
+  assert.equal(missing.reached, false);
+  assert.equal(missing.dispatchedCi, true, 'required context 부재는 CI dispatch로 푼다');
+
+  // BEHIND는 제외한다. 그 경로가 base를 갱신하면서 어차피 새 head에 CI를 쏜다.
+  const missingBehind = runContextLoop([], 'BEHIND');
+  assert.equal(missingBehind.status, 0);
+  assert.equal(missingBehind.dispatchedCi, false, 'BEHIND는 base 갱신 경로가 맡는다');
   // 명시적 실패도 실행을 죽이지 않고 이 후보만 건너뛰되, 신호는 남긴다.
   const failed = runContextLoop(run('failure'));
   assert.equal(failed.status, 0);
@@ -745,8 +863,8 @@ const makeRunQueue =
       join(dir, `reviews-${pr.number}.json`),
       JSON.stringify(
         pr.reviewed === false
-          ? [[]]
-          : [[
+          ? []
+          : [
               {
                 id: 1,
                 state: 'APPROVED',
@@ -756,7 +874,7 @@ const makeRunQueue =
                 body: '',
                 user: { login: 'reviewer' },
               },
-            ]],
+            ],
       ),
     );
     writeFileSync(
@@ -780,23 +898,21 @@ const makeRunQueue =
       pr.checkState === 'failure' ? 'failure' : pr.checkState === 'pending' ? null : 'success';
     writeFileSync(
       join(dir, `checks-${head}.json`),
-      JSON.stringify([
-        {
-          check_runs:
-            pr.checkState === 'missing'
-              ? []
-              : [
-                  {
-                    id: 1,
-                    name: 'Platform CI',
-                    conclusion,
-                    started_at: '2026-08-01T00:00:00Z',
-                  },
-                ],
-        },
-      ]),
+      JSON.stringify({
+        check_runs:
+          pr.checkState === 'missing'
+            ? []
+            : [
+                {
+                  id: 1,
+                  name: 'Platform CI',
+                  conclusion,
+                  started_at: '2026-08-01T00:00:00Z',
+                },
+              ],
+      }),
     );
-    writeFileSync(join(dir, `statuses-${head}.json`), JSON.stringify([[]]));
+    writeFileSync(join(dir, `statuses-${head}.json`), JSON.stringify([]));
   }
   const script = [
     'set -euo pipefail',
@@ -915,6 +1031,14 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
       `required context ${checkState} must skip only that candidate`,
     );
   }
+  // 부재는 건너뛰기만 하는 것이 아니라 CI를 쏴서 교착을 푼다. 그러면서도 뒤의 병합 가능한
+  // 후보를 굶기지 않아야 한다 — 이 dispatch는 실행을 끝내지 않는다.
+  const missingContext = runQueue([
+    { number: 1, mergeStateStatus: 'CLEAN', checkState: 'missing' },
+    { number: 2, mergeStateStatus: 'CLEAN' },
+  ]);
+  assert.equal(missingContext.dispatchedCi, true, 'required context 부재는 CI dispatch로 푼다');
+  assert.equal(missingContext.mergedPr, 2);
   // 게이트를 통과한 가장 오래된 후보가 우선한다(best-effort FIFO).
   assert.equal(
     runQueue([
@@ -956,7 +1080,7 @@ test('후보 창은 API 지분·timeout·실측 큐 깊이 세 기준으로 유�
   // 창 크기는 이 저장소 값으로 다시 계산해야 한다. 형제 저장소 상수(backend 6, mobile 20)를
   // 그대로 쓰면 실행당 청구가 이 저장소가 허용하기로 한 지분을 넘는다.
   const declaredWindow = declaredWindowOf(workflow);
-  assert.equal(declaredWindow, 5, 'window ceiling must stay pinned to the derived value');
+  assert.equal(declaredWindow, 4, 'window ceiling must stay pinned to the derived value');
   const rationale = workflow.slice(
     workflow.indexOf('# queue-loop-begin'),
     workflow.indexOf('# candidate-budget-begin'),
@@ -1028,13 +1152,13 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   const reserve = budgetConstantOf(workflow, 'reserve');
   const fixedCost = budgetConstantOf(workflow, 'fixed_cost');
   const perCandidate = budgetConstantOf(workflow, 'per_candidate');
-  assert.equal(windowMax, 5);
+  assert.equal(windowMax, 4);
   // 이 저장소에는 큐가 지켜 줘야 할 producer 체인이 없다. 예약분은 큐가 자기 다음 실행과
   // 운영자 조회 몫까지 태우지 않게 하는 하한이다(실행당 고정 비용 17회 * 최소 11회 실행분).
   assert.equal(reserve, 200, 'shared-limit reserve must stay pinned');
   assert.equal(fixedCost, 15);
   // 후보당 청구는 호출 5회가 아니라 --paginate 추가 페이지까지 덮는 여유값이다.
-  assert.equal(perCandidate, 9, 'per-candidate charge must keep the pagination allowance');
+  assert.equal(perCandidate, 11, 'per-candidate charge must match the page-capped reads');
 
   // 응답 payload를 주고 워크플로의 jq 질의를 실제 jq로 적용해 `gh --jq`를 그대로 흉내낸다.
   const runBudget = (stub) =>
@@ -1061,12 +1185,12 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   // 기대값은 워크플로 상수로 되계산하지 않고 고정한다. 유도식을 바꾸는 것은 결정이므로
   // 테스트도 함께 고쳐야 한다.
   for (const [remaining, expected] of [
-    [5000, 5],
-    [1000, 5],
-    [260, 5],
+    [5000, 4],
+    [1000, 4],
     [259, 4],
-    [242, 3],
-    [224, 1],
+    [258, 3],
+    [248, 3],
+    [226, 1],
   ]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block failed at remaining=${remaining}: ${result.stderr}`);
@@ -1085,12 +1209,12 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   }
 
   // 두 버킷 값이 다르면 작은 쪽이 창을 정한다.
-  assert.equal(runPayload(buckets(5000, 242)).stdout.trim(), 'window=3');
-  assert.equal(runPayload(buckets(242, 5000)).stdout.trim(), 'window=3');
+  assert.equal(runPayload(buckets(5000, 248)).stdout.trim(), 'window=3');
+  assert.equal(runPayload(buckets(248, 5000)).stdout.trim(), 'window=3');
 
   // 예약분에 닿으면 큐만 건너뛴다. 실행을 실패시키지 않는다 — 실패로 남기면 그 check가
   // 다음 판정 입력을 오염시킨다.
-  for (const remaining of [223, 220, 200, 0]) {
+  for (const remaining of [225, 220, 200, 0]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block must not fail at remaining=${remaining}`);
     assert.match(result.stdout, /::warning::/, `low budget must be announced at remaining=${remaining}`);
@@ -1152,14 +1276,14 @@ test('후보 순회 중에도 잔량을 다시 읽어 예약분에서 멈춘다'
   assert.equal(plenty.rateCalls, 4, 'budget must be re-measured once per candidate');
 
   // 창을 정할 때는 넉넉했는데 순회 중 예약분에 닿으면, 첫 후보에 요청을 쓰기 전에 멈춘다.
-  const drained = runQueue(queue, { remaining: [5000, 210] });
+  const drained = runQueue(queue, { remaining: [5000, 220] });
   assert.equal(drained.status, 0, 'reserve stop must not fail the run');
   assert.deepEqual(drained.evaluated, [], 'no candidate may be evaluated below the reserve');
   assert.equal(drained.mergedPr, null);
   assert.match(drained.stdout + drained.stderr, /::warning::/);
 
   // 한 건을 평가한 뒤 바닥나면 거기서 멈춘다. 뒤의 병합 가능 후보는 다음 실행 몫이다.
-  const midway = runQueue(queue, { remaining: [5000, 5000, 210] });
+  const midway = runQueue(queue, { remaining: [5000, 5000, 220] });
   assert.equal(midway.status, 0);
   assert.deepEqual(midway.evaluated, [1], 'evaluation must stop at the reserve boundary');
   assert.equal(midway.mergedPr, null);
@@ -1482,6 +1606,25 @@ test('CI는 실제 YAML 파서로 워크플로를 검사한다', async () => {
   assert.match(ciWorkflow, /tools\/ci\/automerge-queue\.test\.mjs/);
 });
 
+test('코디네이터는 main push CI를 되살리지 않는다', async () => {
+  const workflow = await readWorkflow();
+
+  // GITHUB_TOKEN 병합은 push 이벤트를 만들지 못하므로 main push CI 실행이 사라진다. 이
+  // 억제를 되살릴지는 저장소 하나가 혼자 정할 문제가 아니다 — 형제 저장소(backend·mobile)
+  // coordinator도 main CI를 dispatch하지 않고, 코디네이터가 병합한 SHA에 main push CI
+  // 실행이 0건인 것을 실측했다. 네 저장소의 병합 경로를 일치시키기 위해 억제를 수용한다.
+  const dispatches = [...workflow.matchAll(/gh workflow run ([^\s]+)[^\n]*--ref ([^\s"']+|"[^"]+")/g)]
+    .map((match) => `${match[1]} ${match[2]}`);
+  assert.deepEqual(dispatches, ['ci.yml "${head_ref}"', 'ci.yml "${head_ref}"']);
+  for (const basis of [
+    'main push 실행도 되살리지 않는다',
+    'mergedBy가',
+    'strict required status checks',
+  ]) {
+    assert.ok(workflow.includes(basis), `main CI 억제 근거 누락: ${basis}`);
+  }
+});
+
 test('BEHIND 경로의 CI 재부착이 명시 dispatch로 성립한다', async () => {
   const ciWorkflow = await readFile(ciWorkflowUrl, 'utf8');
 
@@ -1514,11 +1657,12 @@ test('병합 후 dispatch가 필요한 producer가 없다는 전제를 고정한
     'push 트리거 워크플로가 늘었다면 병합 후 명시 dispatch가 필요한지 다시 판정해야 한다',
   );
 
-  // 코디네이터가 만드는 명시 dispatch는 PR CI 하나뿐이어야 한다. producer dispatch를
-  // 몰래 늘리면 판정 근거(위 실측)와 어긋난다.
+  // 코디네이터가 만드는 명시 dispatch는 PR CI뿐이어야 한다(BEHIND 경로의 base 갱신 후,
+  // required context 부재 복구 두 자리). producer dispatch를 몰래 늘리면 판정 근거(위
+  // 실측)와 어긋난다.
   const workflow = await readWorkflow();
   const dispatches = [...workflow.matchAll(/gh workflow run ([^\s]+)/g)].map((match) => match[1]);
-  assert.deepEqual(dispatches, ['ci.yml']);
+  assert.deepEqual(dispatches, ['ci.yml', 'ci.yml']);
   // 판정 근거는 주석으로 남아 있어야 한다. 근거 없이 값만 남으면 다음 사람이 되돌린다.
   for (const basis of ['cd.yml', 'sensitive-backup-retention.yml', '병합 후 실행되어야 하는 producer는 없다']) {
     assert.ok(workflow.includes(basis), `producer 판정 근거 누락: ${basis}`);
