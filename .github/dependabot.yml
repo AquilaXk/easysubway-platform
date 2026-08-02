@@ -1,0 +1,81 @@
+# 이 레포가 실제로 소유한 생태계만 등록한다.
+# 2026-08-02 실측(main a1c2f59, tracked blob 62개): package.json / package-lock.json /
+# pubspec.yaml / build.gradle(.kts) / gradle.lockfile / Dockerfile / go.mod / Cargo.toml 이 0건이다.
+# tools/** 의 Node 스크립트는 런타임 의존성 없이 표준 라이브러리와 `node --test` 만 쓴다.
+# 따라서 npm·gradle·pub·docker(Dockerfile) 항목은 넣지 않는다.
+version: 2
+updates:
+  # (1) Terraform — infra/terraform/oci/always-free-a1-flex/ 에 *.tf 10개가 있고
+  # versions.tf 의 required_providers 가 oracle/oci "~> 8.8" 을 고정한다. 외부 module 참조는 0건이다.
+  - package-ecosystem: "terraform"
+    directory: "/infra/terraform/oci/always-free-a1-flex"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:23"
+      timezone: "Asia/Seoul"
+    # 대상 provider 가 oci 1개뿐이라 동시에 열릴 PR 이 사실상 1건이다.
+    # Platform CI 의 terraform init 이 provider 를 내려받으므로 상한을 낮게 잡는다.
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "[CI] 의존성 업데이트"
+
+  # (2) GitHub Actions — .github/workflows/{ci,cd,sensitive-backup-retention}.yml 3개가 대상이다.
+  # 이 레포는 action 을 full commit SHA 로 핀한다. dependabot 은 SHA 핀 갱신을 지원하며,
+  # 2026-08-02 실측상 현재 핀 3개(actions/checkout, actions/setup-node, hashicorp/setup-terraform)가
+  # 전부 릴리스 태그를 직접 가리키고 있어 semver 판정과 아래 update-types 분류가 성립한다.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:23"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "[CI] 의존성 업데이트"
+    groups:
+      # minor/patch 는 한 PR 로 묶어 주간 PR 수를 낮추고, major 는 개별 PR 로 남겨 검토를 강제한다.
+      github-actions-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # (3) Docker Compose — infra/docker-compose.yml 1건.
+  # 관측·보조 스택 이미지(postgis·minio·busybox·nginx·blackbox-exporter·cadvisor·
+  # alertmanager·prometheus·loki·grafana·alloy)가 태그/다이제스트로 고정돼 있어
+  # 갱신 경로가 없으면 CVE 대응이 전부 사람 주도로 남는다. 그래서 대상으로 삼는다.
+  #
+  # digest-only 계약(AquilaXk/easysubway#2712) 보호:
+  # backend·backend-standby·back-worker 서비스의 image 는
+  # `${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}` 라는 환경변수 참조라
+  # 리터럴 이미지 참조가 아니고, dependabot 이 버전을 해석할 대상 자체가 아니다.
+  # 그럼에도 backend 이미지의 유일한 갱신 경로가 #2712 의 digest 결속임을 설정으로 못박기 위해
+  # 아래 ignore 를 방어적으로 명시한다. 이 파일에는 build: 컨텍스트도 0건이다.
+  - package-ecosystem: "docker-compose"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:23"
+      timezone: "Asia/Seoul"
+    # 이미지 11개가 대상이라 major 가 몰리면 PR 이 늘 수 있어 상한으로 막는다.
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "[CI] 의존성 업데이트"
+    ignore:
+      # backend 이미지는 dependabot 이 절대 건드리지 않는다 (#2712 digest 결속이 유일한 경로).
+      - dependency-name: "ghcr.io/aquilaxk/easysubway-backend"
+    groups:
+      # 관측 스택은 minor/patch 를 한 PR 로 묶는다.
+      # major 는 Grafana·Loki·Prometheus 처럼 설정 마이그레이션을 동반하므로 개별 PR 로 남긴다.
+      infra-images-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
