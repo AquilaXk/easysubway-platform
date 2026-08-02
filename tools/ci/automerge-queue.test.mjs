@@ -517,13 +517,18 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
   // gh 호출을 기록만 하는 스텁으로 대체해 상태별 분기 결과를 실측한다. 분기는 큐 루프
   // 안에 있으므로 `continue`가 유효하도록 1회 루프로 감싸고, 루프를 빠져나오면
   // SKIPPED를 남겨 "이 후보를 건너뛰었다"를 관측한다.
-  const runDispatch = (mergeState, { headRepo = 'o/r', newHead = 'updated-head' } = {}) => {
+  const runDispatch = (
+    mergeState,
+    { headRepo = 'o/r', newHead = 'updated-head', mergeFails = false, updateFails = false } = {},
+  ) => {
     const result = stubbedBash([
       'set -euo pipefail',
       'gh() {',
       `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
       '  case "$*" in',
       `    *"pr view"*headRefOid*) printf '%s\\n' ${JSON.stringify(newHead)} ;;`,
+      `    "pr merge"*) ${mergeFails ? 'return 1' : ':'} ;;`,
+      `    *update-branch*) ${updateFails ? 'return 1' : ':'} ;;`,
       '  esac',
       '}',
       'sleep() { :; }',
@@ -597,6 +602,17 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
     assert.equal(result.skipped, true);
     assert.equal(result.warned, true, `${mergeState} must skip with an operator-visible warning`);
   }
+  // 병합·base 갱신 API 호출 실패도 다른 상태와 같게 다룬다. 판정 이후의 head 변경·
+  // ruleset 거부·일시적 오류는 전부 "다음 트리거에서 다시 판정"으로 수렴하며, 여기서
+  // 실행을 죽이면 그 실패 check가 다음 판정 입력을 오염시킨다.
+  const mergeFailed = runDispatch('CLEAN', { mergeFails: true });
+  assert.equal(mergeFailed.status, 0, 'merge call failure must not fail the run');
+  assert.equal(mergeFailed.warned, true, 'merge call failure must stay operator-visible');
+  const updateFailed = runDispatch('BEHIND', { updateFails: true });
+  assert.equal(updateFailed.status, 0, 'update-branch failure must not fail the run');
+  assert.equal(updateFailed.warned, true, 'update-branch failure must stay operator-visible');
+  assert.equal(updateFailed.dispatchedCi, false, '갱신에 실패했으면 CI를 쏘지 않는다');
+
   // fork head에 base 저장소 CI를 dispatch하지 않는다. 거부하되 큐는 계속 진행한다.
   const fork = runDispatch('BEHIND', { headRepo: 'fork/r' });
   assert.equal(fork.status, 0);
