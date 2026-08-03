@@ -308,6 +308,22 @@ jobs:
                 echo "::error::PR #${pr} automerge label을 제거하지 못했습니다."
                 exit 1
               }
+              post_remove_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq .headRefOid)" || {
+                echo "::warning::PR #${pr} label 제거 후 current head를 다시 읽지 못해 automerge label을 복구합니다."
+                gh pr edit "${pr}" --repo "${repo}" --add-label automerge || {
+                  echo "::error::PR #${pr} automerge label을 복구하지 못했습니다."
+                  exit 1
+                }
+                continue
+              }
+              if [[ "${post_remove_head}" != "${head}" ]]; then
+                echo "::warning::PR #${pr} label 제거 후 head가 바뀌어 automerge label을 복구합니다."
+                gh pr edit "${pr}" --repo "${repo}" --add-label automerge || {
+                  echo "::error::PR #${pr} automerge label을 복구하지 못했습니다."
+                  exit 1
+                }
+                continue
+              fi
               echo "::warning::PR #${pr} requires owner rebase (${merge_state}); automerge label removed."
               continue
             fi

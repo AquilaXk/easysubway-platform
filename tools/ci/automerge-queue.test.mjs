@@ -654,11 +654,12 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
     mergeState,
     {
       existingHead,
-      rereadHead = 'current-head',
-      rereadFails = false,
+      headReads = ['current-head', 'current-head'],
+      headReadFails = [],
       commentReadFails = false,
       commentFails = false,
       labelFails = false,
+      restoreFails = false,
     } = {},
   ) => {
     const head = 'current-head';
@@ -670,15 +671,20 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
       'gh() {',
       `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
       '  case "$*" in',
-      `    "pr view"*) ${rereadFails ? 'return 43' : `printf '%s\\n' ${JSON.stringify(rereadHead)}`} ;;`,
+      '    "pr view"*)',
+      '      head_read="$(grep -c \'^gh pr view \' "$GH_LOG")"',
+      `      case " ${headReadFails.join(' ')} " in *" ${'${head_read}'} "*) return 43 ;; esac`,
+      `      printf '%s\\n' "${'${head_reads[$((head_read - 1))]:-${head}}'}" ;;`,
       `    "pr comment"*) ${commentFails ? 'return 41' : ':'} ;;`,
-      `    "pr edit"*) ${labelFails ? 'return 42' : ':'} ;;`,
+      `    "pr edit"*"--remove-label automerge"*) ${labelFails ? 'return 42' : ':'} ;;`,
+      `    "pr edit"*"--add-label automerge"*) ${restoreFails ? 'return 44' : ':'} ;;`,
       '    *) return 1 ;;',
       '  esac',
       '}',
       'pr=26',
       'repo=o/r',
       `head=${JSON.stringify(head)}`,
+      `head_reads=(${headReads.map((value) => JSON.stringify(value)).join(' ')})`,
       'GITHUB_SERVER_URL=https://github.com',
       'GITHUB_REPOSITORY=o/r',
       'GITHUB_RUN_ID=1234',
@@ -692,6 +698,7 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
       status: result.status,
       commented: result.calls.includes('gh pr comment'),
       labelRemoved: result.calls.includes('--remove-label automerge'),
+      labelRestored: result.calls.includes('--add-label automerge'),
       updatedBranch: result.calls.includes('update-branch'),
       skipped: result.calls.includes('SKIPPED'),
       calls: result.calls,
@@ -703,6 +710,7 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
     assert.equal(result.status, 0);
     assert.equal(result.commented, true);
     assert.equal(result.labelRemoved, true);
+    assert.equal(result.labelRestored, false);
     assert.equal(result.updatedBranch, false);
     assert.equal(result.skipped, true);
     assert.match(result.calls, new RegExp(`merge_state=${mergeState}`));
@@ -716,11 +724,24 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
   assert.equal(advancedHead.commented, true, '새 head에는 이전 안내와 별도로 rebase 안내를 게시한다');
   assert.equal(advancedHead.labelRemoved, true);
 
-  const changedHead = runPreflight('BEHIND', { rereadHead: 'new-head' });
+  const changedHead = runPreflight('BEHIND', { headReads: ['new-head'] });
   assert.equal(changedHead.labelRemoved, false, 'head가 바뀌면 새 head의 automerge label을 제거하지 않는다');
+  assert.equal(changedHead.labelRestored, false);
 
-  const unreadableHead = runPreflight('BEHIND', { rereadFails: true });
+  const unreadableHead = runPreflight('BEHIND', { headReadFails: [1] });
   assert.equal(unreadableHead.labelRemoved, false, 'current head를 다시 읽지 못하면 automerge label을 제거하지 않는다');
+  assert.equal(unreadableHead.labelRestored, false);
+
+  const changedAfterRemoval = runPreflight('BEHIND', { headReads: ['current-head', 'new-head'] });
+  assert.equal(changedAfterRemoval.labelRemoved, true);
+  assert.equal(changedAfterRemoval.labelRestored, true, 'label 제거 뒤 head가 바뀌면 automerge label을 복구한다');
+
+  const unreadableAfterRemoval = runPreflight('BEHIND', { headReadFails: [2] });
+  assert.equal(unreadableAfterRemoval.labelRemoved, true);
+  assert.equal(unreadableAfterRemoval.labelRestored, true, 'label 제거 뒤 head를 읽지 못하면 automerge label을 복구한다');
+
+  const restoreFailed = runPreflight('BEHIND', { headReads: ['current-head', 'new-head'], restoreFails: true });
+  assert.equal(restoreFailed.status, 1, 'automerge label 복구 실패는 fail closed여야 한다');
 
   const unreadable = runPreflight('BEHIND', { commentReadFails: true });
   assert.equal(unreadable.commented, false, 'comment history를 확정하지 못하면 재게시하지 않는다');
