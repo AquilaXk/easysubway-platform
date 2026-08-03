@@ -6,8 +6,8 @@ name: Automerge Queue
 #
 # 인증은 github.token 하나뿐이다. GITHUB_TOKEN이 만든 이벤트는 새 workflow run을
 # 만들지 않고 예외는 workflow_dispatch와 repository_dispatch뿐이다. 이 저장소에서 그
-# 제약에 걸리는 체인은 하나뿐이라 명시 dispatch도 하나만 둔다.
-#   - update-branch 후 PR CI: head_ref로 ci.yml dispatch
+# 제약에 걸리는 체인은 required context가 없는 same-repository PR의 CI 복구뿐이다.
+# PR branch의 base 갱신은 소유 세션만 수행하고 coordinator는 절대 대신하지 않는다.
 # ci.yml의 main push 실행도 되살리지 않는다. 형제 저장소 실측(2026-08-02): backend·mobile
 # coordinator 어느 쪽도 main CI를 dispatch하지 않고, 코디네이터가 병합한 SHA에는 main push
 # CI 실행이 0건이다(mobile aacec74·d794582, backend 26b0b68. 세 PR 모두 mergedBy가
@@ -90,13 +90,13 @@ jobs:
           # 없는 후보는 사유를 남기고 건너뛴다. head 하나만 처리하면 그 한 건이 막혔을 때 뒤의
           # PR이 전부 굶는다. 건너뛰기는 병합을 하지 않는 방향이라 게이트를 약화시키지 않으며,
           # 각 후보는 리뷰 객체·미해결 thread·required context 검증을 그대로 통과해야 한다.
-          # 실제 동작(병합 또는 base 갱신)은 한 실행에 최대 한 건이므로 병합 직렬화는
-          # concurrency group과 함께 그대로 유지된다.
+          # 실제 병합은 한 실행에 최대 한 건이므로 병합 직렬화는 concurrency group과
+          # 함께 그대로 유지된다.
           #
           # 병합할 수 없는 사유를 실행 종료 코드로 표현하지 않는다. exit 1은 큐 전체를 멈춰
           # 뒤의 후보를 굶기고, 그 실패가 이 워크플로의 check로 남아 다음 판정 입력을
-          # 오염시킨다. 대신 사람이 봐야 하는 상태(DIRTY·fork head·미지 enum·required
-          # context 실패)는 ::warning:: annotation으로 run 요약에 남긴다.
+          # 오염시킨다. 대신 사람이 봐야 하는 상태(BEHIND·DIRTY·fork head·미지 enum·
+          # required context 실패)는 ::warning:: annotation으로 run 요약에 남긴다.
           # queue-loop-begin
           # 한 실행에서 평가할 후보 수에는 상한이 필요하다. 상한은 아래 세 기준을 모두
           # 만족해야 하고 가장 작은 쪽이 구속한다. 형제 저장소 상수를 그대로 옮기면 안 된다.
@@ -116,8 +116,7 @@ jobs:
           #    쓰지 않는 이유가 이것이다: 페이지 수에 상한이 없으면 이력이 유난히 긴 후보
           #    하나가 예산 모델을 통째로 넘긴다. 상한을 넘는 후보는 판정을 포기하고 건너뛴다.
           #    required context별 jq는 로컬 계산이라 요청을 쓰지 않는다. 후보 평가 밖의 고정
-          #    비용은 BEHIND 경로가 정한다(update-branch 1 + 반영 확인 12 + ci dispatch 1 +
-          #    여유 1 = 15).
+          #    비용은 PR-visible fail-closed 처리와 API 응답 변동을 덮는 보수적 여유 15회다.
           #
           #    이 예산을 "실행 빈도"로 나누지 않는다. 빈도는 강제되지 않는다 — concurrency
           #    그룹은 cancel-in-progress: false라 대기 중인 실행만 접을 뿐 실행이 시작되는
@@ -135,10 +134,9 @@ jobs:
           #    창을 0으로 만들어 큐가 스스로를 굶기고 운영자의 cd.yml preflight dispatch와
           #    조회까지 함께 막힌다. 실행당 고정 비용은 17회(ruleset 1 + gh pr list 1 +
           #    고정 비용 15)이므로 200회면 최소 11회 실행분이 남는다.
-          #  - job timeout. 이 job은 5분(300초)이고 producer dispatch 스텝이 없어 고정 비용은
-          #    BEHIND 경로의 bounded wait 최대 60초(이 경로는 루프를 끝내므로 실행당 한 번)와
-          #    러너·스텝 오버헤드 30초뿐이다. 남는 210초를 후보당 5회 * 1초(비관적 왕복)로
-          #    나누면 42건이고, API가 느린 날을 감안해 2배 여유를 두면 21건이다.
+          #  - job timeout. 이 job은 5분(300초)이고 branch 갱신 대기가 없으므로 고정 비용은
+          #    러너·스텝 오버헤드 30초뿐이다. 남는 270초를 후보당 5회 * 1초(비관적 왕복)로
+          #    나누면 54건이고, API가 느린 날을 감안해 2배 여유를 두면 27건이다.
           #  - 실측 큐 깊이. 2026-08-02 기준 이 저장소의 열린 PR은 6건이고(dependabot 5건 +
           #    사람 1건) 저장소 생성(2026-07-31) 이후 누적 PR은 10건이다. dependabot이 배치로
           #    PR을 만드는 저장소라 큐 깊이가 한 번에 5건까지 뛴다. 창 4면 그 배치의 대부분이
@@ -281,6 +279,32 @@ jobs:
             head_repo="$(jq -r '.headRepository.nameWithOwner // ""' <<<"${info}")"
             merge_state="$(jq -r '.mergeStateStatus' <<<"${info}")"
 
+            # merge-state-preflight-begin
+            # coordinator가 base를 갱신하면 head가 바뀌어 current-head Review가 즉시 stale해진다.
+            # branch 소유 세션만 최신 main에서 rebase할 수 있고, coordinator는 라벨을 내려
+            # 무한 재판정 대신 한 번의 명시적 handoff로 끝낸다.
+            if [[ "${merge_state}" == "BEHIND" || "${merge_state}" == "DIRTY" ]]; then
+              marker='<!-- easysubway-automerge-rebase-required -->'
+              if comments="$(read_pages "repos/${repo}/issues/${pr}/comments")"; then
+                if ! jq -e --arg marker "${marker}" \
+                  'any(flatten[]?; (.body // "") | contains($marker))' <<<"${comments}" >/dev/null; then
+                  run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+                  comment="${marker}"$'\n\n'"automerge coordinator가 merge_state=${merge_state}를 확인해 라벨을 제거합니다. PR 소유 세션이 최신 main에서 rebase하고 current-head Review·CI를 다시 통과한 뒤 automerge 라벨을 추가하세요. Actions run: ${run_url}"
+                  gh pr comment "${pr}" --repo "${repo}" --body "${comment}" ||
+                    echo "::warning::PR #${pr} rebase 안내를 게시하지 못했습니다."
+                fi
+              else
+                echo "::warning::PR #${pr} comment history를 bounded page 안에서 확인하지 못해 안내를 재게시하지 않습니다."
+              fi
+              gh pr edit "${pr}" --repo "${repo}" --remove-label automerge || {
+                echo "::error::PR #${pr} automerge label을 제거하지 못했습니다."
+                exit 1
+              }
+              echo "::warning::PR #${pr} requires owner rebase (${merge_state}); automerge label removed."
+              continue
+            fi
+            # merge-state-preflight-end
+
             reviews="$(read_pages "repos/${repo}/pulls/${pr}/reviews")" || {
               echo "PR #${pr}: review history exceeds the page budget; skipping."
               continue
@@ -410,27 +434,15 @@ jobs:
               esac
             done < <(jq -c '.[]' <<<"${required}")
             if [[ "${contexts_ok}" != true ]]; then
-              # 부재는 대기와 다르다. GITHUB_TOKEN의 update-branch push는 synchronize를
-              # 만들지 못하므로, BEHIND 경로의 bounded wait보다 늦게 base 갱신이 반영되면
-              # 새 head에는 required context가 영영 붙지 않는다. 그 상태의 PR은 더 이상
-              # BEHIND가 아니라 이 게이트에서 걸리므로, 여기서 CI를 쏘지 않으면 아무도
-              # 쏘지 않는다(영구 대기). 대기(pending)는 이미 붙은 check가 끝나기를 기다리는
-              # 상태라 쏘지 않는다.
-              #
-              # BEHIND는 제외한다. 그 경로가 base를 갱신하면서 어차피 새 head에 CI를 쏜다.
+              # 부재는 대기와 다르다. same-repository head에 required context가 한 번도
+              # 붙지 않았다면 이 경로가 CI를 명시 dispatch한다. BEHIND·DIRTY는 위 preflight가
+              # 먼저 라벨을 제거하므로 여기에는 branch 갱신 가능한 상태만 도달한다.
               # fork head에는 base 저장소 CI를 쏘지 않는다. 쏜 CI가 pending check를 만들어
               # 다음 실행은 위 pending 분기로 떨어지므로 head당 한 번만 쏘게 된다.
-              # 이 dispatch는 병합·base 갱신과 달리 실행을 끝내지 않는다. 병합 직렬화와
+              # 이 dispatch는 병합과 달리 실행을 끝내지 않는다. 병합 직렬화와
               # 무관하고, 여기서 실행을 끝내면 뒤의 병합 가능한 후보가 다시 굶는다.
               # missing-context-dispatch-begin
-              behind_missing=false
-              if [[ "${contexts_missing}" == true && "${merge_state}" == "BEHIND" ]]; then
-                # BEHIND는 base 갱신이 먼저다. 아래 BEHIND 분기가 update-branch 후 새 head에
-                # CI를 쏘므로 여기서는 쏘지 않고 그 분기로 내려보낸다. 여기서 건너뛰면
-                # base가 영영 갱신되지 않고, base가 갱신되지 않으면 required context도 영영
-                # 붙지 않는다 — 방금 라벨이 붙어 아직 CI가 없는 behind PR이 그대로 정체한다.
-                behind_missing=true
-              elif [[ "${contexts_missing}" == true && "${head_repo}" == "${repo}" ]]; then
+              if [[ "${contexts_missing}" == true && "${head_repo}" == "${repo}" ]]; then
                 if gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"; then
                   echo "PR #${pr}: required context missing; CI dispatched."
                 else
@@ -438,14 +450,13 @@ jobs:
                   echo "::warning::PR #${pr} CI dispatch failed for a missing required context; retrying on the next trigger."
                 fi
               fi
-              # BEHIND + context 부재만 아래 병합 분기로 내려간다. 나머지는 이 후보를 건너뛴다.
-              [[ "${behind_missing}" == true ]] || continue
+              continue
               # missing-context-dispatch-end
             fi
             # required-context-loop-end
 
             # required context 검증이 병합 가능 여부의 정본이다. mergeStateStatus는 여기서
-            # 실제로 병합이 불가능한 상태(base 갱신 필요·충돌)를 가려내는 데만 쓴다.
+            # preflight 이후의 병합 가능 상태 변화를 가려내는 데만 쓴다.
             # merge-state-dispatch-begin
             fail_closed_pr() {
               local operation="$1"
@@ -479,50 +490,6 @@ jobs:
                   fail_closed_pr "병합 호출" "${failed_status}" || exit "${failed_status}"
                   exit "${failed_status}"
                 fi
-                ;;
-              BEHIND)
-                if [[ "${head_repo}" != "${repo}" ]]; then
-                  echo "::warning::PR #${pr} uses a fork head; refusing base-repository CI dispatch."
-                  continue
-                fi
-                if gh api --method PUT "repos/${repo}/pulls/${pr}/update-branch" \
-                  -f expected_head_sha="${head}" >/dev/null; then
-                  :
-                else
-                  failed_status=$?
-                  fail_closed_pr "base update 호출" "${failed_status}" || exit "${failed_status}"
-                  exit "${failed_status}"
-                fi
-                # ponytail: bounded wait only; the API applies the base merge asynchronously.
-                for _ in {1..12}; do
-                  new_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq '.headRefOid')"
-                  [[ "${new_head}" != "${head}" ]] && break
-                  sleep 5
-                done
-                if [[ "${new_head}" == "${head}" ]]; then
-                  # update-branch는 비동기라 bounded wait 안에 head가 안 바뀔 수 있다.
-                  # stale ref로 CI를 쏘지 않고 다음 트리거에서 재시도한다. bare `[[ ]]`로
-                  # 두면 bash 5에서는 아무 메시지 없이 job이 죽고 bash 3.2에서는 그냥
-                  # 통과해버린다.
-                  echo "PR #${pr}: base update has not landed yet; retrying on the next trigger."
-                  exit 0
-                fi
-                # GITHUB_TOKEN의 update-branch push는 synchronize 이벤트로 CI를 만들지
-                # 못한다. 새 head에 required context를 다시 붙이려면 명시 dispatch가 필요하다.
-                if ! gh workflow run ci.yml --repo "${repo}" --ref "${head_ref}"; then
-                  # 병합 호출과 같은 이유로 실행을 죽이지 않는다. base는 이미 갱신됐고
-                  # 다음 트리거가 같은 PR을 다시 판정한다.
-                  echo "::warning::PR #${pr} CI dispatch failed after the base update; retrying on the next trigger."
-                  exit 0
-                fi
-                echo "PR #${pr}: base updated; CI dispatched."
-                exit 0
-                ;;
-              DIRTY)
-                # 충돌은 소유 세션이 rebase 해야 풀린다. GitHub이 PR에 충돌을 직접 표시하지만
-                # 여기서도 신호를 남긴다. 실행을 실패시키지 않고 다음 후보로 넘어간다.
-                echo "::warning::PR #${pr} conflicts with the base branch; skipping until it is rebased."
-                continue
                 ;;
               BLOCKED | UNKNOWN)
                 # UNKNOWN은 GitHub이 mergeability를 계산 중인 상태다. BLOCKED은 이 job이
