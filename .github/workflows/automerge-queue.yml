@@ -447,6 +447,19 @@ jobs:
             # required context 검증이 병합 가능 여부의 정본이다. mergeStateStatus는 여기서
             # 실제로 병합이 불가능한 상태(base 갱신 필요·충돌)를 가려내는 데만 쓴다.
             # merge-state-dispatch-begin
+            fail_closed_pr() {
+              local operation="$1"
+              local failed_status="$2"
+              local run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              local comment="automerge coordinator의 ${operation}이 실패했습니다. 당시 merge_state=${merge_state}, exit status=${failed_status}, Actions run: ${run_url}. automerge label을 제거합니다. 원인을 해결하고 모든 gate 통과 후 다시 추가하세요."
+
+              gh pr comment "${pr}" --repo "${repo}" --body "${comment}" ||
+                echo "::warning::PR #${pr} failure comment could not be posted."
+              gh pr edit "${pr}" --repo "${repo}" --remove-label automerge || {
+                echo "::error::PR #${pr} automerge label could not be removed."
+                return 1
+              }
+            }
             case "${merge_state}" in
               CLEAN | HAS_HOOKS | UNSTABLE)
                 # UNSTABLE은 "mergeable하지만 필수가 아닌 check가 green이 아님"이다.
@@ -457,28 +470,28 @@ jobs:
                 # 미해결 thread·required context를 모두 통과한 뒤에만 닿으므로 `--auto`가
                 # 대신 기다려 줄 대상이 남아 있지 않다. --match-head-commit이 판정 시점
                 # 이후의 head 변경을 서버에서 거른다.
-                if ! gh pr merge --squash "${pr}" --repo "${repo}" \
+                if gh pr merge --squash "${pr}" --repo "${repo}" \
                   --match-head-commit "${head}"; then
-                  # 판정 이후 head가 바뀌었거나 서버가 거부했다. 셋 다(head 변경·ruleset
-                  # 거부·일시적 API 오류) 다음 트리거에서 다시 판정하면 되는 상태이고,
-                  # 여기서 실행을 죽이면 그 실패가 이 워크플로의 check로 남아 다음 판정
-                  # 입력을 오염시킨다.
-                  echo "::warning::PR #${pr} merge call failed; retrying on the next trigger."
+                  echo "PR #${pr}: merged (${merge_state})."
                   exit 0
+                else
+                  failed_status=$?
+                  fail_closed_pr "병합 호출" "${failed_status}" || exit "${failed_status}"
+                  exit "${failed_status}"
                 fi
-                echo "PR #${pr}: merged (${merge_state})."
-                exit 0
                 ;;
               BEHIND)
                 if [[ "${head_repo}" != "${repo}" ]]; then
                   echo "::warning::PR #${pr} uses a fork head; refusing base-repository CI dispatch."
                   continue
                 fi
-                if ! gh api --method PUT "repos/${repo}/pulls/${pr}/update-branch" \
+                if gh api --method PUT "repos/${repo}/pulls/${pr}/update-branch" \
                   -f expected_head_sha="${head}" >/dev/null; then
-                  # 병합 호출과 같은 이유로 실행을 죽이지 않는다.
-                  echo "::warning::PR #${pr} base update call failed; retrying on the next trigger."
-                  exit 0
+                  :
+                else
+                  failed_status=$?
+                  fail_closed_pr "base update 호출" "${failed_status}" || exit "${failed_status}"
+                  exit "${failed_status}"
                 fi
                 # ponytail: bounded wait only; the API applies the base merge asynchronously.
                 for _ in {1..12}; do

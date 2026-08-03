@@ -663,8 +663,9 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
     {
       headRepo = 'o/r',
       newHead = 'updated-head',
-      mergeFails = false,
-      updateFails = false,
+      mergeFailureStatus = null,
+      updateFailureStatus = null,
+      commentFails = false,
       ciDispatchFails = false,
     } = {},
   ) => {
@@ -674,8 +675,9 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
       `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
       '  case "$*" in',
       `    *"pr view"*headRefOid*) printf '%s\\n' ${JSON.stringify(newHead)} ;;`,
-      `    "pr merge"*) ${mergeFails ? 'return 1' : ':'} ;;`,
-      `    *update-branch*) ${updateFails ? 'return 1' : ':'} ;;`,
+      `    "pr merge"*) ${mergeFailureStatus ?? ':'} ;;`,
+      `    *update-branch*) ${updateFailureStatus ?? ':'} ;;`,
+      `    "pr comment"*) ${commentFails ? 'return 41' : ':'} ;;`,
       `    "workflow run"*) ${ciDispatchFails ? 'return 1' : ':'} ;;`,
       '  esac',
       '}',
@@ -683,6 +685,9 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
       'pr=26',
       'repo=o/r',
       'head=old-head',
+      'GITHUB_SERVER_URL=https://github.com',
+      'GITHUB_REPOSITORY=o/r',
+      'GITHUB_RUN_ID=1234',
       `head_repo=${JSON.stringify(headRepo)}`,
       'head_ref=feature',
       `merge_state=${JSON.stringify(mergeState)}`,
@@ -698,6 +703,8 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
       dispatchedCi: result.calls.includes('workflow run ci.yml'),
       skipped: result.calls.includes('SKIPPED'),
       warned: (result.stdout + result.stderr).includes('::warning::'),
+      commented: result.calls.includes('gh pr comment'),
+      labelRemoved: result.calls.includes('--remove-label automerge'),
       calls: result.calls,
     };
   };
@@ -714,8 +721,19 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
         dispatchedCi: result.dispatchedCi,
         skipped: result.skipped,
         warned: result.warned,
+        commented: result.commented,
+        labelRemoved: result.labelRemoved,
       },
-      { status: 0, merged: true, updatedBranch: false, dispatchedCi: false, skipped: false, warned: false },
+      {
+        status: 0,
+        merged: true,
+        updatedBranch: false,
+        dispatchedCi: false,
+        skipped: false,
+        warned: false,
+        commented: false,
+        labelRemoved: false,
+      },
       `${mergeState} must proceed to merge`,
     );
     // 이 저장소는 auto-merge가 꺼져 있으므로 즉시 병합이고, head 고정은 서버가 한다.
@@ -727,12 +745,16 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
   assert.equal(behind.merged, false);
   assert.equal(behind.updatedBranch, true);
   assert.equal(behind.dispatchedCi, true);
+  assert.equal(behind.commented, false);
+  assert.equal(behind.labelRemoved, false);
   // update-branch는 비동기라 bounded wait 안에 head가 안 바뀔 수 있다. 계약 위반이
   // 아니라 대기 상태이므로 stale ref로 CI를 쏘지 않고 실패하지도 않는다.
   const behindPending = runDispatch('BEHIND', { newHead: 'old-head' });
   assert.equal(behindPending.status, 0);
   assert.equal(behindPending.updatedBranch, true);
   assert.equal(behindPending.dispatchedCi, false);
+  assert.equal(behindPending.commented, false);
+  assert.equal(behindPending.labelRemoved, false);
   // 병합할 수 없는 상태는 전부 "이 후보만 건너뛴다"로 수렴한다. 실행을 실패시키면
   // 그 실패 check가 PR을 UNSTABLE로 만들고 큐 전체가 뒤의 후보까지 굶긴다.
   for (const mergeState of ['BLOCKED', 'UNKNOWN']) {
@@ -741,6 +763,8 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
     assert.equal(result.merged, false);
     assert.equal(result.skipped, true, `${mergeState} must skip to the next candidate`);
     assert.equal(result.warned, false);
+    assert.equal(result.commented, false);
+    assert.equal(result.labelRemoved, false);
   }
   // 사람이 봐야 하는 상태는 건너뛰되 신호를 남긴다. 실행은 실패시키지 않는다.
   for (const mergeState of ['DIRTY', 'SOME_NEW_STATE']) {
@@ -749,17 +773,31 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
     assert.equal(result.merged, false);
     assert.equal(result.skipped, true);
     assert.equal(result.warned, true, `${mergeState} must skip with an operator-visible warning`);
+    assert.equal(result.commented, false);
+    assert.equal(result.labelRemoved, false);
   }
-  // 병합·base 갱신 API 호출 실패도 다른 상태와 같게 다룬다. 판정 이후의 head 변경·
-  // ruleset 거부·일시적 오류는 전부 "다음 트리거에서 다시 판정"으로 수렴하며, 여기서
-  // 실행을 죽이면 그 실패 check가 다음 판정 입력을 오염시킨다.
-  const mergeFailed = runDispatch('CLEAN', { mergeFails: true });
-  assert.equal(mergeFailed.status, 0, 'merge call failure must not fail the run');
-  assert.equal(mergeFailed.warned, true, 'merge call failure must stay operator-visible');
-  const updateFailed = runDispatch('BEHIND', { updateFails: true });
-  assert.equal(updateFailed.status, 0, 'update-branch failure must not fail the run');
-  assert.equal(updateFailed.warned, true, 'update-branch failure must stay operator-visible');
+  // 병합·base 갱신 API 호출 실패는 PR에 실패 상태를 남기고 라벨을 제거한 뒤 즉시 실패한다.
+  const mergeFailed = runDispatch('CLEAN', { mergeFailureStatus: 'return 17' });
+  assert.equal(mergeFailed.status, 17, 'merge call failure must preserve the failed status');
+  assert.equal(mergeFailed.commented, true, 'merge failure must be visible on the PR');
+  assert.equal(mergeFailed.labelRemoved, true, 'merge failure must remove automerge');
+  assert.match(mergeFailed.calls, /병합 호출/);
+  assert.match(mergeFailed.calls, /merge_state=CLEAN/);
+  assert.match(mergeFailed.calls, /exit status=17/);
+  assert.match(mergeFailed.calls, /https:\/\/github\.com\/o\/r\/actions\/runs\/1234/);
+  const updateFailed = runDispatch('BEHIND', { updateFailureStatus: 'return 29' });
+  assert.equal(updateFailed.status, 29, 'update-branch failure must preserve the failed status');
+  assert.equal(updateFailed.commented, true, 'update-branch failure must be visible on the PR');
+  assert.equal(updateFailed.labelRemoved, true, 'update-branch failure must remove automerge');
+  assert.match(updateFailed.calls, /base update 호출/);
+  assert.match(updateFailed.calls, /merge_state=BEHIND/);
+  assert.match(updateFailed.calls, /exit status=29/);
+  assert.match(updateFailed.calls, /https:\/\/github\.com\/o\/r\/actions\/runs\/1234/);
   assert.equal(updateFailed.dispatchedCi, false, '갱신에 실패했으면 CI를 쏘지 않는다');
+  const commentFailed = runDispatch('CLEAN', { mergeFailureStatus: 'return 17', commentFails: true });
+  assert.equal(commentFailed.status, 17, 'comment failure must not replace the merge status');
+  assert.equal(commentFailed.commented, true, 'failure comment must still be attempted');
+  assert.equal(commentFailed.labelRemoved, true, 'comment failure must still remove automerge');
 
   // CI dispatch 호출 실패도 같다. base는 이미 갱신됐고 다음 트리거가 다시 판정한다.
   const ciDispatchFailed = runDispatch('BEHIND', { ciDispatchFails: true });
@@ -773,6 +811,8 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
   assert.equal(fork.dispatchedCi, false);
   assert.equal(fork.skipped, true);
   assert.equal(fork.warned, true);
+  assert.equal(fork.commented, false);
+  assert.equal(fork.labelRemoved, false);
 });
 
 test('게이트는 후보별로 병합 분기보다 앞선다', async () => {
