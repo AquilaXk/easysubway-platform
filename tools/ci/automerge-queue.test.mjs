@@ -727,18 +727,22 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
   const changedHead = runPreflight('BEHIND', { headReads: ['new-head'] });
   assert.equal(changedHead.labelRemoved, false, 'head가 바뀌면 새 head의 automerge label을 제거하지 않는다');
   assert.equal(changedHead.labelRestored, false);
+  assert.equal(changedHead.commented, false, 'label을 유지한 head에 handoff 댓글을 남기지 않는다');
 
   const unreadableHead = runPreflight('BEHIND', { headReadFails: [1] });
   assert.equal(unreadableHead.labelRemoved, false, 'current head를 다시 읽지 못하면 automerge label을 제거하지 않는다');
   assert.equal(unreadableHead.labelRestored, false);
+  assert.equal(unreadableHead.commented, false);
 
   const changedAfterRemoval = runPreflight('BEHIND', { headReads: ['current-head', 'new-head'] });
   assert.equal(changedAfterRemoval.labelRemoved, true);
   assert.equal(changedAfterRemoval.labelRestored, true, 'label 제거 뒤 head가 바뀌면 automerge label을 복구한다');
+  assert.equal(changedAfterRemoval.commented, false, 'label을 복구한 head에 handoff 댓글을 남기지 않는다');
 
   const unreadableAfterRemoval = runPreflight('BEHIND', { headReadFails: [2] });
   assert.equal(unreadableAfterRemoval.labelRemoved, true);
   assert.equal(unreadableAfterRemoval.labelRestored, true, 'label 제거 뒤 head를 읽지 못하면 automerge label을 복구한다');
+  assert.equal(unreadableAfterRemoval.commented, false);
 
   const restoreFailed = runPreflight('BEHIND', { headReads: ['current-head', 'new-head'], restoreFails: true });
   assert.equal(restoreFailed.status, 1, 'automerge label 복구 실패는 fail closed여야 한다');
