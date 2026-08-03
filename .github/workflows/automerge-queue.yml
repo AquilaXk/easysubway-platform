@@ -284,7 +284,7 @@ jobs:
             # branch 소유 세션만 최신 main에서 rebase할 수 있고, coordinator는 라벨을 내려
             # 무한 재판정 대신 한 번의 명시적 handoff로 끝낸다.
             if [[ "${merge_state}" == "BEHIND" || "${merge_state}" == "DIRTY" ]]; then
-              marker='<!-- easysubway-automerge-rebase-required -->'
+              marker="<!-- easysubway-automerge-rebase-required:${head} -->"
               if comments="$(read_pages "repos/${repo}/issues/${pr}/comments")"; then
                 if ! jq -e --arg marker "${marker}" \
                   'any(flatten[]?; (.body // "") | contains($marker))' <<<"${comments}" >/dev/null; then

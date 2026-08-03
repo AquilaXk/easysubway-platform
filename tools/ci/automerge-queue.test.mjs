@@ -649,12 +649,14 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
   )?.[1];
   assert.ok(preflight, 'merge state preflight must stay testable');
 
-  const marker = '<!-- easysubway-automerge-rebase-required -->';
+  const markerPrefix = '<!-- easysubway-automerge-rebase-required:';
   const runPreflight = (
     mergeState,
-    { hasMarker = false, commentReadFails = false, commentFails = false, labelFails = false } = {},
+    { existingHead, commentReadFails = false, commentFails = false, labelFails = false } = {},
   ) => {
-    const comments = hasMarker ? [[], [{ body: marker }]] : [[]];
+    const head = 'current-head';
+    const marker = `${markerPrefix}${head} -->`;
+    const comments = existingHead ? [[], [{ body: `${markerPrefix}${existingHead} -->` }]] : [[]];
     const result = stubbedBash([
       'set -euo pipefail',
       `read_pages() { ${commentReadFails ? 'return 2' : `printf '%s' ${JSON.stringify(JSON.stringify(comments))}`}; }`,
@@ -668,6 +670,7 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
       '}',
       'pr=26',
       'repo=o/r',
+      `head=${JSON.stringify(head)}`,
       'GITHUB_SERVER_URL=https://github.com',
       'GITHUB_REPOSITORY=o/r',
       'GITHUB_RUN_ID=1234',
@@ -697,9 +700,13 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
     assert.match(result.calls, new RegExp(`merge_state=${mergeState}`));
   }
 
-  const existing = runPreflight('BEHIND', { hasMarker: true });
-  assert.equal(existing.commented, false, '두 번째 page에 marker가 있어도 안내를 중복 게시하지 않는다');
+  const existing = runPreflight('BEHIND', { existingHead: 'current-head' });
+  assert.equal(existing.commented, false, '같은 head marker가 두 번째 page에 있어도 안내를 중복 게시하지 않는다');
   assert.equal(existing.labelRemoved, true);
+
+  const advancedHead = runPreflight('BEHIND', { existingHead: 'previous-head' });
+  assert.equal(advancedHead.commented, true, '새 head에는 이전 안내와 별도로 rebase 안내를 게시한다');
+  assert.equal(advancedHead.labelRemoved, true);
 
   const unreadable = runPreflight('BEHIND', { commentReadFails: true });
   assert.equal(unreadable.commented, false, 'comment history를 확정하지 못하면 재게시하지 않는다');
