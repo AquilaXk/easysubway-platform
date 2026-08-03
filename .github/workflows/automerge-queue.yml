@@ -296,6 +296,14 @@ jobs:
               else
                 echo "::warning::PR #${pr} comment history를 bounded page 안에서 확인하지 못해 안내를 재게시하지 않습니다."
               fi
+              current_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq .headRefOid)" || {
+                echo "::warning::PR #${pr} current head를 다시 읽지 못해 automerge label을 유지합니다."
+                continue
+              }
+              if [[ "${current_head}" != "${head}" ]]; then
+                echo "::warning::PR #${pr} head가 바뀌어 automerge label을 유지합니다."
+                continue
+              fi
               gh pr edit "${pr}" --repo "${repo}" --remove-label automerge || {
                 echo "::error::PR #${pr} automerge label을 제거하지 못했습니다."
                 exit 1

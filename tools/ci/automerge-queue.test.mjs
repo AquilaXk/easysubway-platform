@@ -652,7 +652,14 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
   const markerPrefix = '<!-- easysubway-automerge-rebase-required:';
   const runPreflight = (
     mergeState,
-    { existingHead, commentReadFails = false, commentFails = false, labelFails = false } = {},
+    {
+      existingHead,
+      rereadHead = 'current-head',
+      rereadFails = false,
+      commentReadFails = false,
+      commentFails = false,
+      labelFails = false,
+    } = {},
   ) => {
     const head = 'current-head';
     const marker = `${markerPrefix}${head} -->`;
@@ -663,6 +670,7 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
       'gh() {',
       `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
       '  case "$*" in',
+      `    "pr view"*) ${rereadFails ? 'return 43' : `printf '%s\\n' ${JSON.stringify(rereadHead)}`} ;;`,
       `    "pr comment"*) ${commentFails ? 'return 41' : ':'} ;;`,
       `    "pr edit"*) ${labelFails ? 'return 42' : ':'} ;;`,
       '    *) return 1 ;;',
@@ -707,6 +715,12 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
   const advancedHead = runPreflight('BEHIND', { existingHead: 'previous-head' });
   assert.equal(advancedHead.commented, true, '새 head에는 이전 안내와 별도로 rebase 안내를 게시한다');
   assert.equal(advancedHead.labelRemoved, true);
+
+  const changedHead = runPreflight('BEHIND', { rereadHead: 'new-head' });
+  assert.equal(changedHead.labelRemoved, false, 'head가 바뀌면 새 head의 automerge label을 제거하지 않는다');
+
+  const unreadableHead = runPreflight('BEHIND', { rereadFails: true });
+  assert.equal(unreadableHead.labelRemoved, false, 'current head를 다시 읽지 못하면 automerge label을 제거하지 않는다');
 
   const unreadable = runPreflight('BEHIND', { commentReadFails: true });
   assert.equal(unreadable.commented, false, 'comment history를 확정하지 못하면 재게시하지 않는다');
@@ -931,7 +945,7 @@ const makeRunQueue =
       join(dir, `comments-${pr.number}.json`),
       JSON.stringify(
         pr.hasRebaseMarker
-          ? [{ body: '<!-- easysubway-automerge-rebase-required -->' }]
+          ? [{ body: `<!-- easysubway-automerge-rebase-required:${head} -->` }]
           : [],
       ),
     );
@@ -1009,6 +1023,7 @@ const makeRunQueue =
     '      [ -n "$rv" ] || rv="$(tail -1 "$FIX/rates")"',
     `      printf '%s\\n' "$rv" ;;`,
     `    "pr list"*) printf '%s\\n' ${JSON.stringify(JSON.stringify(prs.map((p) => p.number)))} ;;`,
+    '    "pr view "*"--json headRefOid --jq .headRefOid") set -- $all; jq -r .headRefOid "$FIX/pr-$3.json" ;;',
     '    "pr view "*) set -- $all; cat "$FIX/pr-$3.json" ;;',
     '    *issues/*/comments*) n="${all#*issues/}"; n="${n%%/comments*}"; cat "$FIX/comments-$n.json" ;;',
     '    *pulls/*/reviews*) n="${all#*pulls/}"; n="${n%%/reviews*}"; cat "$FIX/reviews-$n.json" ;;',
