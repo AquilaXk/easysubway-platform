@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Platform activation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "orchestrator",
+    "tuple",
+    "tupleSha256",
+    "candidate",
+    "activation",
+    "termination",
+    "fallbackZero",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "PLATFORM_ACTIVATION_RECEIPT_V1" },
+    "artifactKind": { "type": "string", "const": "platform-activation-receipt" },
+    "orchestrator": { "type": "string", "enum": ["COMPOSE", "KUBERNETES"] },
+    "tuple": { "$ref": "journey-release-tuple.schema.json" },
+    "tupleSha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instanceCount", "distinctFailureDomainCount", "allReady", "allInstancesMatchTuple", "canaryPassed"],
+      "properties": {
+        "instanceCount": { "type": "integer", "minimum": 2 },
+        "distinctFailureDomainCount": { "type": "integer", "minimum": 2 },
+        "allReady": { "type": "boolean", "const": true },
+        "allInstancesMatchTuple": { "type": "boolean", "const": true },
+        "canaryPassed": { "type": "boolean", "const": true }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trafficGeneration", "trafficSwitchAtomic", "oldPoolDrained"],
+      "properties": {
+        "trafficGeneration": { "type": "integer", "minimum": 1 },
+        "trafficSwitchAtomic": { "type": "boolean", "const": true },
+        "oldPoolDrained": { "type": "boolean", "const": true }
+      }
+    },
+    "termination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["withinBudget", "droppedJourneyCount", "duplicateJourneyCount"],
+      "properties": {
+        "withinBudget": { "type": "boolean", "const": true },
+        "droppedJourneyCount": { "type": "integer", "const": 0 },
+        "duplicateJourneyCount": { "type": "integer", "const": 0 }
+      }
+    },
+    "fallbackZero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["legacyGraphSuccessCount", "localRouteInvocationCount", "staleJourneyServedCount", "alternateEndpointSuccessCount"],
+      "properties": {
+        "legacyGraphSuccessCount": { "type": "integer", "const": 0 },
+        "localRouteInvocationCount": { "type": "integer", "const": 0 },
+        "staleJourneyServedCount": { "type": "integer", "const": 0 },
+        "alternateEndpointSuccessCount": { "type": "integer", "const": 0 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generatedAt", "runUrl"],
+      "properties": {
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "runUrl": { "type": "string", "pattern": "^https://github\\.com/[^/]+/[^/]+/actions/runs/[1-9][0-9]*$" }
+      }
+    }
+  }
+}
