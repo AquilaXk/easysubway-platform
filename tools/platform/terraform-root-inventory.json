@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "artifactKind": "terraform-root-inventory-v1",
+  "roots": [
+    {
+      "id": "oci-always-free-a1-flex",
+      "path": "infra/terraform/oci/always-free-a1-flex",
+      "requiredTerraformVersion": ">= 1.6.0",
+      "providers": [
+        {
+          "source": "registry.terraform.io/oracle/oci",
+          "constraint": "~> 8.8"
+        }
+      ],
+      "backendDisposition": "DISABLED_FOR_CI",
+      "executionPlatforms": [
+        "darwin_arm64",
+        "linux_amd64"
+      ],
+      "ownerWorkflow": ".github/workflows/ci.yml",
+      "ownerJob": "platform"
+    }
+  ],
+  "moduleOnlyExclusions": []
+}

@@ -55,6 +55,7 @@ jobs:
           node --test tools/ci/automerge-queue.test.mjs
           node --test tools/platform/stage-contracts.test.mjs
           node --test tools/platform/validate-deployment-input.test.mjs
+          node --test tools/platform/validate-terraform-root-inventory.test.mjs
           node --test tools/ops/post-deploy-smoke.test.mjs
 
       - name: Validate production Compose
@@ -79,5 +80,15 @@ jobs:
         with:
           terraform_version: 1.14.6
 
-      - name: Check Terraform formatting
-        run: terraform fmt -check -recursive infra/terraform
+      - name: Validate Terraform roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform fmt -check -recursive infra/terraform
+          tf_data_dir="${RUNNER_TEMP}/terraform-data/oci-always-free-a1-flex"
+          rm -rf "${tf_data_dir}"
+          mkdir -p "${tf_data_dir}"
+          export TF_DATA_DIR="${tf_data_dir}"
+          terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color
+          terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color
+          git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl
