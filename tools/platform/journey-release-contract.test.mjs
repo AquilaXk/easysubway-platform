@@ -5,7 +5,8 @@ import test from "node:test";
 
 const tuple = JSON.parse(readFileSync(new URL("../../contracts/release/journey-release-tuple.schema.json", import.meta.url)));
 const receipt = JSON.parse(readFileSync(new URL("../../contracts/release/platform-activation-receipt.schema.json", import.meta.url)));
-const digestPattern = "^sha256:[a-f0-9]{64}$";
+const absoluteEnd = "(?![\\s\\S])";
+const digestPattern = `^sha256:[a-f0-9]{64}${absoluteEnd}`;
 
 test("JourneyReleaseTuple is closed and pins immutable identities", () => {
   const required = [
@@ -22,9 +23,9 @@ test("JourneyReleaseTuple is closed and pins immutable identities", () => {
     assert.equal(tuple.properties[name].pattern, digestPattern);
   }
   assert.equal(tuple.properties.deploymentRevision.type, "string");
-  assert.equal(tuple.properties.deploymentRevision.pattern, "^[a-f0-9]{40}$");
+  assert.equal(tuple.properties.deploymentRevision.pattern, `^[a-f0-9]{40}${absoluteEnd}`);
   assert.equal(tuple.properties.environmentIdentity.type, "string");
-  assert.equal(tuple.properties.environmentIdentity.pattern, "^[A-Za-z0-9._-]+$");
+  assert.equal(tuple.properties.environmentIdentity.pattern, `^[A-Za-z0-9._-]+${absoluteEnd}`);
   assert.equal(tuple.properties.environmentIdentity.minLength, 1);
   assert.deepEqual(tuple["x-easysubway-tuple-sha256"], {
     encoding: "UTF-8",
@@ -97,11 +98,25 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assert.doesNotMatch("2026-08-04T22:30:60+09:00", generatedAt);
   assert.doesNotMatch("not-a-date", generatedAt);
   assert.equal(receipt.properties.evidence.properties.runUrl.type, "string");
-  assert.equal(receipt.properties.evidence.properties.runUrl.pattern, "^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*$");
+  assert.equal(receipt.properties.evidence.properties.runUrl.pattern, `^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*${absoluteEnd}`);
   const runUrl = new RegExp(receipt.properties.evidence.properties.runUrl.pattern);
   assert.match("https://github.com/AquilaXk/easysubway-platform/actions/runs/123", runUrl);
   assert.doesNotMatch("https://github.com/AquilaXk/easysubway-platform/actions/runs/123?ok=true", runUrl);
   assert.doesNotMatch("https://github.com/AquilaXk/easysubway-platform/actions/runs/123#receipt", runUrl);
+
+  const exactPatterns = [
+    ...["backendImageDigest", "backendConfigDigest", "journeyContractDigest", "serverRouteBundleDigest"].map((name) => [tuple.properties[name].pattern, `sha256:${"a".repeat(64)}`]),
+    [tuple.properties.deploymentRevision.pattern, "a".repeat(40)],
+    [tuple.properties.environmentIdentity.pattern, "production"],
+    [receipt.properties.evidence.properties.generatedAt.pattern, "2026-08-04T22:30:00+09:00"],
+    [receipt.properties.evidence.properties.runUrl.pattern, "https://github.com/AquilaXk/easysubway-platform/actions/runs/123"],
+  ];
+  for (const [pattern, value] of exactPatterns) {
+    const exact = new RegExp(pattern);
+    for (const terminator of ["\n", "\r", "\u2028", "\u2029"]) {
+      assert.doesNotMatch(`${value}${terminator}`, exact);
+    }
+  }
 });
 
 function assertClosed(schema, required) {
