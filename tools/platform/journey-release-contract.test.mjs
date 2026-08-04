@@ -93,6 +93,9 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assert.equal(receipt.properties.evidence.properties.generatedAt.format, "date-time");
   const generatedAt = new RegExp(receipt.properties.evidence.properties.generatedAt.pattern);
   assert.match("2026-08-04T22:30:00+09:00", generatedAt);
+  assert.match("2024-02-29T00:00:00Z", generatedAt);
+  assert.doesNotMatch("2026-02-31T12:00:00Z", generatedAt);
+  assert.doesNotMatch("2026-02-29T00:00:00Z", generatedAt);
   assert.doesNotMatch("not-a-date", generatedAt);
   assert.equal(receipt.properties.evidence.properties.runUrl.type, "string");
   assert.equal(receipt.properties.evidence.properties.runUrl.pattern, "^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*$");
