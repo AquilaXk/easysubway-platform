@@ -50,7 +50,7 @@ test("tupleSha256 uses exact ordered UTF-8 LF-delimited identity bytes", () => {
 
 test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evidence shapes", () => {
   const required = [
-    "schemaVersion", "artifactKind", "orchestrator", "tuple", "tupleSha256", "candidate", "activation", "termination", "fallbackZero", "evidence",
+    "schemaVersion", "artifactKind", "orchestrator", "tuple", "candidate", "activation", "termination", "fallbackZero", "evidence",
   ];
   assertClosed(receipt, required);
   assert.equal(receipt.properties.schemaVersion.type, "string");
@@ -60,8 +60,6 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assert.equal(receipt.properties.orchestrator.type, "string");
   assert.deepEqual(receipt.properties.orchestrator.enum, ["COMPOSE", "KUBERNETES"]);
   assert.equal(receipt.properties.tuple.$ref, "journey-release-tuple.schema.json");
-  assert.equal(receipt.properties.tupleSha256.type, "string");
-  assert.equal(receipt.properties.tupleSha256.pattern, digestPattern);
   assertClosed(receipt.properties.candidate, ["instanceCount", "distinctFailureDomainCount", "allReady", "allInstancesMatchTuple", "canaryPassed"]);
   assert.equal(receipt.properties.candidate.properties.instanceCount.type, "integer");
   assert.equal(receipt.properties.candidate.properties.instanceCount.minimum, 2);
@@ -93,8 +91,15 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assertClosed(receipt.properties.evidence, ["generatedAt", "runUrl"]);
   assert.equal(receipt.properties.evidence.properties.generatedAt.type, "string");
   assert.equal(receipt.properties.evidence.properties.generatedAt.format, "date-time");
+  const generatedAt = new RegExp(receipt.properties.evidence.properties.generatedAt.pattern);
+  assert.match("2026-08-04T22:30:00+09:00", generatedAt);
+  assert.doesNotMatch("not-a-date", generatedAt);
   assert.equal(receipt.properties.evidence.properties.runUrl.type, "string");
-  assert.equal(receipt.properties.evidence.properties.runUrl.pattern, "^https://github\\.com/[^/]+/[^/]+/actions/runs/[1-9][0-9]*$");
+  assert.equal(receipt.properties.evidence.properties.runUrl.pattern, "^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*$");
+  const runUrl = new RegExp(receipt.properties.evidence.properties.runUrl.pattern);
+  assert.match("https://github.com/AquilaXk/easysubway-platform/actions/runs/123", runUrl);
+  assert.doesNotMatch("https://github.com/AquilaXk/easysubway-platform/actions/runs/123?ok=true", runUrl);
+  assert.doesNotMatch("https://github.com/AquilaXk/easysubway-platform/actions/runs/123#receipt", runUrl);
 });
 
 function assertClosed(schema, required) {
