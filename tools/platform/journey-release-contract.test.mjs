@@ -60,12 +60,10 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assert.equal(receipt.properties.orchestrator.type, "string");
   assert.deepEqual(receipt.properties.orchestrator.enum, ["COMPOSE", "KUBERNETES"]);
   assert.equal(receipt.properties.tuple.$ref, "journey-release-tuple.schema.json");
-  assertClosed(receipt.properties.candidate, ["instanceCount", "distinctFailureDomainCount", "allReady", "allInstancesMatchTuple", "canaryPassed"]);
+  assertClosed(receipt.properties.candidate, ["instanceCount", "spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"]);
   assert.equal(receipt.properties.candidate.properties.instanceCount.type, "integer");
   assert.equal(receipt.properties.candidate.properties.instanceCount.minimum, 2);
-  assert.equal(receipt.properties.candidate.properties.distinctFailureDomainCount.type, "integer");
-  assert.equal(receipt.properties.candidate.properties.distinctFailureDomainCount.minimum, 2);
-  for (const name of ["allReady", "allInstancesMatchTuple", "canaryPassed"]) {
+  for (const name of ["spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"]) {
     assert.equal(receipt.properties.candidate.properties[name].type, "boolean");
     assert.equal(receipt.properties.candidate.properties[name].const, true);
   }
@@ -96,6 +94,7 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assert.match("2024-02-29T00:00:00Z", generatedAt);
   assert.doesNotMatch("2026-02-31T12:00:00Z", generatedAt);
   assert.doesNotMatch("2026-02-29T00:00:00Z", generatedAt);
+  assert.doesNotMatch("2026-08-04T22:30:60+09:00", generatedAt);
   assert.doesNotMatch("not-a-date", generatedAt);
   assert.equal(receipt.properties.evidence.properties.runUrl.type, "string");
   assert.equal(receipt.properties.evidence.properties.runUrl.pattern, "^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*$");
