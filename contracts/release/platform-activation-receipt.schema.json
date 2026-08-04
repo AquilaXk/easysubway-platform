@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Platform activation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "orchestrator",
+    "tuple",
+    "candidate",
+    "activation",
+    "termination",
+    "fallbackZero",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "PLATFORM_ACTIVATION_RECEIPT_V1" },
+    "artifactKind": { "type": "string", "const": "platform-activation-receipt" },
+    "orchestrator": { "type": "string", "enum": ["COMPOSE", "KUBERNETES"] },
+    "tuple": { "$ref": "journey-release-tuple.schema.json" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instanceCount", "spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"],
+      "properties": {
+        "instanceCount": { "type": "integer", "minimum": 2 },
+        "spansMultipleFailureDomains": { "type": "boolean", "const": true },
+        "allReady": { "type": "boolean", "const": true },
+        "allInstancesMatchTuple": { "type": "boolean", "const": true },
+        "canaryPassed": { "type": "boolean", "const": true }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trafficGeneration", "trafficSwitchAtomic", "oldPoolDrained"],
+      "properties": {
+        "trafficGeneration": { "type": "integer", "minimum": 1 },
+        "trafficSwitchAtomic": { "type": "boolean", "const": true },
+        "oldPoolDrained": { "type": "boolean", "const": true }
+      }
+    },
+    "termination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["withinBudget", "droppedJourneyCount", "duplicateJourneyCount"],
+      "properties": {
+        "withinBudget": { "type": "boolean", "const": true },
+        "droppedJourneyCount": { "type": "integer", "const": 0 },
+        "duplicateJourneyCount": { "type": "integer", "const": 0 }
+      }
+    },
+    "fallbackZero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["legacyGraphSuccessCount", "localRouteInvocationCount", "staleJourneyServedCount", "alternateEndpointSuccessCount"],
+      "properties": {
+        "legacyGraphSuccessCount": { "type": "integer", "const": 0 },
+        "localRouteInvocationCount": { "type": "integer", "const": 0 },
+        "staleJourneyServedCount": { "type": "integer", "const": 0 },
+        "alternateEndpointSuccessCount": { "type": "integer", "const": 0 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generatedAt", "runUrl"],
+      "properties": {
+        "generatedAt": { "type": "string", "format": "date-time", "pattern": "^(?:(?:[0-9]{4})-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))(?![\\s\\S])" },
+        "runUrl": { "type": "string", "pattern": "^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*(?![\\s\\S])" }
+      }
+    }
+  }
+}

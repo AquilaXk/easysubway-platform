@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Journey release tuple",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "backendImageDigest",
+    "backendConfigDigest",
+    "journeyContractDigest",
+    "serverRouteBundleDigest",
+    "deploymentRevision",
+    "environmentIdentity"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "JOURNEY_RELEASE_TUPLE_V1" },
+    "artifactKind": { "type": "string", "const": "journey-release-tuple" },
+    "backendImageDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "backendConfigDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "journeyContractDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "serverRouteBundleDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "deploymentRevision": { "type": "string", "pattern": "^[a-f0-9]{40}(?![\\s\\S])" },
+    "environmentIdentity": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+(?![\\s\\S])" }
+  },
+  "x-easysubway-tuple-sha256": {
+    "encoding": "UTF-8",
+    "fields": [
+      "backendImageDigest",
+      "backendConfigDigest",
+      "journeyContractDigest",
+      "serverRouteBundleDigest",
+      "deploymentRevision",
+      "environmentIdentity"
+    ],
+    "separator": "LF",
+    "trailingSeparator": true
+  }
+}
