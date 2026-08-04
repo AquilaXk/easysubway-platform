@@ -70,10 +70,18 @@ test("Platform CI validates each inventory root using readonly backendless Terra
     ["!infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl"],
   );
   assert.match(workflow, /node --test tools\/platform\/validate-terraform-root-inventory\.test\.mjs/);
-  assert.doesNotMatch(workflow, /terraform (?:plan|apply|refresh|import)\b/);
   const terraformStep = workflow.match(/      - name: Validate Terraform roots\n        shell: bash\n        run: \|\n((?:          [^\n]*\n?)*)/);
   assert.notEqual(terraformStep, null);
   const terraformRun = terraformStep[1];
+  const terraformCommands = terraformRun
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /(?:^|\s)terraform(?:\s|$)/.test(line));
+  assert.deepEqual(terraformCommands, [
+    "terraform fmt -check -recursive infra/terraform",
+    "terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color",
+    "terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color",
+  ]);
   const steps = [
     "set -euo pipefail",
     "tf_data_dir=\"${RUNNER_TEMP}/terraform-data/oci-always-free-a1-flex\"",
