@@ -271,6 +271,52 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     ]),
     0,
   );
+  // CodeRabbit의 immutable Bot 식별자만 NONE association 예외로 신뢰한다.
+  const codeRabbit = {
+    author_association: 'NONE',
+    user: { login: 'coderabbitai[bot]', id: 136622811, type: 'Bot' },
+  };
+  assert.equal(
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', codeRabbit)]),
+    0,
+  );
+  // login, immutable id, Bot type 중 하나라도 다르면 NONE 리뷰는 신뢰하지 않는다.
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        ...codeRabbit,
+        user: { ...codeRabbit.user, type: 'User' },
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', {
+        author_association: 'NONE',
+        user: null,
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        ...codeRabbit,
+        user: { ...codeRabbit.user, login: 'other-bot[bot]' },
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        ...codeRabbit,
+        user: { ...codeRabbit.user, id: 1 },
+      }),
+    ]),
+    0,
+  );
 
   // 이전 head에 남은 활성 change request는 head가 바뀌어도 게이트에서 사라지지 않는다.
   assert.notEqual(
@@ -322,6 +368,23 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
       review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
         commit_id: 'previous-head',
       }),
+    ]),
+    0,
+  );
+  // CodeRabbit도 현재 head 리뷰여야 하며, change request는 다른 승인이 있어도 막는다.
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', {
+        ...codeRabbit,
+        commit_id: 'previous-head',
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', '', codeRabbit),
+      review(2, 'APPROVED', '2026-08-01T00:01:00Z'),
     ]),
     0,
   );
