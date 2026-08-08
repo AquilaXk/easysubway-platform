@@ -74,7 +74,7 @@ function validateTuple(tuple) {
   if (typeof tuple.deploymentRevision !== "string" || !revisionPattern.test(tuple.deploymentRevision)) {
     fail("E_JRT_TUPLE_SCHEMA", 2, "deploymentRevision must be a lowercase Git SHA");
   }
-  if (typeof tuple.environmentIdentity !== "string" || !environmentPattern.test(tuple.environmentIdentity)) {
+  if (typeof tuple.environmentIdentity !== "string" || tuple.environmentIdentity.length > 255 || !environmentPattern.test(tuple.environmentIdentity)) {
     fail("E_JRT_TUPLE_SCHEMA", 2, "environmentIdentity is invalid");
   }
 }

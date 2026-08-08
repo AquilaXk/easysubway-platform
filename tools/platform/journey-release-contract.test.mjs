@@ -9,6 +9,7 @@ const absoluteEnd = "(?![\\s\\S])";
 const digestPattern = `^sha256:[a-f0-9]{64}${absoluteEnd}`;
 const mutableContractSourceGuard = "node --test tools/platform/no-mutable-contract-source.test.mjs";
 const journeyReleaseTupleStageTest = "node --test tools/platform/stage-journey-release-tuple.test.mjs";
+const journeyReleaseTupleReaderTest = "node --test tools/platform/read-staged-journey-release-tuple.test.mjs";
 
 test("Platform CI explicitly runs the mutable contract source guard", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
@@ -24,6 +25,11 @@ test("Platform CI rejects the mutable contract source guard when only an optiona
 test("Platform CI explicitly runs the Journey release tuple staging test", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   assertWorkflowRunsPlatformCommand(workflow, journeyReleaseTupleStageTest);
+});
+
+test("Platform CI explicitly runs the Journey release tuple admission reader test", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assertWorkflowRunsPlatformCommand(workflow, journeyReleaseTupleReaderTest);
 });
 
 function assertWorkflowRunsMutableContractSourceGuard(workflow) {
@@ -75,6 +81,7 @@ test("JourneyReleaseTuple is closed and pins immutable identities", () => {
   assert.equal(tuple.properties.environmentIdentity.type, "string");
   assert.equal(tuple.properties.environmentIdentity.pattern, `^[A-Za-z0-9._-]+${absoluteEnd}`);
   assert.equal(tuple.properties.environmentIdentity.minLength, 1);
+  assert.equal(tuple.properties.environmentIdentity.maxLength, 255);
   assert.deepEqual(tuple["x-easysubway-tuple-sha256"], {
     encoding: "UTF-8",
     fields: ["backendImageDigest", "backendConfigDigest", "journeyContractDigest", "serverRouteBundleDigest", "deploymentRevision", "environmentIdentity"],

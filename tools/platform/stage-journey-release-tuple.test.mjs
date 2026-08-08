@@ -69,6 +69,19 @@ test("rejects malformed, non-closed, and invalid tuple fields without publishing
   }
 });
 
+test("accepts a 255-character environment identity and rejects 256 characters without a new candidate", () => {
+  const accepted = writeInput({ ...validTuple(), environmentIdentity: "a".repeat(255) });
+  const acceptedResult = run("--input", accepted);
+  assert.equal(acceptedResult.status, 0, acceptedResult.stderr);
+  const before = readdirSync(candidatesRoot).sort();
+
+  const rejected = writeInput({ ...validTuple(), environmentIdentity: "a".repeat(256) });
+  const rejectedResult = run("--input", rejected);
+  assert.equal(rejectedResult.status, 2);
+  assert.match(rejectedResult.stderr, /^E_JRT_TUPLE_SCHEMA\b/);
+  assert.deepEqual(readdirSync(candidatesRoot).sort(), before);
+});
+
 test("rejects invalid CLI forms and a non-regular input", () => {
   const input = writeInput(validTuple());
   for (const args of [[], ["--unknown", input], ["--input", input, "--input", input], ["--input"]]) {
