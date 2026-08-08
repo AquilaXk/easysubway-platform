@@ -410,6 +410,8 @@ preflight_legacy_backend_absence() {
 	local probe_status=0
 	local legacy_jar_regex=""
 	local legacy_process_pattern=""
+	local legacy_filename_process_pattern=""
+	local process_pattern=""
 	if ! command -v systemctl >/dev/null 2>&1; then
 		write_result "blocked" "legacy_backend_probe_failed"
 		exit 1
@@ -451,16 +453,19 @@ preflight_legacy_backend_absence() {
 		exit 1
 	fi
 	legacy_process_pattern="java([[:space:]]+[^[:space:]]+)*[[:space:]]+-jar[[:space:]]+${legacy_jar_regex}([[:space:]]|$)"
-	if pgrep -f "${legacy_process_pattern}" >/dev/null; then
-		write_result "blocked" "legacy_backend_jar_detected"
-		exit 1
-	else
-		probe_status="$?"
-		if [[ "${probe_status}" -ne 1 ]]; then
-			write_result "blocked" "legacy_backend_probe_failed"
+	legacy_filename_process_pattern="java([[:space:]]+[^[:space:]]+)*[[:space:]]+-jar[[:space:]]+([^[:space:]]*/)?easysubway-backend[.]jar([[:space:]]|$)"
+	for process_pattern in "${legacy_process_pattern}" "${legacy_filename_process_pattern}"; do
+		if pgrep -f "${process_pattern}" >/dev/null; then
+			write_result "blocked" "legacy_backend_jar_detected"
 			exit 1
+		else
+			probe_status="$?"
+			if [[ "${probe_status}" -ne 1 ]]; then
+				write_result "blocked" "legacy_backend_probe_failed"
+				exit 1
+			fi
 		fi
-	fi
+	done
 }
 
 preflight_legacy_backend_absence

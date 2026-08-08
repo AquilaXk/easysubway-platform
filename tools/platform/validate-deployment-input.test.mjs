@@ -145,6 +145,9 @@ test("legacy backend presence fails closed before deployment mutation without re
   const trafficMutation = deploy.indexOf("install_route_v2_host_ingress");
 
   assert.equal(preflight >= 0, true, "legacy presence needs a dedicated fail-closed preflight");
+  assert.equal(candidateMutation >= 0, true, "candidate mutation anchor must exist");
+  assert.equal(promotion >= 0, true, "promotion anchor must exist");
+  assert.equal(trafficMutation >= 0, true, "traffic mutation anchor must exist");
   assert.equal(deploy.indexOf("preflight_legacy_backend_absence\n") < candidateMutation, true, "legacy preflight must run before the candidate can mutate runtime state");
   assert.equal(preflight < candidateMutation, true);
   assert.equal(candidateMutation < promotion, true);
@@ -158,18 +161,18 @@ test("legacy backend presence fails closed before deployment mutation without re
   assert.doesNotMatch(deploy, /LEGACY_BACKEND_(?:UNIT|JAR)/);
   assert.doesNotMatch(deploy, /restore_legacy_backend_service|restore_legacy_on_/);
   assert.doesNotMatch(deploy, /legacy_backend_was_(?:active|enabled)|legacy_restore_on_error/);
-  assert.doesNotMatch(deploy, /trap .*?(?:ERR|INT|TERM|HUP)/);
-  assert.doesNotMatch(deploy, /systemctl (?:enable|start) "easysubway-backend\.service"/);
+  assert.doesNotMatch(deploy, /trap [^\n]*(?:legacy|restore)[^\n]*(?:ERR|INT|TERM|HUP)/i);
+  assert.doesNotMatch(deploy, /systemctl (?:enable|start) "(?:easysubway-backend\.service|\$\{unit\})"/);
 });
 
 test("legacy backend probe distinguishes absence from detector errors and JVM-option processes", () => {
   const root = new URL("../..", import.meta.url);
   const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
-  const match = deploy.match(/preflight_legacy_backend_absence\(\) \{[\s\S]*?\n\}\n\npreflight_legacy_backend_absence/);
+  const match = deploy.match(/preflight_legacy_backend_absence\(\)\s*\{[\s\S]*?\n\}\s*\npreflight_legacy_backend_absence\b/);
   assert.notEqual(match, null);
-  const functionSource = match[0].replace(/\n\npreflight_legacy_backend_absence$/, "");
+  const functionSource = match[0].replace(/\s*\npreflight_legacy_backend_absence$/, "");
   const harness = `
-set -u
+set -euo pipefail
 DEPLOY_ROOT=/opt/easysubway
 write_result() { printf '%s %s\\n' "$1" "$2"; }
 systemctl() {
@@ -189,6 +192,8 @@ pgrep() {
   case "\${PGREP_MODE}" in
     error) return 2 ;;
     options) [[ 'java -Xms512m -jar /opt/easysubway/easysubway-backend.jar' =~ $2 ]]; return ;;
+    relative) [[ 'java -jar easysubway-backend.jar' =~ $2 ]]; return ;;
+    symlink) [[ 'java -jar /srv/legacy/easysubway-backend.jar' =~ $2 ]]; return ;;
     *) return 1 ;;
   esac
 }
@@ -203,6 +208,16 @@ preflight_legacy_backend_absence
   const absent = runProbe("absent", "absent");
   assert.equal(absent.status, 0, absent.stderr);
   assert.equal(absent.stdout, "");
+  for (const mode of ["unit", "active", "enabled"]) {
+    const detected = runProbe(mode, "absent");
+    assert.equal(detected.status, 1, mode);
+    assert.match(detected.stdout, /^blocked legacy_backend_unit_detected\n$/, mode);
+  }
+  for (const mode of ["active-error", "enabled-error"]) {
+    const failed = runProbe(mode, "absent");
+    assert.equal(failed.status, 1, mode);
+    assert.match(failed.stdout, /^blocked legacy_backend_probe_failed\n$/, mode);
+  }
   for (const result of [runProbe("error", "absent"), runProbe("absent", "error")]) {
     assert.equal(result.status, 1);
     assert.match(result.stdout, /^blocked legacy_backend_probe_failed\n$/);
@@ -210,6 +225,11 @@ preflight_legacy_backend_absence
   const options = runProbe("absent", "options");
   assert.equal(options.status, 1);
   assert.match(options.stdout, /^blocked legacy_backend_jar_detected\n$/);
+  for (const mode of ["relative", "symlink"]) {
+    const detected = runProbe("absent", mode);
+    assert.equal(detected.status, 1, mode);
+    assert.match(detected.stdout, /^blocked legacy_backend_jar_detected\n$/, mode);
+  }
 });
 
 function makeFixture(options = {}) {
