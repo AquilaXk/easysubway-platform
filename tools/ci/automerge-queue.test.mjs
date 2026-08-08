@@ -74,6 +74,94 @@ test('코디네이터는 PAT 없이 GITHUB_TOKEN으로만 동작한다', async (
   assert.ok(workflow.includes('workflows: [Platform CI]'));
 });
 
+test('automerge label 이벤트만 exact-head frozen discovery marker를 발행한다', async () => {
+  const workflow = await readWorkflow();
+
+  for (const contract of [
+    "EVENT_NAME: ${{ github.event_name }}",
+    "EVENT_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}",
+    "EVENT_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}",
+    "EVENT_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}",
+    "if: github.event_name != 'pull_request_target' || github.event.label.name == 'automerge'",
+    'pull_request_target:\n    types: [labeled]',
+  ]) {
+    assert.ok(workflow.includes(contract), `missing label authorization contract: ${contract}`);
+  }
+
+  const authorizationBlock = workflow.match(
+    /          if \[\[ "\$\{EVENT_NAME\}" == "pull_request_target" && "\$\{EVENT_LABEL\}" == "automerge" \]\]; then\n([\s\S]*?)\n          fi\n\n          # required context/,
+  )?.[0];
+  assert.ok(authorizationBlock, 'label authorization block must stay testable');
+  assert.equal(
+    (authorizationBlock.match(/gh api --method POST/g) ?? []).length,
+    1,
+    'label authorization must have exactly one marker emission path',
+  );
+
+  const runAuthorization = ({ eventName, label = 'automerge', pr, head }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'automerge-authorization-'));
+    const log = join(dir, 'gh.log');
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -euo pipefail',
+          `GH_LOG=${JSON.stringify(log)}`,
+          ': > "$GH_LOG"',
+          'gh() { printf "%s\\n" "gh $*" >> "$GH_LOG"; }',
+          'repo=o/r',
+          `EVENT_NAME=${JSON.stringify(eventName)}`,
+          `EVENT_LABEL=${JSON.stringify(label)}`,
+          `EVENT_PR=${JSON.stringify(pr)}`,
+          `EVENT_HEAD=${JSON.stringify(head)}`,
+          dedent(authorizationBlock),
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    return {
+      status: result.status,
+      calls: existsSync(log) ? readFileSync(log, 'utf8') : '',
+    };
+  };
+
+  const nonLabelEvent = runAuthorization({ eventName: 'workflow_run', pr: '', head: '' });
+  assert.equal(nonLabelEvent.status, 0);
+  assert.equal((nonLabelEvent.calls.match(/gh api --method POST/g) ?? []).length, 0);
+
+  const otherLabel = runAuthorization({
+    eventName: 'pull_request_target',
+    label: 'documentation',
+    pr: '42',
+    head: 'a'.repeat(40),
+  });
+  assert.equal(otherLabel.status, 0);
+  assert.equal((otherLabel.calls.match(/gh api --method POST/g) ?? []).length, 0);
+
+  const valid = runAuthorization({
+    eventName: 'pull_request_target',
+    pr: '42',
+    head: 'a'.repeat(40),
+  });
+  assert.equal(valid.status, 0);
+  assert.equal((valid.calls.match(/gh api --method POST/g) ?? []).length, 1);
+  assert.match(
+    valid.calls,
+    /repos\/o\/r\/issues\/42\/comments -f body=<!-- Automerge frozen discovery authorization: a{40} -->/,
+  );
+
+  for (const invalid of [
+    { pr: 'not-a-number', head: 'a'.repeat(40) },
+    { pr: '42', head: 'A'.repeat(40) },
+    { pr: '42', head: 'a'.repeat(39) },
+  ]) {
+    const rejected = runAuthorization({ eventName: 'pull_request_target', ...invalid });
+    assert.notEqual(rejected.status, 0);
+    assert.equal((rejected.calls.match(/gh api --method POST/g) ?? []).length, 0);
+  }
+});
+
 test('큐는 best-effort FIFO 후보 배열을 훑고 미해결 thread는 fail closed다', async () => {
   const workflow = await readWorkflow();
 
@@ -135,6 +223,8 @@ test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정�
     'page_limit=3',
     'read_pages() {',
     'read_pages "repos/${repo}/pulls/${pr}/reviews"',
+    'read_pages "repos/${repo}/issues/${pr}/comments"',
+    'read_pages "repos/${repo}/pulls/${pr}/commits"',
     'read_pages "repos/${repo}/commits/${head}/check-runs"',
     'read_pages "repos/${repo}/commits/${head}/statuses"',
   ]) {
@@ -204,11 +294,11 @@ test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정�
   assert.match(objectShape.stdout, /^STOPPED 2/);
 });
 
-test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리뷰를 함께 요구한다', async () => {
+test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 있는 frozen discovery를 함께 요구한다', async () => {
   const workflow = await readWorkflow();
 
   const reviewProgram = workflow.match(
-    /# review-state-filter-begin\n[\s\S]*?if ! jq -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
+    /# review-state-filter-begin\n[\s\S]*?if ! jq -s -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' \\\n\s+<\(printf '%s\\n' "\$\{reviews\}"\) \\\n\s+<\(printf '%s\\n' "\$\{comments\}"\) \\\n\s+<\(printf '%s\\n' "\$\{commits\}"\) >\/dev\/null; then/,
   )?.[1];
   assert.ok(reviewProgram, 'review state jq program must stay testable');
 
@@ -224,11 +314,32 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     user: { login: 'reviewer' },
     ...overrides,
   });
-  const runReviewFilter = (reviews) => {
-    const result = spawnSync('jq', ['-e', '--arg', 'head', 'head', reviewProgram], {
-      input: JSON.stringify([reviews]),
-      encoding: 'utf8',
-    });
+  const marker = (sha = 'head', overrides = {}) => ({
+    body: `<!-- Automerge frozen discovery authorization: ${sha} -->`,
+    user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' },
+    ...overrides,
+  });
+  const runReviewFilter = (
+    reviews,
+    comments = [marker()],
+    commits = [{ sha: 'head' }, { sha: 'previous-head' }],
+  ) => {
+    const directory = mkdtempSync(join(tmpdir(), 'automerge-review-filter-'));
+    const reviewsPath = join(directory, 'reviews.json');
+    const commentsPath = join(directory, 'comments.json');
+    const commitsPath = join(directory, 'commits.json');
+    writeFileSync(reviewsPath, JSON.stringify([reviews]));
+    writeFileSync(commentsPath, JSON.stringify(comments));
+    writeFileSync(commitsPath, JSON.stringify(commits));
+    const result = spawnSync('jq', [
+      '-s',
+      '-e',
+      '--arg', 'head', 'head',
+      reviewProgram,
+      reviewsPath,
+      commentsPath,
+      commitsPath,
+    ], { encoding: 'utf8' });
     // jq -e는 결과가 false/null이면 1, 컴파일 오류면 3, 런타임 오류면 5를 낸다.
     // 0/1만 판정으로 인정해야 프로그램 파손이 "차단 성공"으로 새지 않는다.
     assert.ok(
@@ -238,19 +349,46 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     return result.status;
   };
 
+  const exactMarker = [marker()];
+
+  for (const comments of [
+    [],
+    [marker('different-head')],
+    [marker('head', { user: { login: 'other[bot]', id: 41898282, type: 'Bot' } })],
+    [marker('head', { user: { login: 'github-actions[bot]', id: 1, type: 'Bot' } })],
+    [marker('head', { user: { login: 'github-actions[bot]', id: 41898282, type: 'User' } })],
+  ]) {
+    assert.notEqual(
+      runReviewFilter([
+        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, { commit_id: 'previous-head' }),
+      ], comments),
+      0,
+    );
+  }
+
   // 기본 판정.
   assert.equal(
     runReviewFilter([
       review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z'),
       review(2, 'APPROVED', '2026-08-01T00:01:00Z'),
-    ]),
+    ], exactMarker),
+    0,
+  );
+  // force-push로 discovery commit이 현재 PR commit-set에서 제거되면 exact marker가 있어도
+  // 과거 Review를 병합 근거로 재사용하지 않는다.
+  assert.notEqual(
+    runReviewFilter(
+      [review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', { commit_id: 'removed-head' })],
+      exactMarker,
+      [{ sha: 'head' }],
+    ),
     0,
   );
   assert.notEqual(
     runReviewFilter([
       review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z'),
       review(2, 'COMMENTED', '2026-08-01T00:01:00Z'),
-    ]),
+    ], exactMarker),
     0,
   );
   assert.notEqual(
@@ -261,6 +399,14 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
   assert.equal(
     runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)]),
     0,
+  );
+  assert.equal(
+    runReviewFilter(
+      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)],
+      [marker(), { body: 'x'.repeat(160 * 1024), user: { login: 'commenter' } }],
+    ),
+    0,
+    'bounded large comment payload must not depend on the OS argument-size limit',
   );
   // 신뢰되지 않는 author_association은 어떤 본문으로도 게이트를 통과하지 못한다.
   assert.notEqual(
@@ -354,31 +500,33 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     ]),
     0,
   );
-  // 긍정 리뷰는 여전히 current head를 요구한다.
+  // GitHub가 stale native approval을 DISMISSED로 mutate하므로 native approval은 current
+  // head에서만 유효하다. Prior frozen discovery는 immutable COMMENTED provenance만 승계한다.
   assert.notEqual(
     runReviewFilter([
       review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', {
         commit_id: 'previous-head',
       }),
-    ]),
+    ], exactMarker),
     0,
   );
-  assert.notEqual(
+  assert.equal(
     runReviewFilter([
       review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
         commit_id: 'previous-head',
       }),
-    ]),
+    ], exactMarker),
     0,
   );
-  // CodeRabbit도 현재 head 리뷰여야 하며, change request는 다른 승인이 있어도 막는다.
-  assert.notEqual(
+  // CodeRabbit discovery도 marker가 있으면 prior head에서 인정하지만, active change
+  // request는 다른 승인이 있어도 막는다.
+  assert.equal(
     runReviewFilter([
       review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', {
         ...codeRabbit,
         commit_id: 'previous-head',
       }),
-    ]),
+    ], exactMarker),
     0,
   );
   assert.notEqual(
@@ -1032,9 +1180,19 @@ const makeRunQueue =
     writeFileSync(
       join(dir, `comments-${pr.number}.json`),
       JSON.stringify(
-        pr.hasRebaseMarker
-          ? [{ body: `<!-- easysubway-automerge-rebase-required:${head} -->` }]
-          : [],
+        [
+          ...(pr.authorized === false
+            ? []
+            : [
+                {
+                  body: `<!-- Automerge frozen discovery authorization: ${head} -->`,
+                  user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' },
+                },
+              ]),
+          ...(pr.hasRebaseMarker
+            ? [{ body: `<!-- easysubway-automerge-rebase-required:${head} -->` }]
+            : []),
+        ],
       ),
     );
     writeFileSync(
@@ -1047,13 +1205,17 @@ const makeRunQueue =
                 id: 1,
                 state: 'APPROVED',
                 submitted_at: '2026-08-01T00:00:00Z',
-                commit_id: head,
+                commit_id: pr.reviewCommit ?? head,
                 author_association: 'OWNER',
                 body: '',
                 user: { login: 'reviewer' },
               },
             ],
       ),
+    );
+    writeFileSync(
+      join(dir, `commits-${pr.number}.json`),
+      JSON.stringify((pr.commitHistory ?? [head]).map((sha) => ({ sha }))),
     );
     writeFileSync(
       join(dir, `threads-${pr.number}.json`),
@@ -1114,6 +1276,7 @@ const makeRunQueue =
     '    "pr view "*"--json headRefOid --jq .headRefOid") set -- $all; jq -r .headRefOid "$FIX/pr-$3.json" ;;',
     '    "pr view "*) set -- $all; cat "$FIX/pr-$3.json" ;;',
     '    *issues/*/comments*) n="${all#*issues/}"; n="${n%%/comments*}"; cat "$FIX/comments-$n.json" ;;',
+    '    *pulls/*/commits*) n="${all#*pulls/}"; n="${n%%/commits*}"; cat "$FIX/commits-$n.json" ;;',
     '    *pulls/*/reviews*) n="${all#*pulls/}"; n="${n%%/reviews*}"; cat "$FIX/reviews-$n.json" ;;',
     '    *graphql*) n="${all#*number=}"; n="${n%% *}"; cat "$FIX/threads-$n.json" ;;',
     '    *check-runs*) h="${all#*commits/}"; h="${h%%/check-runs*}"; cat "$FIX/checks-$h.json" ;;',
@@ -1187,6 +1350,28 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
   assert.equal(
     runQueue([
       { number: 1, mergeStateStatus: 'CLEAN', reviewed: false },
+      { number: 2, mergeStateStatus: 'CLEAN' },
+    ]).mergedPr,
+    2,
+  );
+  // 라벨 뒤 push는 label-head marker와 SHA가 달라진다. 새 marker 없이 prior discovery를
+  // 승계하면 안 되므로 이 후보만 fail closed하고 뒤 후보를 계속 평가한다.
+  assert.equal(
+    runQueue([
+      { number: 1, mergeStateStatus: 'CLEAN', authorized: false },
+      { number: 2, mergeStateStatus: 'CLEAN' },
+    ]).mergedPr,
+    2,
+  );
+  // force-push로 reviewed commit이 current PR history에서 제거된 후보도 건너뛴다.
+  assert.equal(
+    runQueue([
+      {
+        number: 1,
+        mergeStateStatus: 'CLEAN',
+        reviewCommit: 'removed-head',
+        commitHistory: ['head1'],
+      },
       { number: 2, mergeStateStatus: 'CLEAN' },
     ]).mergedPr,
     2,
@@ -1272,7 +1457,7 @@ test('후보 창은 API 지분·timeout·실측 큐 깊이 세 기준으로 유�
   // 창 크기는 이 저장소 값으로 다시 계산해야 한다. 형제 저장소 상수(backend 6, mobile 20)를
   // 그대로 쓰면 실행당 청구가 이 저장소가 허용하기로 한 지분을 넘는다.
   const declaredWindow = declaredWindowOf(workflow);
-  assert.equal(declaredWindow, 4, 'window ceiling must stay pinned to the derived value');
+  assert.equal(declaredWindow, 3, 'window ceiling must stay pinned to the derived value');
   const rationale = workflow.slice(
     workflow.indexOf('# queue-loop-begin'),
     workflow.indexOf('# candidate-budget-begin'),
@@ -1344,16 +1529,16 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   const reserve = budgetConstantOf(workflow, 'reserve');
   const fixedCost = budgetConstantOf(workflow, 'fixed_cost');
   const perCandidate = budgetConstantOf(workflow, 'per_candidate');
-  assert.equal(windowMax, 4);
+  assert.equal(windowMax, 3);
   // 이 저장소에는 큐가 지켜 줘야 할 producer 체인이 없다. 예약분은 큐가 자기 다음 실행과
-  // 운영자 조회 몫까지 태우지 않게 하는 하한이다. 실행당 고정 비용은 17회(ruleset 1 +
-  // gh pr list 1 + 아래 fixed_cost 15)이고, 200회면 그 기준으로 11회 실행분(187회)이
-  // 남는다. fixed_cost 15는 PR-visible fail-closed와 API 응답 변동을 위한 보수적 여유다.
+  // 운영자 조회 몫까지 태우지 않게 하는 하한이다. 실행당 고정 비용은 18회(ruleset 1 +
+  // gh pr list 1 + 아래 fixed_cost 16)이고, 200회면 그 기준으로 11회 실행분(198회)이
+  // 남는다. fixed_cost 16은 label marker, PR-visible fail-closed와 API 응답 변동을 위한 보수적 여유다.
   assert.equal(reserve, 200, 'shared-limit reserve must stay pinned');
-  assert.equal(fixedCost, 15);
-  // 후보당 청구는 호출 5회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
-  // (pr view 1 + reviewThreads 1 + REST 3종 * 3페이지). `--paginate`는 쓰지 않는다.
-  assert.equal(perCandidate, 11, 'per-candidate charge must match the page-capped reads');
+  assert.equal(fixedCost, 16);
+  // 후보당 청구는 호출 7회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
+  // (pr view 1 + reviewThreads 1 + REST 5종 * 3페이지). `--paginate`는 쓰지 않는다.
+  assert.equal(perCandidate, 17, 'per-candidate charge must match the page-capped reads');
 
   // 응답 payload를 주고 워크플로의 jq 질의를 실제 jq로 적용해 `gh --jq`를 그대로 흉내낸다.
   const runBudget = (stub) =>
@@ -1380,12 +1565,12 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   // 기대값은 워크플로 상수로 되계산하지 않고 고정한다. 유도식을 바꾸는 것은 결정이므로
   // 테스트도 함께 고쳐야 한다.
   for (const [remaining, expected] of [
-    [5000, 4],
-    [1000, 4],
-    [259, 4],
-    [258, 3],
-    [248, 3],
-    [226, 1],
+    [5000, 3],
+    [1000, 3],
+    [269, 3],
+    [268, 3],
+    [251, 2],
+    [234, 1],
   ]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block failed at remaining=${remaining}: ${result.stderr}`);
@@ -1404,12 +1589,12 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   }
 
   // 두 버킷 값이 다르면 작은 쪽이 창을 정한다.
-  assert.equal(runPayload(buckets(5000, 248)).stdout.trim(), 'window=3');
-  assert.equal(runPayload(buckets(248, 5000)).stdout.trim(), 'window=3');
+  assert.equal(runPayload(buckets(5000, 251)).stdout.trim(), 'window=2');
+  assert.equal(runPayload(buckets(251, 5000)).stdout.trim(), 'window=2');
 
   // 예약분에 닿으면 큐만 건너뛴다. 실행을 실패시키지 않는다 — 실패로 남기면 그 check가
   // 다음 판정 입력을 오염시킨다.
-  for (const remaining of [225, 220, 200, 0]) {
+  for (const remaining of [232, 220, 200, 0]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block must not fail at remaining=${remaining}`);
     assert.match(result.stdout, /::warning::/, `low budget must be announced at remaining=${remaining}`);

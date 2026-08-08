@@ -55,6 +55,10 @@ jobs:
       statuses: read
     env:
       GH_TOKEN: ${{ github.token }}
+      EVENT_NAME: ${{ github.event_name }}
+      EVENT_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}
+      EVENT_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
+      EVENT_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
     steps:
       - name: Coordinate eligible pull requests
         shell: bash
@@ -65,6 +69,19 @@ jobs:
           repo="${GITHUB_REPOSITORY}"
           owner="${repo%%/*}"
           name="${repo#*/}"
+
+          # frozen discovery를 current head까지 승계하는 권한은 automerge 라벨을 붙인
+          # pull_request_target 이벤트에서만 남긴다. 이후 push/rebase는 SHA 불일치로
+          # fail closed되고, closure 뒤 라벨을 다시 붙여 새 marker를 발행해야 한다.
+          if [[ "${EVENT_NAME}" == "pull_request_target" && "${EVENT_LABEL}" == "automerge" ]]; then
+            if [[ ! "${EVENT_PR}" =~ ^[0-9]+$ ]] ||
+              [[ ! "${EVENT_HEAD}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "automerge label event의 PR 또는 head SHA가 유효하지 않다." >&2
+              exit 1
+            fi
+            gh api --method POST "repos/${repo}/issues/${EVENT_PR}/comments" \
+              -f body="<!-- Automerge frozen discovery authorization: ${EVENT_HEAD} -->"
+          fi
 
           # required context는 main ruleset이 정본이다. 하드코딩 폴백을 두면 ruleset
           # 변경이나 조회 실패가 그대로 게이트 완화가 되므로 조회 실패는 fail closed다.
@@ -103,20 +120,20 @@ jobs:
           #
           #  - API 예산 지분. GITHUB_TOKEN 한도는 저장소당 시간당 1,000회이고 이 저장소의
           #    다른 워크플로와 공유한다. 실행당 청구는 ruleset 1 + gh pr list 1 + 고정 비용
-          #    15 + 후보당 11 * window_max이고, window_max=4면 61회로 한도의 6.1%다. 이
+          #    16 + 후보당 17 * window_max이고, window_max=3이면 69회로 한도의 6.9%다. 이
           #    저장소에는 큐 밖에서 GITHUB_TOKEN REST를 상시로 쓰는 워크플로가 없다 —
           #    ci.yml은 raw.githubusercontent와 registry만 받고 API를 부르지 않으며, cd.yml과
           #    sensitive-backup-retention.yml은 운영자 dispatch·schedule 전용이다. 그래서
           #    형제 저장소 data(5.0%)보다는 넓게, 그러나 한 실행이 한도를 독점하지 않는
-          #    7% 선 아래로 잡았다. 후보 한 건당 호출은 5회지만 요청은 그보다 많을 수 있다.
+          #    8% 선 아래로 잡았다. 후보 한 건당 호출은 7회지만 요청은 그보다 많을 수 있다.
           #    `gh pr view --json`(GraphQL)과 reviewThreads(GraphQL)는 페이지네이션이 없고
-          #    (reviewThreads는 first: 100 + hasNextPage fail closed), reviews·check-runs·
-          #    statuses(REST)는 페이지 상한 3(아래 paginated-read)까지 읽는다. 그래서 후보당
-          #    청구는 11회다 — pr view 1 + reviewThreads 1 + REST 3종 * 3페이지. `--paginate`를
+          #    (reviewThreads는 first: 100 + hasNextPage fail closed), reviews·comments·commits·
+          #    check-runs·statuses(REST)는 페이지 상한 3(아래 paginated-read)까지 읽는다. 그래서 후보당
+          #    청구는 17회다 — pr view 1 + reviewThreads 1 + REST 5종 * 3페이지. `--paginate`를
           #    쓰지 않는 이유가 이것이다: 페이지 수에 상한이 없으면 이력이 유난히 긴 후보
           #    하나가 예산 모델을 통째로 넘긴다. 상한을 넘는 후보는 판정을 포기하고 건너뛴다.
           #    required context별 jq는 로컬 계산이라 요청을 쓰지 않는다. 후보 평가 밖의 고정
-          #    비용은 PR-visible fail-closed 처리와 API 응답 변동을 덮는 보수적 여유 15회다.
+          #    비용은 label marker 발행, PR-visible fail-closed 처리와 API 응답 변동을 덮는 보수적 여유 16회다.
           #
           #    이 예산을 "실행 빈도"로 나누지 않는다. 빈도는 강제되지 않는다 — concurrency
           #    그룹은 cancel-in-progress: false라 대기 중인 실행만 접을 뿐 실행이 시작되는
@@ -132,8 +149,8 @@ jobs:
           #    잔량에서 reserve를 먼저 뗀다. 이 저장소에는 큐가 지켜 줘야 할 producer
           #    dispatch 체인이 없지만, 큐가 공유 한도를 다 쓰면 코디네이터 자신의 다음 실행이
           #    창을 0으로 만들어 큐가 스스로를 굶기고 운영자의 cd.yml preflight dispatch와
-          #    조회까지 함께 막힌다. 실행당 고정 비용은 17회(ruleset 1 + gh pr list 1 +
-          #    고정 비용 15)이므로 200회면 최소 11회 실행분이 남는다.
+          #    조회까지 함께 막힌다. 실행당 고정 비용은 18회(ruleset 1 + gh pr list 1 +
+          #    고정 비용 16)이므로 200회면 최소 11회 실행분이 남는다.
           #  - job timeout. 이 job은 5분(300초)이고 branch 갱신 대기가 없으므로 고정 비용은
           #    러너·스텝 오버헤드 30초뿐이다. 남는 270초를 후보당 5회 * 1초(비관적 왕복)로
           #    나누면 54건이고, API가 느린 날을 감안해 2배 여유를 두면 27건이다.
@@ -142,11 +159,11 @@ jobs:
           #    PR을 만드는 저장소라 큐 깊이가 한 번에 5건까지 뛴다. 창 4면 그 배치의 대부분이
           #    한 실행에 들어오고, 남는 1건은 아래 회전이 다음 실행에서 집는다.
           #
-          # 구속하는 쪽은 API 예산 지분이므로 window_max=4이고, 실제 창은 실행마다
+          # 구속하는 쪽은 API 예산 지분이므로 window_max=3이고, 실제 창은 실행마다
           # min(window_max, (잔량 - reserve - 고정 비용) / 후보당 요청)으로 정한다. 잔량이
           # reserve에 닿으면 창이 0이 되어 이번 실행의 큐만 건너뛴다. 창을 정한 뒤에도 후보마다
           # 잔량을 다시 읽어 예약선에서 멈추므로, 창은 상한이지 지출 약속이 아니다. 형제 저장소
-          # 값 6이나 20을 그대로 쓰면 실행당 청구가 각각 83회·237회로 위 지분 기준을 깬다.
+          # 값 6이나 20을 그대로 쓰면 실행당 청구가 각각 120회·358회로 위 지분 기준을 깬다.
           #
           # 다만 창을 큐 앞쪽에 고정하면 창 밖의 후보는 매 실행 제외되어, 없애려던 head
           # 차단이 1건에서 window건 규모로 옮겨갈 뿐이다. 그래서 창 시작점을 실행마다
@@ -189,10 +206,10 @@ jobs:
           # 중 가장 오래된 병합 가능 후보가 이긴다"는 성질은 유지된다.
           # candidate-budget-begin
           # budget-constants-begin
-          window_max=4
+          window_max=3
           reserve=200
-          fixed_cost=15
-          per_candidate=11
+          fixed_cost=16
+          per_candidate=17
           # 두 버킷이 모두 숫자일 때만 값을 낸다. 한쪽이 없거나 비정상인데 남은 하나로
           # 진행하면, 후보 평가가 실제로 소비하는 두 버킷 중 하나의 잔량을 모른 채 쓰는
           # 것이라 "모르는 예산은 쓰지 않는다"가 성립하지 않는다. 어느 쪽이든 비정상이면
@@ -333,21 +350,40 @@ jobs:
               echo "PR #${pr}: review history exceeds the page budget; skipping."
               continue
             }
+            comments="$(read_pages "repos/${repo}/issues/${pr}/comments")" || {
+              echo "PR #${pr}: comment history exceeds the page budget; skipping."
+              continue
+            }
+            commits="$(read_pages "repos/${repo}/pulls/${pr}/commits")" || {
+              echo "PR #${pr}: commit history exceeds the page budget; skipping."
+              continue
+            }
             # review-state-filter-begin
-            if ! jq -e --arg head "${head}" '
+            # frozen discovery는 라벨 이벤트에서 GitHub Actions가 기록한 exact-head marker가
+            # 있을 때만 승계한다. 임의 author·다른 SHA·후속 push는 게이트를 통과하지 못한다.
+            if ! jq -s -e --arg head "${head}" '
+              .[0] as $reviews |
+              .[1] as $comments |
+              .[2] as $commits |
               def is_coderabbit:
                 .author_association == "NONE" and
                 .user.login == "coderabbitai[bot]" and
                 .user.id == 136622811 and
                 .user.type == "Bot";
-              [flatten[] |
+              def is_exact_head_marker:
+                .user.login == "github-actions[bot]" and
+                .user.id == 41898282 and
+                .user.type == "Bot" and
+                (.body // "") == ("<!-- Automerge frozen discovery authorization: " + $head + " -->");
+              def is_current_pr_commit($review):
+                $commits | flatten | any(.sha == ($review.commit_id // ""));
+              [($reviews | flatten[]) |
                 select(
                   .author_association == "OWNER" or
                   .author_association == "MEMBER" or
                   .author_association == "COLLABORATOR" or
                   is_coderabbit
                 )] as $trusted |
-              ($trusted | map(select(.commit_id == $head))) as $current |
               ($trusted |
               sort_by(.submitted_at, .id) |
               reduce .[] as $review ({};
@@ -359,15 +395,20 @@ jobs:
                   .[$review.user.login] = $review.state
                 end
               )) as $states |
+              ($comments | flatten | any(is_exact_head_marker)) and
               ($states | length > 0 and all(.[]; . == "APPROVED" or . == "COMMENTED")) and
-              any($current[];
-                .state == "APPROVED" or
-                (.state == "COMMENTED" and
-                  (is_coderabbit or
-                    ((.body // "" | startswith("**Actionable comments posted: ")) and
-                    (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:"))))))
-            ' <<<"${reviews}" >/dev/null; then
-              echo "PR #${pr}: no trusted review on the current head, or an active change request is open; skipping."
+              any($trusted[];
+                is_current_pr_commit(.) and
+                  ((.state == "APPROVED" and .commit_id == $head) or
+                  (.state == "COMMENTED" and
+                    (is_coderabbit or
+                      ((.body // "" | startswith("**Actionable comments posted: ")) and
+                      (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:")))))))
+            ' \
+              <(printf '%s\n' "${reviews}") \
+              <(printf '%s\n' "${comments}") \
+              <(printf '%s\n' "${commits}") >/dev/null; then
+              echo "PR #${pr}: no trusted frozen discovery review, or an active change request is open; skipping."
               continue
             fi
             # review-state-filter-end
