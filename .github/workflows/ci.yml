@@ -37,23 +37,10 @@ jobs:
         with:
           node-version: 24
 
-      - name: Stage pinned contracts
-        shell: bash
-        run: |
-          curl --fail --silent --show-error --location \
-            --retry 3 --retry-delay 2 --retry-all-errors \
-            --connect-timeout 10 --max-time 60 \
-            --output "${RUNNER_TEMP}/platform-contracts.json" \
-            https://raw.githubusercontent.com/AquilaXk/easysubway/main/contracts/bundles/platform-contracts-v1.0.0.json
-          node tools/platform/stage-contracts.mjs \
-            --lock contracts.lock.json \
-            --input "${RUNNER_TEMP}/platform-contracts.json" \
-            --output build/contracts
-
       - name: Test platform contracts
         run: |
           node --test tools/ci/automerge-queue.test.mjs
-          node --test tools/platform/stage-contracts.test.mjs
+          node --test tools/platform/no-mutable-contract-source.test.mjs
           node --test tools/platform/validate-deployment-input.test.mjs
           node --test tools/platform/validate-terraform-root-inventory.test.mjs
           node --test tools/platform/journey-release-contract.test.mjs
