@@ -209,11 +209,11 @@ def publish(expected_identities, content):
         candidates_fd = descriptors[2]
         temporary, temporary_identity = create_temporary(candidates_fd, content)
         link_and_verify(candidates_fd, temporary, destination, temporary_identity, content, publication)
-        verify_fresh_chain(identities)
         if not unlink_if_identity(candidates_fd, temporary, temporary_identity):
             fail("E_JRT_STAGE_IO", 1)
         temporary = None
         os.fsync(candidates_fd)
+        verify_fresh_chain(identities)
         published = True
     except OSError:
         fail("E_JRT_STAGE_IO", 1)
