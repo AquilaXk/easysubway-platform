@@ -7,11 +7,35 @@ const tuple = JSON.parse(readFileSync(new URL("../../contracts/release/journey-r
 const receipt = JSON.parse(readFileSync(new URL("../../contracts/release/platform-activation-receipt.schema.json", import.meta.url)));
 const absoluteEnd = "(?![\\s\\S])";
 const digestPattern = `^sha256:[a-f0-9]{64}${absoluteEnd}`;
+const mutableContractSourceGuard = "node --test tools/platform/no-mutable-contract-source.test.mjs";
 
 test("Platform CI explicitly runs the mutable contract source guard", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  assert.match(workflow, /^          node --test tools\/platform\/no-mutable-contract-source\.test\.mjs$/m);
+  assertWorkflowRunsMutableContractSourceGuard(workflow);
 });
+
+test("Platform CI rejects the mutable contract source guard when only an optional job runs it", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const guardInOptionalJob = `${workflow.replace(`          ${mutableContractSourceGuard}\n`, "")}\n  optional:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          ${mutableContractSourceGuard}\n`;
+  assert.throws(() => assertWorkflowRunsMutableContractSourceGuard(guardInOptionalJob), /Platform CI job/);
+});
+
+function assertWorkflowRunsMutableContractSourceGuard(workflow) {
+  const jobsIndex = workflow.indexOf("jobs:\n");
+  assert.notEqual(jobsIndex, -1, "workflow must define jobs");
+  const jobs = workflow.slice(jobsIndex + "jobs:\n".length);
+  const platformJob = jobs.match(/^  platform:\n(?<block>(?:^(?:    .*|)\n?)*)/m);
+  assert.notEqual(platformJob, null, "workflow must define jobs.platform");
+  assert.match(
+    platformJob.groups.block,
+    new RegExp(`^          ${escapeRegExp(mutableContractSourceGuard)}$`, "m"),
+    "Platform CI job must run the mutable contract source guard",
+  );
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("JourneyReleaseTuple is closed and pins immutable identities", () => {
   const required = [
