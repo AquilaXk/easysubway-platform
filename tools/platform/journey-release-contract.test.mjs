@@ -81,6 +81,7 @@ test("JourneyReleaseTuple is closed and pins immutable identities", () => {
   assert.equal(tuple.properties.environmentIdentity.type, "string");
   assert.equal(tuple.properties.environmentIdentity.pattern, `^[A-Za-z0-9._-]+${absoluteEnd}`);
   assert.equal(tuple.properties.environmentIdentity.minLength, 1);
+  assert.equal(tuple.properties.environmentIdentity.maxLength, 255);
   assert.deepEqual(tuple["x-easysubway-tuple-sha256"], {
     encoding: "UTF-8",
     fields: ["backendImageDigest", "backendConfigDigest", "journeyContractDigest", "serverRouteBundleDigest", "deploymentRevision", "environmentIdentity"],

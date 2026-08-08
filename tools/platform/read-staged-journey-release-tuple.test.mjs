@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -23,6 +23,31 @@ test("reads only the exact requested canonical staged tuple", () => {
     assert.equal(result.stderr.length, 0);
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("external reader symlink resolves to its tracked fixture repository only", () => {
+  const fixture = createFixture();
+  const external = mkdtempSync(join(tmpdir(), "journey-tuple-reader-external-"));
+  try {
+    const candidate = tuple();
+    const bytes = canonical(candidate);
+    const externalReader = join(external, "tools/platform/read-staged-journey-release-tuple.py");
+    const externalCandidate = join(external, "build/candidates", `journey-release-tuple-${sha(candidate)}.json`);
+    writeCandidate(fixture, candidate, bytes);
+    mkdirSync(dirname(externalReader), { recursive: true });
+    mkdirSync(dirname(externalCandidate), { recursive: true });
+    symlinkSync(fixture.reader, externalReader);
+    writeFileSync(externalCandidate, "external symlink-tree candidate");
+    const result = spawnSync("/usr/bin/python3", [externalReader, "--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", environment], { cwd: external, encoding: null, timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr?.toString());
+    assert.deepEqual(result.stdout, Buffer.from(bytes));
+    rmSync(candidatePath(fixture, candidate));
+    assertFailure(spawnSync("/usr/bin/python3", [externalReader, "--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", environment], { cwd: external, encoding: null, timeout: 5000 }), "E_JRT_CANDIDATE_NOT_REGULAR");
+    assert.equal(readFileSync(externalCandidate, "utf8"), "external symlink-tree candidate");
+  } finally {
+    fixture.cleanup();
+    rmSync(external, { recursive: true, force: true });
   }
 });
 
@@ -109,23 +134,15 @@ test("converts a decoder RecursionError to typed candidate JSON failure", () => 
   }
 });
 
-test("converts a read-only stdout descriptor failure to typed I/O without output", () => {
+test("converts a closed stdout fd to typed I/O without traceback", () => {
   const fixture = createFixture();
   try {
     const candidate = tuple();
-    const bytes = canonical(candidate);
-    const output = join(fixture.root, "read-only-stdout");
-    writeCandidate(fixture, candidate, bytes);
-    writeFileSync(output, "unchanged");
-    const fd = openSync(output, "r");
-    let result;
-    try {
-      result = spawnSync("/usr/bin/python3", [fixture.reader, "--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", environment], { cwd: fixture.root, encoding: null, stdio: ["ignore", fd, "pipe"], timeout: 5000 });
-    } finally {
-      closeSync(fd);
-    }
+    writeCandidate(fixture, candidate, canonical(candidate));
+    const harness = join(fixture.root, "tools/platform/closed-stdout-harness.py");
+    writeFileSync(harness, `import importlib.util\nimport os\n\npath = os.path.join(os.path.dirname(__file__), "read-staged-journey-release-tuple.py")\nspec = importlib.util.spec_from_file_location("reader", path)\nreader = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(reader)\nos.close(1)\nreader.main()\n`);
+    const result = spawnSync("/usr/bin/python3", [harness, "--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", environment], { cwd: fixture.root, encoding: null, timeout: 5000 });
     assertFailure(result, "E_JRT_READ_IO");
-    assert.equal(readFileSync(output, "utf8"), "unchanged");
   } finally {
     fixture.cleanup();
   }
@@ -154,6 +171,17 @@ test("binds filename, body hash, revision, and environment exactly", () => {
     writeCandidate(fixture, candidate, canonical(candidate));
     assertFailure(runArgs(fixture, ["--tuple-sha256", sha(candidate), "--deployment-revision", "a".repeat(40), "--environment-identity", environment]), "E_JRT_CANDIDATE_IDENTITY");
     assertFailure(runArgs(fixture, ["--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", "staging"]), "E_JRT_CANDIDATE_IDENTITY");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("rejects a canonical 256-character environment identity as candidate schema", () => {
+  const fixture = createFixture();
+  try {
+    const candidate = tuple({ environmentIdentity: "a".repeat(256) });
+    writeCandidate(fixture, candidate, canonical(candidate));
+    assertFailure(runArgs(fixture, ["--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", candidate.environmentIdentity]), "E_JRT_CANDIDATE_SCHEMA");
   } finally {
     fixture.cleanup();
   }

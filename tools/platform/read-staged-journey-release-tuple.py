@@ -49,7 +49,7 @@ def nofollow_flags():
 
 def open_chain():
     directory_flags = nofollow_flags()
-    repository = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    repository = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
     fds = []
     try:
         fds.append(os.open(repository, os.O_RDONLY | directory_flags))
@@ -132,7 +132,7 @@ def validate(bytes_value, requested_sha, requested_revision, requested_environme
         fail("E_JRT_CANDIDATE_SCHEMA", 2)
     if not isinstance(candidate["deploymentRevision"], str) or not REVISION.fullmatch(candidate["deploymentRevision"]):
         fail("E_JRT_CANDIDATE_SCHEMA", 2)
-    if not isinstance(candidate["environmentIdentity"], str) or not ENVIRONMENT.fullmatch(candidate["environmentIdentity"]):
+    if not isinstance(candidate["environmentIdentity"], str) or len(candidate["environmentIdentity"]) > 255 or not ENVIRONMENT.fullmatch(candidate["environmentIdentity"]):
         fail("E_JRT_CANDIDATE_SCHEMA", 2)
     if not isinstance(candidate["tupleSha256"], str) or not DIGEST.fullmatch(candidate["tupleSha256"]):
         fail("E_JRT_CANDIDATE_SCHEMA", 2)
@@ -163,7 +163,7 @@ def main():
         try:
             offset = 0
             while offset < len(bytes_value):
-                offset += os.write(sys.stdout.fileno(), bytes_value[offset:])
+                offset += os.write(1, bytes_value[offset:])
         except (OSError, BrokenPipeError):
             fail("E_JRT_READ_IO", 1)
     finally:
