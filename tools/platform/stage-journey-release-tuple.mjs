@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -40,7 +40,7 @@ function parseInputArgument(args) {
 function readTuple(inputPath) {
   let descriptor;
   try {
-    descriptor = openSync(inputPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    descriptor = openSync(inputPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch {
     fail("E_JRT_INPUT_NOT_REGULAR", 2, "input must be a regular file");
   }
@@ -86,7 +86,7 @@ function tupleHash(tuple) {
 
 function lstatDirectory(path) {
   try {
-    const stat = lstatSync(path);
+    const stat = lstatSync(path, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       fail("E_JRT_OUTPUT_CONFINEMENT", 2, "output path contains a symlink or non-directory ancestor");
     }
@@ -97,14 +97,13 @@ function lstatDirectory(path) {
   }
 }
 
-function prepareOutput(tupleSha256) {
+function prepareOutput() {
   const rootIdentity = lstatDirectory(repositoryRoot);
   const buildPath = join(repositoryRoot, "build");
   const candidatesPath = join(buildPath, "candidates");
   const buildIdentity = lstatDirectory(buildPath);
   const candidatesIdentity = lstatDirectory(candidatesPath);
-  const destination = join(candidatesPath, `journey-release-tuple-${tupleSha256.slice("sha256:".length)}.json`);
-  return { rootIdentity, buildPath, buildIdentity, candidatesPath, candidatesIdentity, destination };
+  return { rootIdentity, buildPath, buildIdentity, candidatesPath, candidatesIdentity };
 }
 
 function verifyOutputRoot(output) {
@@ -121,14 +120,23 @@ function verifyOutputRoot(output) {
 }
 
 function stage(tuple, tupleSha256) {
-  const output = prepareOutput(tupleSha256);
+  const output = prepareOutput();
   const ordered = Object.fromEntries(requiredFields.map((field) => [field, tuple[field]]));
   const content = `${JSON.stringify({ ...ordered, tupleSha256 }, null, 2)}\n`;
   verifyOutputRoot(output);
   const helper = join(repositoryRoot, "tools/platform/secure-publish-journey-release-tuple.py");
-  const result = spawnSync("python3", [helper, repositoryRoot, basename(output.destination)], {
+  const identityHeader = [
+    "EASYSUBWAY_JRT_PUBLISH_V1",
+    output.rootIdentity.dev,
+    output.rootIdentity.ino,
+    output.buildIdentity.dev,
+    output.buildIdentity.ino,
+    output.candidatesIdentity.dev,
+    output.candidatesIdentity.ino,
+  ].join(" ");
+  const result = spawnSync("/usr/bin/python3", [helper], {
     encoding: "utf8",
-    input: content,
+    input: `${identityHeader}\n${content}`,
   });
   if (result.error || result.status === null) fail("E_JRT_STAGE_IO", 1, "secure publisher could not run");
   if (result.status === 0) return;

@@ -1,42 +1,32 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
 
-const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
-const script = join(repositoryRoot, "tools/platform/stage-journey-release-tuple.mjs");
-const candidatesRoot = join(repositoryRoot, "build/candidates");
+const sourceRepositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
+const sourceScript = join(sourceRepositoryRoot, "tools/platform/stage-journey-release-tuple.mjs");
+const sourceHelper = join(sourceRepositoryRoot, "tools/platform/secure-publish-journey-release-tuple.py");
 const temporaryRoots = [];
-let fixture = null;
+let repositoryRoot;
+let script;
+let helper;
+let candidatesRoot;
 
 beforeEach(() => {
-  fixture = { buildCreated: false, candidatesCreated: false, buildReplacement: null };
-  const build = join(repositoryRoot, "build");
-  if (!existsSync(build)) {
-    mkdirSync(build);
-    fixture.buildCreated = true;
-  }
-  if (!existsSync(candidatesRoot)) {
-    mkdirSync(candidatesRoot);
-    fixture.candidatesCreated = true;
-  }
+  repositoryRoot = makeTemporaryRoot();
+  script = join(repositoryRoot, "tools/platform/stage-journey-release-tuple.mjs");
+  helper = join(repositoryRoot, "tools/platform/secure-publish-journey-release-tuple.py");
+  candidatesRoot = join(repositoryRoot, "build/candidates");
+  mkdirSync(join(repositoryRoot, "tools/platform"), { recursive: true });
+  mkdirSync(candidatesRoot, { recursive: true });
+  copyFileSync(sourceScript, script);
+  copyFileSync(sourceHelper, helper);
 });
 
 afterEach(() => {
-  const build = join(repositoryRoot, "build");
-  if (fixture.buildReplacement === "symlink" && lstatSync(build).isSymbolicLink()) {
-    unlinkSync(build);
-  } else if (fixture.buildReplacement === "file" && lstatSync(build).isFile()) {
-    unlinkSync(build);
-  } else {
-    rmSync(candidatePath(), { force: true });
-    rmSync(siblingCandidatePath(), { force: true });
-    if (fixture.candidatesCreated && existsSync(candidatesRoot)) rmdirSync(candidatesRoot);
-    if (fixture.buildCreated && existsSync(build)) rmdirSync(build);
-  }
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -94,6 +84,17 @@ test("rejects invalid CLI forms and a non-regular input", () => {
   assertCandidateMissing();
 });
 
+test("rejects a FIFO input without blocking", () => {
+  const fifo = join(makeTemporaryRoot(), "tuple.fifo");
+  const create = spawnSync("/usr/bin/mkfifo", [fifo], { encoding: "utf8" });
+  assert.equal(create.status, 0, create.stderr);
+
+  const result = run("--input", fifo);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^E_JRT_INPUT_NOT_REGULAR\b/);
+  assertCandidateMissing();
+});
+
 test("does not overwrite a pre-existing candidate", () => {
   const input = writeInput(validTuple());
   const destination = candidatePath();
@@ -123,7 +124,6 @@ test("rejects a symlinked output ancestor without publishing", () => {
   rmdirSync(candidatesRoot);
   rmdirSync(join(repositoryRoot, "build"));
   symlinkSync(external, join(repositoryRoot, "build"));
-  fixture.buildReplacement = "symlink";
 
   const result = run("--input", input);
   assert.equal(result.status, 2);
@@ -136,7 +136,6 @@ test("rejects a non-directory output ancestor without publishing", () => {
   rmdirSync(candidatesRoot);
   rmdirSync(join(repositoryRoot, "build"));
   writeFileSync(join(repositoryRoot, "build"), "not a directory");
-  fixture.buildReplacement = "file";
 
   const result = run("--input", input);
   assert.equal(result.status, 2);
@@ -155,13 +154,34 @@ test("rejects a symlink input through O_NOFOLLOW without publishing", () => {
   assertCandidateMissing();
 });
 
-test("fails closed when the secure publish helper cannot start", () => {
-  const input = writeInput(validTuple());
-  const result = runWithEnvironment({ PATH: "" }, "--input", input);
-
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /^E_JRT_STAGE_IO\b/);
+test("helper rejects arguments and unbound candidate content without publishing", () => {
+  const argumentResult = runHelper("{}", "unexpected");
+  assert.equal(argumentResult.status, 2);
+  assert.match(argumentResult.stderr, /^E_JRT_USAGE\b/);
   assertCandidateMissing();
+
+  const malformedResult = runHelper("{");
+  assert.equal(malformedResult.status, 1);
+  assert.match(malformedResult.stderr, /^E_JRT_STAGE_IO\b/);
+  assertCandidateMissing();
+
+  const unbound = JSON.stringify({ ...validTuple(), tupleSha256: `sha256:${"f".repeat(64)}` });
+  const contentResult = runHelper(unbound);
+  assert.equal(contentResult.status, 1);
+  assert.match(contentResult.stderr, /^E_JRT_STAGE_IO\b/);
+  assertCandidateMissing();
+});
+
+test("helper rejects a directory identity not captured by the caller", () => {
+  const content = candidateBody();
+  const identities = outputIdentities();
+  identities[5] += 1n;
+  const result = runHelperRequest(publicationRequest(content, identities));
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^E_JRT_OUTPUT_CONFINEMENT\b/);
+  assertCandidateMissing();
+  assert.deepEqual(readdirSync(candidatesRoot), []);
 });
 
 function validTuple() {
@@ -205,14 +225,35 @@ function siblingCandidatePath() {
 }
 
 function run(...args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 5_000 });
 }
 
-function runWithEnvironment(environment, ...args) {
-  return spawnSync(process.execPath, [script, ...args], {
+function runHelper(input, ...args) {
+  return runHelperRequest(publicationRequest(input), ...args);
+}
+
+function runHelperRequest(input, ...args) {
+  return spawnSync("/usr/bin/python3", [helper, ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...environment },
+    input,
+    timeout: 5_000,
   });
+}
+
+function outputIdentities() {
+  return [repositoryRoot, join(repositoryRoot, "build"), candidatesRoot]
+    .flatMap((path) => {
+      const identity = lstatSync(path, { bigint: true });
+      return [identity.dev, identity.ino];
+    });
+}
+
+function publicationRequest(content, identities = outputIdentities()) {
+  return `EASYSUBWAY_JRT_PUBLISH_V1 ${identities.join(" ")}\n${content}`;
+}
+
+function candidateBody() {
+  return `${JSON.stringify({ ...validTuple(), tupleSha256: expectedTupleSha256 }, null, 2)}\n`;
 }
 
 function assertCandidateMissing() {
