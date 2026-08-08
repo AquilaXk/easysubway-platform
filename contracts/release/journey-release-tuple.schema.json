@@ -21,7 +21,7 @@
     "journeyContractDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
     "serverRouteBundleDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
     "deploymentRevision": { "type": "string", "pattern": "^[a-f0-9]{40}(?![\\s\\S])" },
-    "environmentIdentity": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+(?![\\s\\S])" }
+    "environmentIdentity": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9._-]+(?![\\s\\S])" }
   },
   "x-easysubway-tuple-sha256": {
     "encoding": "UTF-8",
