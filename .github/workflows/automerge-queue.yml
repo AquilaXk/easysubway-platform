@@ -361,7 +361,10 @@ jobs:
             # review-state-filter-begin
             # frozen discovery는 라벨 이벤트에서 GitHub Actions가 기록한 exact-head marker가
             # 있을 때만 승계한다. 임의 author·다른 SHA·후속 push는 게이트를 통과하지 못한다.
-            if ! jq -e --arg head "${head}" --argjson comments "${comments}" --argjson commits "${commits}" '
+            if ! jq -s -e --arg head "${head}" '
+              .[0] as $reviews |
+              .[1] as $comments |
+              .[2] as $commits |
               def is_coderabbit:
                 .author_association == "NONE" and
                 .user.login == "coderabbitai[bot]" and
@@ -374,7 +377,7 @@ jobs:
                 (.body // "") == ("<!-- Automerge frozen discovery authorization: " + $head + " -->");
               def is_current_pr_commit($review):
                 $commits | flatten | any(.sha == ($review.commit_id // ""));
-              [flatten[] |
+              [($reviews | flatten[]) |
                 select(
                   .author_association == "OWNER" or
                   .author_association == "MEMBER" or
@@ -396,12 +399,15 @@ jobs:
               ($states | length > 0 and all(.[]; . == "APPROVED" or . == "COMMENTED")) and
               any($trusted[];
                 is_current_pr_commit(.) and
-                  (.state == "APPROVED" or
+                  ((.state == "APPROVED" and .commit_id == $head) or
                   (.state == "COMMENTED" and
                     (is_coderabbit or
                       ((.body // "" | startswith("**Actionable comments posted: ")) and
                       (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:")))))))
-            ' <<<"${reviews}" >/dev/null; then
+            ' \
+              <(printf '%s\n' "${reviews}") \
+              <(printf '%s\n' "${comments}") \
+              <(printf '%s\n' "${commits}") >/dev/null; then
               echo "PR #${pr}: no trusted frozen discovery review, or an active change request is open; skipping."
               continue
             fi

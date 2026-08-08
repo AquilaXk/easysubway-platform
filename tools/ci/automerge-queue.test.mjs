@@ -298,7 +298,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   const workflow = await readWorkflow();
 
   const reviewProgram = workflow.match(
-    /# review-state-filter-begin\n[\s\S]*?if ! jq -e --arg head "\$\{head\}" --argjson comments "\$\{comments\}" --argjson commits "\$\{commits\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
+    /# review-state-filter-begin\n[\s\S]*?if ! jq -s -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' \\\n\s+<\(printf '%s\\n' "\$\{reviews\}"\) \\\n\s+<\(printf '%s\\n' "\$\{comments\}"\) \\\n\s+<\(printf '%s\\n' "\$\{commits\}"\) >\/dev\/null; then/,
   )?.[1];
   assert.ok(reviewProgram, 'review state jq program must stay testable');
 
@@ -324,16 +324,22 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     comments = [marker()],
     commits = [{ sha: 'head' }, { sha: 'previous-head' }],
   ) => {
+    const directory = mkdtempSync(join(tmpdir(), 'automerge-review-filter-'));
+    const reviewsPath = join(directory, 'reviews.json');
+    const commentsPath = join(directory, 'comments.json');
+    const commitsPath = join(directory, 'commits.json');
+    writeFileSync(reviewsPath, JSON.stringify([reviews]));
+    writeFileSync(commentsPath, JSON.stringify(comments));
+    writeFileSync(commitsPath, JSON.stringify(commits));
     const result = spawnSync('jq', [
+      '-s',
       '-e',
       '--arg', 'head', 'head',
-      '--argjson', 'comments', JSON.stringify(comments),
-      '--argjson', 'commits', JSON.stringify(commits),
       reviewProgram,
-    ], {
-      input: JSON.stringify([reviews]),
-      encoding: 'utf8',
-    });
+      reviewsPath,
+      commentsPath,
+      commitsPath,
+    ], { encoding: 'utf8' });
     // jq -e는 결과가 false/null이면 1, 컴파일 오류면 3, 런타임 오류면 5를 낸다.
     // 0/1만 판정으로 인정해야 프로그램 파손이 "차단 성공"으로 새지 않는다.
     assert.ok(
@@ -353,7 +359,9 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     [marker('head', { user: { login: 'github-actions[bot]', id: 41898282, type: 'User' } })],
   ]) {
     assert.notEqual(
-      runReviewFilter([review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', { commit_id: 'previous-head' })], comments),
+      runReviewFilter([
+        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, { commit_id: 'previous-head' }),
+      ], comments),
       0,
     );
   }
@@ -391,6 +399,14 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   assert.equal(
     runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)]),
     0,
+  );
+  assert.equal(
+    runReviewFilter(
+      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)],
+      [marker(), { body: 'x'.repeat(160 * 1024), user: { login: 'commenter' } }],
+    ),
+    0,
+    'bounded large comment payload must not depend on the OS argument-size limit',
   );
   // 신뢰되지 않는 author_association은 어떤 본문으로도 게이트를 통과하지 못한다.
   assert.notEqual(
@@ -484,8 +500,9 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     ]),
     0,
   );
-  // finding fix 뒤에도 exact label-head marker가 있으면 prior discovery는 유효하다.
-  assert.equal(
+  // GitHub가 stale native approval을 DISMISSED로 mutate하므로 native approval은 current
+  // head에서만 유효하다. Prior frozen discovery는 immutable COMMENTED provenance만 승계한다.
+  assert.notEqual(
     runReviewFilter([
       review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', {
         commit_id: 'previous-head',
