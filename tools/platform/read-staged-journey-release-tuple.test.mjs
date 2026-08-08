@@ -86,12 +86,24 @@ test("rejects malformed, duplicate, reordered, extra, and non-canonical candidat
       [JSON.stringify(Object.fromEntries(Object.entries(candidate).reverse()), null, 2) + "\n", "E_JRT_CANDIDATE_SCHEMA"],
       [canonical({ ...candidate, unexpected: true }), "E_JRT_CANDIDATE_SCHEMA"],
       [canonical(candidate).replace("\n", "\r\n"), "E_JRT_CANDIDATE_SCHEMA"],
-      [`${"[".repeat(1300)}0${"]".repeat(1300)}`, "E_JRT_CANDIDATE_JSON"],
     ];
     for (const [bytes, code] of cases) {
       writeCandidate(fixture, candidate, bytes);
       assertFailure(run(fixture, candidate), code);
     }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("converts a decoder RecursionError to typed candidate JSON failure", () => {
+  const fixture = createFixture();
+  try {
+    const candidate = tuple();
+    writeCandidate(fixture, candidate, canonical(candidate));
+    writeFileSync(join(fixture.root, "tools/platform/recursion-harness.py"), `import importlib.util\nimport os\n\npath = os.path.join(os.path.dirname(__file__), "read-staged-journey-release-tuple.py")\nspec = importlib.util.spec_from_file_location("reader", path)\nreader = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(reader)\ndef recursive_loads(*args, **kwargs):\n    raise RecursionError("fixture decoder recursion")\nreader.json.loads = recursive_loads\nreader.main()\n`);
+    const result = spawnSync("/usr/bin/python3", [join(fixture.root, "tools/platform/recursion-harness.py"), "--tuple-sha256", sha(candidate), "--deployment-revision", revision, "--environment-identity", environment], { cwd: fixture.root, encoding: null, timeout: 5000 });
+    assertFailure(result, "E_JRT_CANDIDATE_JSON");
   } finally {
     fixture.cleanup();
   }
