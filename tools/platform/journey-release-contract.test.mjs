@@ -8,6 +8,11 @@ const receipt = JSON.parse(readFileSync(new URL("../../contracts/release/platfor
 const absoluteEnd = "(?![\\s\\S])";
 const digestPattern = `^sha256:[a-f0-9]{64}${absoluteEnd}`;
 
+test("Platform CI explicitly runs the mutable contract source guard", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^          node --test tools\/platform\/no-mutable-contract-source\.test\.mjs$/m);
+});
+
 test("JourneyReleaseTuple is closed and pins immutable identities", () => {
   const required = [
     "schemaVersion", "artifactKind", "backendImageDigest", "backendConfigDigest",
