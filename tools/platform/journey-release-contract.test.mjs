@@ -8,6 +8,7 @@ const receipt = JSON.parse(readFileSync(new URL("../../contracts/release/platfor
 const absoluteEnd = "(?![\\s\\S])";
 const digestPattern = `^sha256:[a-f0-9]{64}${absoluteEnd}`;
 const mutableContractSourceGuard = "node --test tools/platform/no-mutable-contract-source.test.mjs";
+const journeyReleaseTupleStageTest = "node --test tools/platform/stage-journey-release-tuple.test.mjs";
 
 test("Platform CI explicitly runs the mutable contract source guard", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
@@ -20,6 +21,11 @@ test("Platform CI rejects the mutable contract source guard when only an optiona
   assert.throws(() => assertWorkflowRunsMutableContractSourceGuard(guardInOptionalJob), /Platform CI job/);
 });
 
+test("Platform CI explicitly runs the Journey release tuple staging test", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assertWorkflowRunsPlatformCommand(workflow, journeyReleaseTupleStageTest);
+});
+
 function assertWorkflowRunsMutableContractSourceGuard(workflow) {
   const jobsIndex = workflow.indexOf("jobs:\n");
   assert.notEqual(jobsIndex, -1, "workflow must define jobs");
@@ -30,6 +36,19 @@ function assertWorkflowRunsMutableContractSourceGuard(workflow) {
     platformJob.groups.block,
     new RegExp(`^          ${escapeRegExp(mutableContractSourceGuard)}$`, "m"),
     "Platform CI job must run the mutable contract source guard",
+  );
+}
+
+function assertWorkflowRunsPlatformCommand(workflow, command) {
+  const jobsIndex = workflow.indexOf("jobs:\n");
+  assert.notEqual(jobsIndex, -1, "workflow must define jobs");
+  const jobs = workflow.slice(jobsIndex + "jobs:\n".length);
+  const platformJob = jobs.match(/^  platform:\n(?<block>(?:^(?:    .*|)\n?)*)/m);
+  assert.notEqual(platformJob, null, "workflow must define jobs.platform");
+  assert.match(
+    platformJob.groups.block,
+    new RegExp(`^          ${escapeRegExp(command)}$`, "m"),
+    `Platform CI job must run ${command}`,
   );
 }
 
