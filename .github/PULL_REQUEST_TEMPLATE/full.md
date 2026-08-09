@@ -39,8 +39,8 @@ close #
 
 ## Contract pin gate impact
 
-- [ ] `contracts.lock.json` 영향 없음
-- [ ] staged contract bundle pin(버전·SHA256)을 갱신하고 `tools/platform/stage-contracts.mjs` 검증을 통과했다.
+- [ ] immutable Journey release tuple·release contract(`contracts/release/**`) 영향 없음
+- [ ] immutable Journey release tuple의 identity digest와 tuple SHA256 검증을 통과했다.
 - [ ] hub가 발행하지 않은 contract를 platform 쪽에서 추가하거나 변형하지 않는다.
 
 ## Deploy·recovery readiness impact

@@ -20,7 +20,7 @@ Refs #
 - [ ] 배포 경로·실행 환경(`tools/deploy/**`(env allowlist 포함), `tools/platform/**`, `infra/docker-compose.yml`, `infra/nginx/**`, `infra/terraform/**`) 영향 없음
 - [ ] 백업·복구 절차(`tools/ops/**`) 영향 없음
 - [ ] 관측성(`infra/prometheus/**`, `infra/grafana/**`, `infra/loki/**`, `infra/alloy/**`, `infra/alertmanager/**`) 영향 없음
-- [ ] contract pin(`contracts.lock.json`, `contracts/**`)·CI/CD workflow 변경 없음 (있으면 full.md로 전환)
+- [ ] immutable Journey release tuple·release contract(`contracts/release/**`)·CI/CD workflow 변경 없음 (있으면 full.md로 전환)
 
 ## 체크리스트
 
