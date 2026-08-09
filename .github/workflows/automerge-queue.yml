@@ -413,7 +413,7 @@ jobs:
                 (($lines | map(select(startswith("+"))) | length) == $file.additions) and
                 (($lines | map(select(startswith("-"))) | length) == $file.deletions) and
                 ($lines | length > 0 and all(.[];
-                  (test("^[+-][[:space:]]*image:[[:space:]]*[A-Za-z0-9][A-Za-z0-9._-]*(?::[0-9]+)?(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._.-]*|@sha256:[a-f0-9]{64})[[:space:]]*$")) and
+                  (test("^[+-][[:space:]]*image:[[:space:]]*[A-Za-z0-9][A-Za-z0-9._-]*(?::[0-9]+)?(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._.-]*@sha256:[a-f0-9]{64}|@sha256:[a-f0-9]{64})[[:space:]]*$")) and
                   ((test("(^|:)latest([[:space:]]|$|@)")) | not) and
                   ((contains("EASYSUBWAY_BACKEND_IMAGE")) | not)))) and
               ($commits | flatten) as $commit_set |
