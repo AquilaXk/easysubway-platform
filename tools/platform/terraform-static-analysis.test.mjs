@@ -27,7 +27,7 @@ const currentCheckovFindings = approvedDecisions.map(({ ruleId, path, resourceAd
 
 function write(directory, path, value) { writeFileSync(join(directory, path), value); }
 function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: ruleId, name: ruleId } : null, region = { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 }) {
-  const result = ruleId ? [{ ruleId, level: "error", locations: [{ physicalLocation: { artifactLocation: { uri }, region } }] }] : [];
+  const result = ruleId ? [{ ruleId, ruleIndex: 0, level: "error", locations: [{ physicalLocation: { artifactLocation: { uri }, region } }] }] : [];
   return JSON.stringify({ version: "2.1.0", runs: [
     { tool: { driver: { name: "tflint", version: "0.64.0", informationUri: tflintInfoUri, rules: rule ? [rule] : [] } }, results: result },
     { tool: { driver: { name: "tflint-errors", version: "0.64.0", informationUri: tflintInfoUri, rules: [] } }, results: [] },
@@ -40,7 +40,7 @@ function tflintSarifWithResults(results) {
   ] });
 }
 function checkovSarifRecords(records, driverName = "Checkov", rules = records.map(({ ruleId }) => ({ id: ruleId, name: ruleId }))) {
-  return JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: driverName, version: "3.3.9", rules } }, results: records.map(({ ruleId, path }) => ({ ruleId, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] })) }] });
+  return JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: driverName, version: "3.3.9", rules } }, results: records.map(({ ruleId, path }) => ({ ruleId, ruleIndex: rules.findIndex((rule) => rule.id === ruleId), locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] })) }] });
 }
 function checkovSarif(ruleId = null, uri = "datapack_object_storage.tf", driverName = "Checkov", rules = ruleId ? [{ id: ruleId, name: ruleId }] : []) {
   return checkovSarifRecords(ruleId ? [{ ruleId, path: uri }] : [], driverName, rules);
@@ -90,17 +90,32 @@ test("policy is closed and pins the exact bundled TFLint ruleset", () => {
   assert.deepEqual(Object.keys(policy), ["schemaVersion", "artifactKind", "inventoryPath", "toolchain", "execution", "report", "suppressions"]);
   assert.equal(policy.toolchain.tflint.rulesetVersion, "0.15.0-bundled");
   assert.deepEqual(policy.suppressions, approvedDecisions);
-  for (const key of ["ownerIssueUrl", "ownerIssueTitle", "ownerIssueState", "expiresAt", "path", "resourceAddress", "ruleId", "reason", "impact", "removalCondition", "resourceIdentitySource"]) {
+  for (const key of ["ownerIssueUrl", "ownerIssueTitle", "ownerIssueState", "path", "resourceAddress", "ruleId", "reason", "impact", "removalCondition", "resourceIdentitySource"]) {
     const mutated = structuredClone(policy);
     mutated.suppressions[0][key] = "mutated";
     assert.throws(() => validatePolicy(mutated), /approved Platform decisions/);
   }
+  const changedExpiry = structuredClone(policy);
+  changedExpiry.suppressions[0].expiresAt = "2026-11-08";
+  assert.throws(() => validatePolicy(changedExpiry, { today: "2026-11-07" }), /approved Platform decisions/);
   const reordered = structuredClone(policy);
   reordered.suppressions.reverse();
   assert.throws(() => validatePolicy(reordered), /approved Platform decisions/);
   const duplicated = structuredClone(policy);
   duplicated.suppressions.push(structuredClone(duplicated.suppressions[0]));
   assert.throws(() => validatePolicy(duplicated), /approved Platform decisions/);
+});
+
+test("policy expiry accepts only canonical real UTC dates and expires on the next UTC day", () => {
+  const { policy } = loadPolicy({ today: "2026-11-07" });
+  assert.doesNotThrow(() => validatePolicy(policy, { today: "2026-11-07" }));
+  assert.throws(() => validatePolicy(policy, { today: "2026-11-08" }), /expired/);
+  for (const today of ["2026-11-7", "2026-02-30", "2026-11-07Z", "2026-11-07 "]) assert.throws(() => validatePolicy(policy, { today }), /UTC date/);
+  for (const expiresAt of ["2026-11-7", "2026-02-30", "2026-11-07Z", "2026-11-07 "]) {
+    const mutated = structuredClone(policy);
+    mutated.suppressions[0].expiresAt = expiresAt;
+    assert.throws(() => validatePolicy(mutated, { today: "2026-11-07" }), /UTC date/);
+  }
 });
 
 test("test report directories use the production RUNNER_TEMP root", () => {
@@ -128,7 +143,7 @@ test("only the five approved current Checkov identities normalize away from FIX_
 test("TFLint regions are exact finding identities and fail closed", () => {
   const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-regions-"));
   const artifactUri = "infra/terraform/oci/always-free-a1-flex/locals.tf";
-  const location = (region, uri = artifactUri) => ({ ruleId: "terraform_required_version", level: "error", locations: [{ physicalLocation: { artifactLocation: { uri }, region } }] });
+  const location = (region, uri = artifactUri) => ({ ruleId: "terraform_required_version", ruleIndex: 0, level: "error", locations: [{ physicalLocation: { artifactLocation: { uri }, region } }] });
   try {
     recordToolChecks(directory);
     write(directory, "tflint-root.sarif", tflintSarifWithResults([
@@ -279,28 +294,56 @@ test("Checkov accepts only the direct all-zero documented clean summary with cle
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("combined SARIF merges all root rules deterministically and rejects conflicts", () => {
+test("combined SARIF sorts rules, rebinds rule indexes, and rejects invalid rule references", () => {
   const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-combined-"));
   try {
-    write(directory, "first.sarif", tflintSarif("a_rule", `${rootPath}/versions.tf`, { id: "a_rule", name: "A" }));
-    write(directory, "second.sarif", tflintSarif("b_rule", `${rootPath}/locals.tf`, { id: "b_rule", name: "B" }));
+    const tflintSource = JSON.parse(tflintSarif("b_rule", `${rootPath}/locals.tf`, { id: "b_rule", name: "B" }));
+    tflintSource.runs[0].tool.driver.rules = [{ id: "b_rule", name: "B" }, { id: "a_rule", name: "A" }];
+    tflintSource.runs[0].results[0].ruleIndex = 0;
+    write(directory, "first.sarif", JSON.stringify(tflintSource));
+    write(directory, "second.sarif", tflintSarif("a_rule", `${rootPath}/versions.tf`, { id: "a_rule", name: "A" }));
     const scans = [
       { directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "first.sarif" },
       { directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "second.sarif" },
     ];
     const combined = combineSarifForScans(scans, "TFLINT");
     assert.deepEqual(combined.runs[0].tool.driver.rules.map(({ id }) => id), ["a_rule", "b_rule"]);
-    assert.deepEqual(combined.runs[0].results.map(({ ruleId }) => ruleId), ["a_rule", "b_rule"]);
+    assert.deepEqual(combined.runs[0].results.map(({ ruleId }) => ruleId), ["b_rule", "a_rule"]);
+    assert.deepEqual(combined.runs[0].results.map(({ ruleIndex }) => ruleIndex), [1, 0]);
     write(directory, "second.sarif", tflintSarif("a_rule", `${rootPath}/locals.tf`, { id: "a_rule", name: "conflict" }));
     assert.throws(() => combineSarifForScans(scans, "TFLINT"), /conflicting SARIF rule/);
-    write(directory, "first-checkov.sarif", checkovSarif("CKV_A", "first.tf"));
-    write(directory, "second-checkov.sarif", checkovSarif("CKV_B", "second.tf"));
+    const checkovSource = JSON.parse(checkovSarifRecords([{ ruleId: "CKV_B", path: "second.tf" }], "Checkov", [{ id: "CKV_B", name: "B" }, { id: "CKV_A", name: "A" }]));
+    write(directory, "first-checkov.sarif", JSON.stringify(checkovSource));
+    write(directory, "second-checkov.sarif", checkovSarif("CKV_B", "second.tf", "Checkov", [{ id: "CKV_B", name: "B" }]));
     const checkovCombined = combineSarifForScans([
       { directory, scanner: "CHECKOV", rootPath: "root-a", rawSarifPath: "first-checkov.sarif" },
       { directory, scanner: "CHECKOV", rootPath: "root-b", rawSarifPath: "second-checkov.sarif" },
     ], "CHECKOV");
     assert.deepEqual(checkovCombined.runs[0].tool.driver.rules.map(({ id }) => id), ["CKV_A", "CKV_B"]);
-    assert.deepEqual(checkovCombined.runs[0].results.map(({ ruleId }) => ruleId), ["CKV_A", "CKV_B"]);
+    assert.deepEqual(checkovCombined.runs[0].results.map(({ ruleId }) => ruleId), ["CKV_B", "CKV_B"]);
+    assert.deepEqual(checkovCombined.runs[0].results.map(({ ruleIndex }) => ruleIndex), [1, 1]);
+    const invalid = JSON.parse(tflintSarif("a_rule", `${rootPath}/versions.tf`, { id: "a_rule", name: "A" }));
+    invalid.runs[0].results[0].ruleIndex = 1;
+    write(directory, "invalid-rule-index.sarif", JSON.stringify(invalid));
+    assert.throws(() => combineSarifForScans([{ directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "invalid-rule-index.sarif" }], "TFLINT"), /rule index/);
+    delete invalid.runs[0].results[0].ruleIndex;
+    write(directory, "invalid-rule-index.sarif", JSON.stringify(invalid));
+    assert.throws(() => combineSarifForScans([{ directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "invalid-rule-index.sarif" }], "TFLINT"), /rule index/);
+    invalid.runs[0].results[0].ruleIndex = 0;
+    invalid.runs[0].tool.driver.rules.push({ id: "a_rule", name: "A" });
+    write(directory, "invalid-rule-index.sarif", JSON.stringify(invalid));
+    assert.throws(() => combineSarifForScans([{ directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "invalid-rule-index.sarif" }], "TFLINT"), /duplicated/);
+    const invalidCheckov = JSON.parse(checkovSarif("CKV_B", "second.tf"));
+    delete invalidCheckov.runs[0].results[0].ruleIndex;
+    write(directory, "invalid-checkov-rule-index.sarif", JSON.stringify(invalidCheckov));
+    assert.throws(() => combineSarifForScans([{ directory, scanner: "CHECKOV", rootPath: "root-b", rawSarifPath: "invalid-checkov-rule-index.sarif" }], "CHECKOV"), /rule index/);
+    invalidCheckov.runs[0].results[0].ruleIndex = 1;
+    write(directory, "invalid-checkov-rule-index.sarif", JSON.stringify(invalidCheckov));
+    assert.throws(() => combineSarifForScans([{ directory, scanner: "CHECKOV", rootPath: "root-b", rawSarifPath: "invalid-checkov-rule-index.sarif" }], "CHECKOV"), /rule index/);
+    invalidCheckov.runs[0].results[0].ruleIndex = 0;
+    invalidCheckov.runs[0].tool.driver.rules.push({ id: "CKV_B", name: "CKV_B" });
+    write(directory, "invalid-checkov-rule-index.sarif", JSON.stringify(invalidCheckov));
+    assert.throws(() => combineSarifForScans([{ directory, scanner: "CHECKOV", rootPath: "root-b", rawSarifPath: "invalid-checkov-rule-index.sarif" }], "CHECKOV"), /duplicated/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

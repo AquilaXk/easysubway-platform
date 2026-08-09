@@ -154,7 +154,15 @@ const approvedSuppressions = approvedSuppressionRows.map(([ruleId, file, resourc
   ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2026-11-07",
 }));
 
-export function validatePolicy(policy) {
+function canonicalUtcDate(value, label) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(`${label} must be a canonical UTC date`);
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.valueOf()) || date.toISOString().slice(0, 10) !== value) fail(`${label} must be a canonical UTC date`);
+  return value;
+}
+function currentUtcDate() { return new Date().toISOString().slice(0, 10); }
+export function validatePolicy(policy, { today = currentUtcDate() } = {}) {
+  const currentDay = canonicalUtcDate(today, "policy today");
   exactKeys(policy, requiredPolicyKeys, "policy");
   if (policy.schemaVersion !== 1 || policy.artifactKind !== "terraform-static-analysis-policy-v1" || policy.inventoryPath !== inventoryRelativePath) fail("policy identity is invalid");
   exactKeys(policy.toolchain, ["terraform", "tflint", "checkov"], "toolchain");
@@ -168,13 +176,16 @@ export function validatePolicy(policy) {
   exactKeys(policy.report, ["schemaVersion", "artifactKind", "filenames", "sarifVersion", "hashAlgorithm", "retentionDays"], "report");
   if (policy.report.schemaVersion !== 1 || policy.report.artifactKind !== "terraform-static-analysis-result-v1" || policy.report.sarifVersion !== "2.1.0" || policy.report.hashAlgorithm !== "sha256" || policy.report.retentionDays !== 14 || JSON.stringify(policy.report.filenames) !== JSON.stringify(["tflint.sarif", "checkov.sarif", "terraform-static-analysis-result.json", "terraform-static-analysis-summary.md"])) fail("report contract is invalid");
   if (!Array.isArray(policy.suppressions) || policy.suppressions.length !== approvedSuppressions.length) fail("suppressions are not the approved Platform decisions");
-  for (const decision of policy.suppressions) exactKeys(decision, requiredSuppressionKeys, "suppression");
+  for (const decision of policy.suppressions) {
+    exactKeys(decision, requiredSuppressionKeys, "suppression");
+    if (canonicalUtcDate(decision.expiresAt, "suppression expiry") < currentDay) fail("suppression expiry has expired");
+  }
   if (JSON.stringify(policy.suppressions) !== JSON.stringify(approvedSuppressions)) fail("suppressions are not the approved Platform decisions");
   return policy;
 }
-export function loadPolicy() {
+export function loadPolicy(options = {}) {
   const { bytes, value: policy } = readRepositoryJson(policyRelativePath);
-  validatePolicy(policy);
+  validatePolicy(policy, options);
   return { policy, bytes };
 }
 function loadInventory() {
@@ -204,13 +215,14 @@ function validateRun(run, name, version, informationUri = undefined) {
   if (!run?.tool?.driver || run.tool.driver.name !== name || run.tool.driver.version !== version || !Array.isArray(run.tool.driver.rules) || !Array.isArray(run.results) || (informationUri !== undefined && run.tool.driver.informationUri !== informationUri)) fail("SARIF driver identity is invalid");
 }
 function validateRunRules(run) {
-  const ruleIds = new Set();
+  const ruleIndexes = new Map();
   for (const rule of run.tool.driver.rules) {
-    if (!rule || typeof rule.id !== "string" || !rule.id || ruleIds.has(rule.id)) fail("SARIF rule identity is invalid or duplicated");
-    ruleIds.add(rule.id);
+    if (!rule || typeof rule.id !== "string" || !rule.id || ruleIndexes.has(rule.id)) fail("SARIF rule identity is invalid or duplicated");
+    ruleIndexes.set(rule.id, ruleIndexes.size);
   }
   for (const result of run.results) {
-    if (typeof result.ruleId !== "string" || !result.ruleId || !ruleIds.has(result.ruleId)) fail("SARIF result references an unknown rule");
+    if (typeof result.ruleId !== "string" || !result.ruleId || !ruleIndexes.has(result.ruleId)) fail("SARIF result references an unknown rule");
+    if (!Number.isInteger(result.ruleIndex) || result.ruleIndex < 0 || result.ruleIndex >= run.tool.driver.rules.length || run.tool.driver.rules[result.ruleIndex].id !== result.ruleId) fail("SARIF result rule index is invalid");
   }
 }
 function readLocation(result) {
@@ -426,8 +438,20 @@ function mergeRules(runs) {
   return [...byId.entries()].sort(([left], [right]) => compareCodepoint(left, right)).map(([, { rule }]) => structuredClone(rule));
 }
 function requireResultRules(run) {
-  const ruleIds = new Set(run.tool.driver.rules.map(({ id }) => id));
-  for (const result of run.results) if (!ruleIds.has(result.ruleId)) fail("SARIF result does not reference a merged rule");
+  const ruleIndexes = new Map(run.tool.driver.rules.map(({ id }, index) => [id, index]));
+  for (const result of run.results) {
+    const ruleIndex = ruleIndexes.get(result.ruleId);
+    if (!Number.isInteger(result.ruleIndex) || result.ruleIndex < 0 || result.ruleIndex >= run.tool.driver.rules.length || ruleIndex === undefined || result.ruleIndex !== ruleIndex || run.tool.driver.rules[result.ruleIndex].id !== result.ruleId) fail("SARIF result does not reference the exact merged rule index");
+  }
+}
+function rebindResultRules(run) {
+  const ruleIndexes = new Map(run.tool.driver.rules.map(({ id }, index) => [id, index]));
+  for (const result of run.results) {
+    const ruleIndex = ruleIndexes.get(result.ruleId);
+    if (ruleIndex === undefined) fail("SARIF result does not reference a merged rule");
+    result.ruleIndex = ruleIndex;
+  }
+  requireResultRules(run);
 }
 export function combineSarifForScans(scans, scanner) {
   const selected = scans.filter((scan) => scan.scanner === scanner);
@@ -440,14 +464,14 @@ export function combineSarifForScans(scans, scanner) {
     errors.tool.driver.rules = mergeRules(parsed.map(({ parsed: sarif }) => sarif.runs[1]));
     first.results = parsed.flatMap(({ scan, parsed: sarif }) => normalizeTflintRun(sarif.runs[0], scan).results);
     errors.results = [];
-    requireResultRules(first);
+    rebindResultRules(first);
     return { version: "2.1.0", runs: [first, errors] };
   }
   const parsed = selected.map((scan) => ({ scan, parsed: parseCheckovSarif(internalPath(scan.directory, scan.rawSarifPath)).sarif }));
   const first = normalizeRun(parsed[0].parsed.runs[0], parsed[0].scan.rootPath);
   first.tool.driver.rules = mergeRules(parsed.flatMap(({ parsed: sarif }) => sarif.runs));
   first.results = parsed.flatMap(({ scan, parsed: sarif }) => sarif.runs.flatMap((run) => normalizeRun(run, scan.rootPath).results));
-  requireResultRules(first);
+  rebindResultRules(first);
   return { version: "2.1.0", runs: [first] };
 }
 function resultFindings(scans, inventory, policy) {
