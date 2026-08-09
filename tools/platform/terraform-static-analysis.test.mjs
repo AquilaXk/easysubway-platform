@@ -11,6 +11,7 @@ const tflintFixture = "tools/platform/fixtures/terraform-static-analysis/tflint-
 const publicBucketFixture = "tools/platform/fixtures/terraform-static-analysis/checkov-oci-public-bucket.tf.fixture";
 const sshFixture = "tools/platform/fixtures/terraform-static-analysis/checkov-oci-unrestricted-ssh.tf.fixture";
 const tflintInfoUri = "https://github.com/terraform-linters/tflint";
+const testReportRoot = process.env.RUNNER_TEMP ?? tmpdir();
 
 function write(directory, path, value) { writeFileSync(join(directory, path), value); }
 function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: ruleId, name: ruleId } : null) {
@@ -71,8 +72,12 @@ test("policy is closed and pins the exact bundled TFLint ruleset", () => {
   }
 });
 
+test("test report directories use the production RUNNER_TEMP root", () => {
+  assert.equal(testReportRoot, process.env.RUNNER_TEMP ?? tmpdir());
+});
+
 test("pinned-output-shaped TFLint version and two-run SARIF fail closed", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-tflint-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-tflint-"));
   try {
     write(directory, "tflint-version.stdout", "TFLint version 0.64.0\n");
     write(directory, "tflint-version.stderr", "");
@@ -97,7 +102,7 @@ test("pinned-output-shaped TFLint version and two-run SARIF fail closed", () => 
 });
 
 test("report directory aliases and symlinks cannot become filesystem identities", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-path-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-path-"));
   const alias = `${directory}-alias`;
   try {
     write(directory, "tflint-version.stdout", "TFLint version 0.64.0\n+ ruleset.terraform (0.15.0-bundled)\n");
@@ -109,7 +114,7 @@ test("report directory aliases and symlinks cannot become filesystem identities"
 });
 
 test("Checkov joins JSON resource identity to exactly one normalized SARIF result", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-checkov-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-checkov-"));
   try {
     write(directory, "checkov-root.sarif", checkovSarif("CKV_OCI_10", "datapack_object_storage.tf"));
     write(directory, "checkov-root.json", checkovJson("CKV_OCI_10", "\\datapack_object_storage.tf"));
@@ -136,7 +141,7 @@ test("Checkov joins JSON resource identity to exactly one normalized SARIF resul
 });
 
 test("full Checkov JSON report requires exact shape and summary counts", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-checkov-report-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-checkov-report-"));
   try {
     write(directory, "checkov-root.sarif", checkovSarif("CKV_OCI_10"));
     write(directory, "checkov-root.json", checkovJson("CKV_OCI_10"));
@@ -171,7 +176,7 @@ test("public bucket fixture is a CKV_OCI_10-only unfiltered scanner mutation", (
 });
 
 test("Checkov accepts only the direct all-zero documented clean summary with clean SARIF and exit zero", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-clean-checkov-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-clean-checkov-"));
   try {
     write(directory, "checkov-root.sarif", checkovSarif());
     write(directory, "checkov-root.json", cleanCheckovSummary());
@@ -188,7 +193,7 @@ test("Checkov accepts only the direct all-zero documented clean summary with cle
 });
 
 test("combined SARIF merges all root rules deterministically and rejects conflicts", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-combined-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-combined-"));
   try {
     write(directory, "first.sarif", tflintSarif("a_rule", "first.tf", { id: "a_rule", name: "A" }));
     write(directory, "second.sarif", tflintSarif("b_rule", "second.tf", { id: "b_rule", name: "B" }));
@@ -213,7 +218,7 @@ test("combined SARIF merges all root rules deterministically and rejects conflic
 });
 
 test("analysis generates normalized combined SARIF and binds raw/tool/fixture evidence", () => {
-  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-result-"));
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-result-"));
   try {
     recordToolChecks(directory);
     recordApprovedReports(directory);
