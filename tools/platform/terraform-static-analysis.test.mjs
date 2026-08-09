@@ -12,6 +12,7 @@ const publicBucketFixture = "tools/platform/fixtures/terraform-static-analysis/c
 const sshFixture = "tools/platform/fixtures/terraform-static-analysis/checkov-oci-unrestricted-ssh.tf.fixture";
 const tflintInfoUri = "https://github.com/terraform-linters/tflint";
 const testReportRoot = process.env.RUNNER_TEMP ?? tmpdir();
+const staticAnalysisRunnerSource = readFileSync(new URL("./terraform-static-analysis.mjs", import.meta.url), "utf8");
 const approvedDecisions = [
   ["CKV_OCI_10", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약", "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음", "40", "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거", "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제"],
   ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 datapack delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
@@ -25,10 +26,16 @@ const approvedDecisions = [
 const currentCheckovFindings = approvedDecisions.map(({ ruleId, path, resourceAddress }) => ({ ruleId, path: path.slice(`${rootPath}/`.length), resourceAddress }));
 
 function write(directory, path, value) { writeFileSync(join(directory, path), value); }
-function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: ruleId, name: ruleId } : null) {
-  const result = ruleId ? [{ ruleId, level: "error", locations: [{ physicalLocation: { artifactLocation: { uri } } }] }] : [];
+function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: ruleId, name: ruleId } : null, region = { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 }) {
+  const result = ruleId ? [{ ruleId, level: "error", locations: [{ physicalLocation: { artifactLocation: { uri }, region } }] }] : [];
   return JSON.stringify({ version: "2.1.0", runs: [
     { tool: { driver: { name: "tflint", version: "0.64.0", informationUri: tflintInfoUri, rules: rule ? [rule] : [] } }, results: result },
+    { tool: { driver: { name: "tflint-errors", version: "0.64.0", informationUri: tflintInfoUri, rules: [] } }, results: [] },
+  ] });
+}
+function tflintSarifWithResults(results) {
+  return JSON.stringify({ version: "2.1.0", runs: [
+    { tool: { driver: { name: "tflint", version: "0.64.0", informationUri: tflintInfoUri, rules: [{ id: "terraform_required_version", name: "terraform_required_version" }] } }, results },
     { tool: { driver: { name: "tflint-errors", version: "0.64.0", informationUri: tflintInfoUri, rules: [] } }, results: [] },
   ] });
 }
@@ -100,6 +107,12 @@ test("test report directories use the production RUNNER_TEMP root", () => {
   assert.equal(testReportRoot, process.env.RUNNER_TEMP ?? tmpdir());
 });
 
+test("tracked source hashing uses only the fixed Git binary", () => {
+  assert.match(staticAnalysisRunnerSource, /execFileSync\("\/usr\/bin\/git", \["ls-files"/);
+  assert.equal(staticAnalysisRunnerSource.includes('execFileSync("git"'), false);
+  assert.equal(/process\.env\.GIT(?:_|\b)/.test(staticAnalysisRunnerSource), false);
+});
+
 test("only the five approved current Checkov identities normalize away from FIX_REQUIRED", () => {
   const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-unclassified-"));
   try {
@@ -108,7 +121,45 @@ test("only the five approved current Checkov identities normalize away from FIX_
     recordFixtures(directory);
     const result = analyze({ reportDirectory: directory, sourceSha: "a".repeat(40) });
     assert.equal(result.outcome, "FAIL");
-    assert.deepEqual(result.findings.find(({ ruleId }) => ruleId === "CKV_OCI_999"), { scanner: "CHECKOV", ruleId: "CKV_OCI_999", rootId, path: `${rootPath}/storage.tf`, resourceAddress: "oci_core_volume.data[0]", resourceIdentitySource: "RESOURCE", disposition: "FIX_REQUIRED" });
+    assert.deepEqual(result.findings.find(({ ruleId }) => ruleId === "CKV_OCI_999"), { scanner: "CHECKOV", ruleId: "CKV_OCI_999", rootId, path: `${rootPath}/storage.tf`, startLine: null, startColumn: null, endLine: null, endColumn: null, resourceAddress: "oci_core_volume.data[0]", resourceIdentitySource: "RESOURCE", disposition: "FIX_REQUIRED" });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("TFLint regions are exact finding identities and fail closed", () => {
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-regions-"));
+  const artifactUri = "infra/terraform/oci/always-free-a1-flex/locals.tf";
+  const location = (region, uri = artifactUri) => ({ ruleId: "terraform_required_version", level: "error", locations: [{ physicalLocation: { artifactLocation: { uri }, region } }] });
+  try {
+    recordToolChecks(directory);
+    write(directory, "tflint-root.sarif", tflintSarifWithResults([
+      location({ startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 }),
+      location({ startLine: 2, startColumn: 1, endLine: 2, endColumn: 2 }),
+    ]));
+    write(directory, "checkov-root.sarif", checkovSarifRecords(currentCheckovFindings));
+    write(directory, "checkov-root.json", checkovJsonRecords(currentCheckovFindings));
+    recordScan({ reportDirectory: directory, scanner: "TFLINT", rootId, rootPath, exit: 2, rawSarifPath: "tflint-root.sarif", structuredJsonPath: null });
+    recordScan({ reportDirectory: directory, scanner: "CHECKOV", rootId, rootPath, exit: 1, rawSarifPath: "checkov-root.sarif", structuredJsonPath: "checkov-root.json" });
+    recordFixtures(directory);
+    const result = analyze({ reportDirectory: directory, sourceSha: "a".repeat(40) });
+    assert.deepEqual(result.findings.filter(({ scanner }) => scanner === "TFLINT"), [
+      { scanner: "TFLINT", ruleId: "terraform_required_version", rootId, path: artifactUri, startLine: 1, startColumn: 1, endLine: 1, endColumn: 2, resourceAddress: "", resourceIdentitySource: null, disposition: "FIX_REQUIRED" },
+      { scanner: "TFLINT", ruleId: "terraform_required_version", rootId, path: artifactUri, startLine: 2, startColumn: 1, endLine: 2, endColumn: 2, resourceAddress: "", resourceIdentitySource: null, disposition: "FIX_REQUIRED" },
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, "tflint.sarif"), "utf8")).runs[0].results.map(({ locations }) => locations[0].physicalLocation), [
+      { artifactLocation: { uri: artifactUri }, region: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 } },
+      { artifactLocation: { uri: artifactUri }, region: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 2 } },
+    ]);
+    for (const [name, uri, matcher] of [["missing-prefix", "locals.tf", /repository-relative/], ["duplicated-prefix", `${rootPath}/${artifactUri}`, /source scope/]]) {
+      write(directory, "invalid-production.sarif", tflintSarifWithResults([location({ startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 }, uri)]));
+      assert.throws(() => recordScan({ reportDirectory: directory, scanner: "TFLINT", rootId: name, rootPath, exit: 2, rawSarifPath: "invalid-production.sarif", structuredJsonPath: null }), matcher);
+    }
+    for (const [name, region] of [["missing", null], ["extra-key", { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2, byteOffset: 0 }], ["non-integer", { startLine: 1.5, startColumn: 1, endLine: 1, endColumn: 2 }], ["nonpositive", { startLine: 0, startColumn: 1, endLine: 1, endColumn: 2 }], ["reversed", { startLine: 2, startColumn: 1, endLine: 1, endColumn: 2 }]]) {
+      const invalid = JSON.parse(tflintSarif("terraform_required_version"));
+      if (region === null) delete invalid.runs[0].results[0].locations[0].physicalLocation.region;
+      else invalid.runs[0].results[0].locations[0].physicalLocation.region = region;
+      write(directory, "invalid.sarif", JSON.stringify(invalid));
+      assert.throws(() => recordScan({ reportDirectory: directory, scanner: "TFLINT", rootId: `${name}-region`, rootPath, exit: 2, rawSarifPath: "invalid.sarif", structuredJsonPath: null }), /region/);
+    }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -231,16 +282,16 @@ test("Checkov accepts only the direct all-zero documented clean summary with cle
 test("combined SARIF merges all root rules deterministically and rejects conflicts", () => {
   const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-combined-"));
   try {
-    write(directory, "first.sarif", tflintSarif("a_rule", "first.tf", { id: "a_rule", name: "A" }));
-    write(directory, "second.sarif", tflintSarif("b_rule", "second.tf", { id: "b_rule", name: "B" }));
+    write(directory, "first.sarif", tflintSarif("a_rule", `${rootPath}/versions.tf`, { id: "a_rule", name: "A" }));
+    write(directory, "second.sarif", tflintSarif("b_rule", `${rootPath}/locals.tf`, { id: "b_rule", name: "B" }));
     const scans = [
-      { directory, scanner: "TFLINT", rootPath: "root-a", rawSarifPath: "first.sarif" },
-      { directory, scanner: "TFLINT", rootPath: "root-b", rawSarifPath: "second.sarif" },
+      { directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "first.sarif" },
+      { directory, scanner: "TFLINT", rootId, rootPath, rawSarifPath: "second.sarif" },
     ];
     const combined = combineSarifForScans(scans, "TFLINT");
     assert.deepEqual(combined.runs[0].tool.driver.rules.map(({ id }) => id), ["a_rule", "b_rule"]);
     assert.deepEqual(combined.runs[0].results.map(({ ruleId }) => ruleId), ["a_rule", "b_rule"]);
-    write(directory, "second.sarif", tflintSarif("a_rule", "second.tf", { id: "a_rule", name: "conflict" }));
+    write(directory, "second.sarif", tflintSarif("a_rule", `${rootPath}/locals.tf`, { id: "a_rule", name: "conflict" }));
     assert.throws(() => combineSarifForScans(scans, "TFLINT"), /conflicting SARIF rule/);
     write(directory, "first-checkov.sarif", checkovSarif("CKV_A", "first.tf"));
     write(directory, "second-checkov.sarif", checkovSarif("CKV_B", "second.tf"));
@@ -263,8 +314,8 @@ test("analysis generates normalized combined SARIF and binds raw/tool/fixture ev
     assert.equal(result.outcome, "PASS");
     assert.deepEqual(Object.keys(result.reports), ["tflintSarif", "checkovSarif", "toolChecks", "scans", "fixtureChecks"]);
     assert.deepEqual(result.reports.toolChecks.map(({ scanner, version, ruleset }) => [scanner, version, ruleset]), [["CHECKOV", "3.3.9", null], ["TFLINT", "0.64.0", "0.15.0-bundled"]]);
-    assert.deepEqual(result.findings, approvedDecisions.map(({ scanner, ruleId, rootId: findingRootId, path, resourceAddress, resourceIdentitySource, disposition }) => ({ scanner, ruleId, rootId: findingRootId, path, resourceAddress, resourceIdentitySource, disposition })).sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0));
-    assert.deepEqual(Object.keys(result.findings[0]), ["scanner", "ruleId", "rootId", "path", "resourceAddress", "resourceIdentitySource", "disposition"]);
+    assert.deepEqual(result.findings, approvedDecisions.map(({ scanner, ruleId, rootId: findingRootId, path, resourceAddress, resourceIdentitySource, disposition }) => ({ scanner, ruleId, rootId: findingRootId, path, startLine: null, startColumn: null, endLine: null, endColumn: null, resourceAddress, resourceIdentitySource, disposition })).sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0));
+    assert.deepEqual(Object.keys(result.findings[0]), ["scanner", "ruleId", "rootId", "path", "startLine", "startColumn", "endLine", "endColumn", "resourceAddress", "resourceIdentitySource", "disposition"]);
     assert.deepEqual(Object.keys(result.reports.fixtureChecks[0]), ["scanner", "fixturePath", "sourceSha256", "expectedRuleId", "exit", "rawSarifSha256", "structuredJsonSha256"]);
     const combined = JSON.parse(readFileSync(join(directory, "checkov.sarif"), "utf8"));
     assert.equal(combined.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri, `${rootPath}/datapack_object_storage.tf`);

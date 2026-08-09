@@ -14,7 +14,7 @@ const scannerNames = new Set(["TFLINT", "CHECKOV"]);
 const requiredPolicyKeys = ["schemaVersion", "artifactKind", "inventoryPath", "toolchain", "execution", "report", "suppressions"];
 const requiredSuppressionKeys = ["scanner", "ruleId", "rootId", "path", "resourceAddress", "resourceIdentitySource", "disposition", "reason", "impact", "ownerIssueUrl", "ownerIssueTitle", "ownerIssueState", "removalCondition", "expiresAt"];
 const resultKeys = ["schemaVersion", "artifactKind", "sourceSha", "inventory", "policy", "configuration", "tools", "roots", "reports", "findings", "summary", "outcome"];
-const findingKeys = ["scanner", "ruleId", "rootId", "path", "resourceAddress", "resourceIdentitySource", "disposition"];
+const findingKeys = ["scanner", "ruleId", "rootId", "path", "startLine", "startColumn", "endLine", "endColumn", "resourceAddress", "resourceIdentitySource", "disposition"];
 const scanKeys = ["scanner", "rootId", "rootPath", "exit", "rawSarifPath", "rawSarifSha256", "structuredJsonPath", "structuredJsonSha256"];
 const fixtureKeys = ["scanner", "fixturePath", "sourceSha256", "expectedRuleId", "exit", "rawSarifPath", "rawSarifSha256", "structuredJsonPath", "structuredJsonSha256"];
 const toolCheckKeys = ["scanner", "version", "ruleset", "stdoutSha256"];
@@ -182,9 +182,13 @@ function loadInventory() {
   if (!Array.isArray(inventory.roots) || inventory.roots.length === 0) fail("inventory must contain executable roots");
   return { inventory, bytes };
 }
-function sourceDigest(rootPath) {
-  const files = execFileSync("git", ["ls-files", "--", rootPath], { cwd: repository, encoding: "utf8" }).trim().split("\n").filter(Boolean).sort(compareCodepoint);
+function trackedSourceFiles(rootPath) {
+  const files = execFileSync("/usr/bin/git", ["ls-files", "--", rootPath], { cwd: repository, encoding: "utf8" }).trim().split("\n").filter(Boolean).sort(compareCodepoint);
   if (files.length === 0) fail(`root ${rootPath} has no tracked source`);
+  return files;
+}
+function sourceDigest(rootPath) {
+  const files = trackedSourceFiles(rootPath);
   const hash = createHash("sha256");
   for (const file of files) hash.update(`${file}\0`).update(readFileSync(resolve(repository, file)));
   return hash.digest("hex");
@@ -213,6 +217,21 @@ function readLocation(result) {
   if (!result || typeof result.ruleId !== "string" || !result.ruleId || !Array.isArray(result.locations) || result.locations.length !== 1) fail("SARIF result lacks one exact identity location");
   return normalizeSarifPath(result.locations[0]?.physicalLocation?.artifactLocation?.uri);
 }
+function readTflintLocation(result) {
+  const path = readLocation(result);
+  const region = result.locations[0]?.physicalLocation?.region;
+  const keys = ["startLine", "startColumn", "endLine", "endColumn"];
+  exactKeys(region, keys, "TFLint result region");
+  if (!region || typeof region !== "object" || Array.isArray(region) || keys.some((key) => !Number.isInteger(region[key]) || region[key] <= 0)) fail("TFLint result region is invalid");
+  if (region.endLine < region.startLine || (region.endLine === region.startLine && region.endColumn < region.startColumn)) fail("TFLint result region is reversed");
+  return { path, ...region };
+}
+function productionTflintPath(root, rawPath) {
+  const prefix = `${root.path}/`;
+  if (!rawPath.startsWith(prefix)) fail("TFLint SARIF location must be repository-relative within the exact inventory root");
+  if (!trackedSourceFiles(root.path).includes(rawPath)) fail("TFLint SARIF location is outside exact root source scope");
+  return rawPath;
+}
 function parseTflint(path) {
   const parsed = baseSarif(path);
   if (parsed.sarif.runs.length !== 2) fail("TFLint SARIF must have two ordered runs");
@@ -224,7 +243,7 @@ function parseTflint(path) {
   validateRunRules(errors);
   for (const result of lint.results) {
     if (!new Set(["error", "warning", "note"]).has(result.level)) fail("TFLint result severity is unknown");
-    readLocation(result);
+    readTflintLocation(result);
   }
   return parsed;
 }
@@ -285,14 +304,18 @@ function checkovFindings(rawSarifPath, rawJsonPath, root) {
     if (matches.length !== 1) fail("Checkov JSON/SARIF identity join is missing or ambiguous");
     if (used.has(matches[0].index)) fail("Checkov SARIF evidence is ambiguously reused");
     used.add(matches[0].index);
-    return { scanner: "CHECKOV", ruleId: item.ruleId, rootId: root.id, path: prefixedRootPath(root.path, item.path), resourceAddress: item.resourceAddress, resourceIdentitySource: item.resourceIdentitySource };
+    return { scanner: "CHECKOV", ruleId: item.ruleId, rootId: root.id, path: prefixedRootPath(root.path, item.path), startLine: null, startColumn: null, endLine: null, endColumn: null, resourceAddress: item.resourceAddress, resourceIdentitySource: item.resourceIdentitySource };
   });
   if (used.size !== sarifResults.length) fail("Checkov SARIF has unmatched failed evidence");
   return { parsed: parseCheckovSarif(rawSarifPath), findings, cleanSummary };
 }
 function tflintFindings(rawSarifPath, root) {
   const parsed = parseTflint(rawSarifPath);
-  return { parsed, findings: parsed.sarif.runs[0].results.map((result) => ({ scanner: "TFLINT", ruleId: result.ruleId, rootId: root.id, path: prefixedRootPath(root.path, readLocation(result)), resourceAddress: "", resourceIdentitySource: null })) };
+  return { parsed, findings: parsed.sarif.runs[0].results.map((result) => {
+    const location = readTflintLocation(result);
+    const path = root.id === "fixture" ? location.path : productionTflintPath(root, location.path);
+    return { scanner: "TFLINT", ruleId: result.ruleId, rootId: root.id, path, startLine: location.startLine, startColumn: location.startColumn, endLine: location.endLine, endColumn: location.endColumn, resourceAddress: "", resourceIdentitySource: null };
+  }) };
 }
 function scannerExitIsValid(scanner, exit, findings) {
   return scanner === "TFLINT" ? ((exit === 0 && findings === 0) || (exit === 2 && findings > 0)) : ((exit === 0 && findings === 0) || (exit === 1 && findings > 0));
@@ -384,6 +407,14 @@ function normalizeRun(run, rootPath) {
   for (const result of copy.results) result.locations[0].physicalLocation.artifactLocation.uri = prefixedRootPath(rootPath, readLocation(result));
   return copy;
 }
+function normalizeTflintRun(run, scan) {
+  const copy = structuredClone(run);
+  for (const result of copy.results) {
+    const location = readTflintLocation(result);
+    result.locations[0].physicalLocation.artifactLocation.uri = productionTflintPath({ id: scan.rootId, path: scan.rootPath }, location.path);
+  }
+  return copy;
+}
 function mergeRules(runs) {
   const byId = new Map();
   for (const run of runs) for (const rule of run.tool.driver.rules) {
@@ -403,11 +434,11 @@ export function combineSarifForScans(scans, scanner) {
   if (selected.length === 0) fail(`no ${scanner} scan reports`);
   if (scanner === "TFLINT") {
     const parsed = selected.map((scan) => ({ scan, parsed: parseTflint(internalPath(scan.directory, scan.rawSarifPath)).sarif }));
-    const first = normalizeRun(parsed[0].parsed.runs[0], parsed[0].scan.rootPath);
+    const first = normalizeTflintRun(parsed[0].parsed.runs[0], parsed[0].scan);
     const errors = structuredClone(parsed[0].parsed.runs[1]);
     first.tool.driver.rules = mergeRules(parsed.map(({ parsed: sarif }) => sarif.runs[0]));
     errors.tool.driver.rules = mergeRules(parsed.map(({ parsed: sarif }) => sarif.runs[1]));
-    first.results = parsed.flatMap(({ scan, parsed: sarif }) => normalizeRun(sarif.runs[0], scan.rootPath).results);
+    first.results = parsed.flatMap(({ scan, parsed: sarif }) => normalizeTflintRun(sarif.runs[0], scan).results);
     errors.results = [];
     requireResultRules(first);
     return { version: "2.1.0", runs: [first, errors] };
@@ -426,7 +457,7 @@ function resultFindings(scans, inventory, policy) {
     const paths = scan.scanner === "TFLINT" ? tflintFindings(internalPath(scan.directory, scan.rawSarifPath), root).findings : checkovFindings(internalPath(scan.directory, scan.rawSarifPath), internalPath(scan.directory, scan.structuredJsonPath), root).findings;
     for (const item of paths) {
       const matching = policy.suppressions.find((decision) => decision.scanner === item.scanner && decision.ruleId === item.ruleId && decision.rootId === item.rootId && decision.path === item.path && decision.resourceAddress === item.resourceAddress && decision.resourceIdentitySource === item.resourceIdentitySource);
-      findings.push({ scanner: item.scanner, ruleId: item.ruleId, rootId: item.rootId, path: item.path, resourceAddress: item.resourceAddress, resourceIdentitySource: item.resourceIdentitySource, disposition: matching?.disposition ?? "FIX_REQUIRED" });
+      findings.push({ scanner: item.scanner, ruleId: item.ruleId, rootId: item.rootId, path: item.path, startLine: item.startLine, startColumn: item.startColumn, endLine: item.endLine, endColumn: item.endColumn, resourceAddress: item.resourceAddress, resourceIdentitySource: item.resourceIdentitySource, disposition: matching?.disposition ?? "FIX_REQUIRED" });
     }
   }
   findings.sort((a, b) => compareCodepoint(JSON.stringify(a), JSON.stringify(b)));
