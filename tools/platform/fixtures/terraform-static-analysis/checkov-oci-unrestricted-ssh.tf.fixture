@@ -1,0 +1,9 @@
+resource "oci_core_security_list" "ssh" {
+  compartment_id = "ocid1.compartment.oc1..example"
+  vcn_id         = "ocid1.vcn.oc1..example"
+  ingress_security_rules {
+    protocol = "6"
+    source   = "0.0.0.0/0"
+    tcp_options { min = 22 max = 22 }
+  }
+}

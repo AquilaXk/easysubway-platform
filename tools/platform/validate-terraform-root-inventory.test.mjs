@@ -9,6 +9,7 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const inventoryPath = resolve(root, "tools/platform/terraform-root-inventory.json");
 const workflowPath = resolve(root, ".github/workflows/ci.yml");
 const gitignorePath = resolve(root, ".gitignore");
+const tflintConfigPath = resolve(root, ".tflint.hcl");
 
 test("Terraform candidate inventory is closed, exact, and tracked", () => {
   const inventoryBytes = readFileSync(inventoryPath, "utf8");
@@ -97,6 +98,39 @@ test("Platform CI validates each inventory root using readonly backendless Terra
   assert.equal(indexes.every((index, position) => position === 0 || indexes[position - 1] < index), true);
   assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color/g) ?? []).length, 1);
   assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex validate -no-color/g) ?? []).length, 1);
+});
+
+test("Platform CI keeps Terraform static analysis inventory-driven and isolated", () => {
+  const workflow = readFileSync(workflowPath, "utf8");
+  const config = readFileSync(tflintConfigPath, "utf8");
+  assert.equal(config, `required_version = "= 0.64.0"\n\nconfig {\n  call_module_type = "local"\n  force            = false\n}\n\nplugin "terraform" {\n  enabled = true\n  preset  = "recommended"\n}\n`);
+  assert.match(workflow, /node --test tools\/platform\/terraform-static-analysis\.test\.mjs/);
+  assert.match(workflow, /node tools\/platform\/terraform-static-analysis\.mjs validate-policy/);
+  assert.equal((workflow.match(/node tools\/platform\/terraform-static-analysis\.mjs list-roots/g) ?? []).length, 2);
+  for (const image of [
+    "ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f",
+    "bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144",
+  ]) assert.match(workflow, new RegExp(image));
+  assert.equal((workflow.match(/--network none --read-only --tmpfs \/tmp/g) ?? []).length, 6);
+  assert.match(workflow, /--download-external-modules false/);
+  assert.match(workflow, /--skip-download/);
+  assert.match(workflow, /--config=\/repo\/\.tflint\.hcl --chdir="\$\{root_path\}" --call-module-type=local --format=sarif --no-color/);
+  assert.equal((workflow.match(/record-scan "\$\{report_dir\}"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/record-fixture "\$\{report_dir\}"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/record-tool-check "\$\{report_dir\}"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/TFLINT_DISABLE_VERSION_CHECK=1/g) ?? []).length, 3);
+  assert.match(workflow, /record-tool-check "\$\{report_dir\}" TFLINT "\$\{version_exit\}" tflint-version\.stdout tflint-version\.stderr/);
+  assert.match(workflow, /record-tool-check "\$\{report_dir\}" CHECKOV "\$\{version_exit\}" checkov-version\.stdout checkov-version\.stderr/);
+  assert.match(workflow, /--version > "\$\{report_dir\}\/tflint-version\.stdout" 2> "\$\{report_dir\}\/tflint-version\.stderr"/);
+  assert.match(workflow, /--version > "\$\{report_dir\}\/checkov-version\.stdout" 2> "\$\{report_dir\}\/checkov-version\.stderr"/);
+  assert.match(workflow, /-o sarif -o json --output-file-path/);
+  assert.match(workflow, /-w "\/repo\/\$\{root_path\}"[\s\\]+bridgecrew\/checkov@[\s\S]*?--framework terraform --directory \./);
+  assert.match(workflow, /-w "\/reports\/fixtures\/\$\{fixture_name\}"[\s\\]+bridgecrew\/checkov@[\s\S]*?--framework terraform --directory \./);
+  assert.equal(workflow.includes("combine-sarif"), false);
+  assert.equal((workflow.match(/set \+e/g) ?? []).length, 6);
+  assert.match(workflow, /name: terraform-static-analysis-\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /name: Enforce Terraform static analysis verdict/);
+  for (const forbidden of ["continue-on-error", "--skip-check", "--soft-fail", "--init", "--force", "trivy", "terraform-linters/tflint:latest", "bridgecrew/checkov:latest", "exit 0"]) assert.equal(workflow.includes(forbidden), false, `${forbidden} must remain forbidden`);
 });
 
 function trackedTerraformDirectories() {

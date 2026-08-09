@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "artifactKind": "terraform-static-analysis-policy-v1",
+  "inventoryPath": "tools/platform/terraform-root-inventory.json",
+  "toolchain": {
+    "terraform": { "version": "1.14.6" },
+    "tflint": {
+      "version": "0.64.0",
+      "commit": "15c65a33b322750f6131e286cd9597896299ba32",
+      "image": "ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f",
+      "ruleset": "terraform/recommended",
+      "rulesetVersion": "0.15.0-bundled",
+      "pluginDownload": "DISABLED"
+    },
+    "checkov": {
+      "version": "3.3.9",
+      "commit": "27f879342227f385ce1dbd619155f9aaed9d3cb4",
+      "image": "bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144",
+      "framework": "terraform",
+      "externalModuleDownload": "DISABLED"
+    }
+  },
+  "execution": {
+    "network": "NONE",
+    "repositoryMount": "READ_ONLY",
+    "reportMount": "READ_WRITE",
+    "callModuleType": "LOCAL",
+    "forbiddenInputs": ["credentials", "state", "plan", "tfvars", "cloudApi"]
+  },
+  "report": {
+    "schemaVersion": 1,
+    "artifactKind": "terraform-static-analysis-result-v1",
+    "filenames": ["tflint.sarif", "checkov.sarif", "terraform-static-analysis-result.json", "terraform-static-analysis-summary.md"],
+    "sarifVersion": "2.1.0",
+    "hashAlgorithm": "sha256",
+    "retentionDays": 14
+  },
+  "suppressions": [
+    {
+      "scanner": "CHECKOV",
+      "ruleId": "CKV_OCI_10",
+      "rootId": "oci-always-free-a1-flex",
+      "path": "infra/terraform/oci/always-free-a1-flex/datapack_object_storage.tf",
+      "resourceAddress": "oci_objectstorage_bucket.datapack",
+      "resourceIdentitySource": "RESOURCE",
+      "disposition": "ACCEPTED_BOUNDED_RISK",
+      "reason": "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약",
+      "impact": "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음",
+      "ownerIssueUrl": "https://github.com/AquilaXk/easysubway-platform/issues/40",
+      "ownerIssueTitle": "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거",
+      "ownerIssueState": "OPEN",
+      "removalCondition": "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제",
+      "expiresAt": "2026-11-07"
+    }
+  ]
+}
