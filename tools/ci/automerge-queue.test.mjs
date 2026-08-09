@@ -1525,8 +1525,16 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
   assert.ok(queueLoop, 'queue loop must stay testable');
   const runQueue = makeRunQueue(queueLoop, budgetConstantsOf(workflow));
 
+  const tagAndDigest = `ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(64)}`;
   const eligible = runQueue([
-    { number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true },
+    {
+      number: 41,
+      mergeStateStatus: 'CLEAN',
+      reviewed: false,
+      authorized: false,
+      dependabotCompose: true,
+      dependencyPatch: `-    image: ghcr.io/a/image:1.0.0@sha256:${'b'.repeat(64)}\n+    image: ${tagAndDigest}`,
+    },
   ]);
   assert.equal(eligible.mergedPr, 41, 'exact dependency-only candidate must bypass only Review and marker');
 
@@ -1547,6 +1555,11 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
     { dependencyPatch: '+ image: ${EASYSUBWAY_BACKEND_IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: "ghcr.io/a/image:latest"', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: ghcr.io/a/image:latest # comment', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:latest@sha256:${'a'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:1.0.1', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'A'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(63)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(64)}@sha256:${'b'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: ${IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: ', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: null, dependencyAdditions: 0, dependencyDeletions: 0, dependencyChanges: 0 },
@@ -1572,7 +1585,7 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
   }
 
   for (const dependencyPatch of [
-    '+ image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z',
+    `+ image: ${tagAndDigest}`,
     `+ image: ghcr.io/a/image@sha256:${'a'.repeat(64)}`,
   ]) {
     assert.equal(
