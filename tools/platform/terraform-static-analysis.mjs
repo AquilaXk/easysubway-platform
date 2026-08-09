@@ -237,33 +237,42 @@ function parseCheckovSarif(path) {
   for (const result of run.results) readLocation(result);
   return parsed;
 }
-function failedCheckovRecords(path) {
-  const { value } = readJson(path);
+function oneCheckovReport(value) {
   const reports = Array.isArray(value) ? value : [value];
   if (reports.length !== 1 || !reports[0] || typeof reports[0] !== "object") fail("Checkov JSON must contain exactly one Terraform report or clean summary");
-  if (JSON.stringify(Object.keys(reports[0])) === JSON.stringify(cleanCheckovSummaryKeys)) {
-    exactKeys(reports[0], cleanCheckovSummaryKeys, "Checkov clean summary");
-    if (["passed", "failed", "skipped", "parsing_errors", "resource_count"].some((key) => reports[0][key] !== 0) || reports[0].checkov_version !== "3.3.9") fail("Checkov clean summary must contain only zero counts and pinned version");
-    return { records: [], cleanSummary: true };
-  }
-  exactKeys(reports[0], ["check_type", "results", "summary", "url"], "Checkov JSON report");
-  if (reports[0].check_type !== "terraform" || !reports[0].results || typeof reports[0].results !== "object") fail("Checkov JSON must contain exactly one Terraform report");
-  const results = reports[0].results;
+  return reports[0];
+}
+function isCleanCheckovSummary(report) {
+  if (JSON.stringify(Object.keys(report)) !== JSON.stringify(cleanCheckovSummaryKeys)) return false;
+  exactKeys(report, cleanCheckovSummaryKeys, "Checkov clean summary");
+  if (["passed", "failed", "skipped", "parsing_errors", "resource_count"].some((key) => report[key] !== 0) || report.checkov_version !== "3.3.9") fail("Checkov clean summary must contain only zero counts and pinned version");
+  return true;
+}
+function checkovReportResults(report) {
+  exactKeys(report, ["check_type", "results", "summary", "url"], "Checkov JSON report");
+  if (report.check_type !== "terraform" || !report.results || typeof report.results !== "object") fail("Checkov JSON must contain exactly one Terraform report");
+  const results = report.results;
   exactKeys(results, ["passed_checks", "failed_checks", "skipped_checks", "parsing_errors"], "Checkov JSON results");
   for (const key of ["passed_checks", "failed_checks", "skipped_checks", "parsing_errors"]) if (!Array.isArray(results[key])) fail(`Checkov JSON ${key} must be an array`);
   for (const record of results.passed_checks) if (!record || typeof record !== "object" || Array.isArray(record) || record.check_result?.result !== "PASSED") fail("Checkov passed record is invalid");
   if (results.skipped_checks.length !== 0 || results.parsing_errors.length !== 0) fail("Checkov skipped or parser evidence is terminal");
-  exactKeys(reports[0].summary, cleanCheckovSummaryKeys, "Checkov report summary");
-  if (reports[0].summary.passed !== results.passed_checks.length || reports[0].summary.failed !== results.failed_checks.length || reports[0].summary.skipped !== results.skipped_checks.length || reports[0].summary.parsing_errors !== results.parsing_errors.length || !Number.isInteger(reports[0].summary.resource_count) || reports[0].summary.resource_count < 0 || reports[0].summary.checkov_version !== "3.3.9") fail("Checkov report summary does not match results");
-  if (reports[0].url !== null && typeof reports[0].url !== "string") fail("Checkov report url is invalid");
-  return { records: results.failed_checks.map((record) => {
-    if (!record || typeof record.check_id !== "string" || !record.check_id || record.check_result?.result !== "FAILED") fail("Checkov failed record is invalid");
-    const path = normalizeCheckovJsonPath(record.file_path);
-    const hasResourceAddress = typeof record.resource_address === "string" && record.resource_address.length > 0;
-    const canUseResource = (record.resource_address === undefined || record.resource_address === null) && typeof record.resource === "string" && record.resource.length > 0;
-    if (!hasResourceAddress && !canUseResource) fail("Checkov failed record lacks resource identity");
-    return { ruleId: record.check_id, path, resourceAddress: hasResourceAddress ? record.resource_address : record.resource, resourceIdentitySource: hasResourceAddress ? "RESOURCE_ADDRESS" : "RESOURCE" };
-  }), cleanSummary: false };
+  exactKeys(report.summary, cleanCheckovSummaryKeys, "Checkov report summary");
+  if (report.summary.passed !== results.passed_checks.length || report.summary.failed !== results.failed_checks.length || report.summary.skipped !== results.skipped_checks.length || report.summary.parsing_errors !== results.parsing_errors.length || !Number.isInteger(report.summary.resource_count) || report.summary.resource_count < 0 || report.summary.checkov_version !== "3.3.9") fail("Checkov report summary does not match results");
+  if (report.url !== null && typeof report.url !== "string") fail("Checkov report url is invalid");
+  return results;
+}
+function checkovFailedRecord(record) {
+  if (!record || typeof record.check_id !== "string" || !record.check_id || record.check_result?.result !== "FAILED") fail("Checkov failed record is invalid");
+  const path = normalizeCheckovJsonPath(record.file_path);
+  const hasResourceAddress = typeof record.resource_address === "string" && record.resource_address.length > 0;
+  const canUseResource = (record.resource_address === undefined || record.resource_address === null) && typeof record.resource === "string" && record.resource.length > 0;
+  if (!hasResourceAddress && !canUseResource) fail("Checkov failed record lacks resource identity");
+  return { ruleId: record.check_id, path, resourceAddress: hasResourceAddress ? record.resource_address : record.resource, resourceIdentitySource: hasResourceAddress ? "RESOURCE_ADDRESS" : "RESOURCE" };
+}
+function failedCheckovRecords(path) {
+  const report = oneCheckovReport(readJson(path).value);
+  if (isCleanCheckovSummary(report)) return { records: [], cleanSummary: true };
+  return { records: checkovReportResults(report).failed_checks.map(checkovFailedRecord), cleanSummary: false };
 }
 function checkovFindings(rawSarifPath, rawJsonPath, root) {
   const sarif = parseCheckovSarif(rawSarifPath).sarif;

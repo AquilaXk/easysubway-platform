@@ -119,6 +119,8 @@ test("Platform CI keeps Terraform static analysis inventory-driven and isolated"
   assert.match(workflow, /--download-external-modules false/);
   assert.match(workflow, /--skip-download/);
   assert.match(workflow, /--config=\/repo\/\.tflint\.hcl --chdir="\$\{root_path\}" --call-module-type=local --format=sarif --no-color/);
+  assert.match(workflow, /-w "\/reports\/fixtures\/\$\{fixture_name\}"[\s\\]+-e TFLINT_DISABLE_VERSION_CHECK=1[\s\\]+ghcr\.io\/terraform-linters\/tflint@sha256:[0-9a-f]+[\s\\]+--config=\/repo\/\.tflint\.hcl --chdir=\. --call-module-type=local --format=sarif --no-color/);
+  for (const forbiddenFixturePath of ["../reports/fixtures", "--chdir=\"/reports/fixtures/"]) assert.equal(workflow.includes(forbiddenFixturePath), false, `${forbiddenFixturePath} must not produce a traversal SARIF URI`);
   assert.equal((workflow.match(/record-scan (?:TFLINT|CHECKOV) "\$\{root_id\}" "\$\{scanner_exit\}"/g) ?? []).length, 2);
   assert.equal((workflow.match(/record-fixture (?:TFLINT|CHECKOV) "\$\{fixture_id\}" "\$\{scanner_exit\}"/g) ?? []).length, 2);
   assert.equal((workflow.match(/record-tool-check (?:TFLINT|CHECKOV) "\$\{version_exit\}"/g) ?? []).length, 2);

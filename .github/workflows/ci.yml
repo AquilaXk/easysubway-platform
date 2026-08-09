@@ -124,10 +124,10 @@ jobs:
             mkdir -p "${fixture_dir}"
             cp "tools/platform/fixtures/terraform-static-analysis/${fixture_name}" "${fixture_dir}/main.tf"
             set +e
-            docker run --pull=never --rm --network none --read-only --tmpfs /tmp -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w /repo \
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/reports/fixtures/${fixture_name}" \
               -e TFLINT_DISABLE_VERSION_CHECK=1 \
               ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f \
-              --config=/repo/.tflint.hcl --chdir="/reports/fixtures/${fixture_name}" --call-module-type=local --format=sarif --no-color > "${report_dir}/fixture-${fixture_id}.sarif"
+              --config=/repo/.tflint.hcl --chdir=. --call-module-type=local --format=sarif --no-color > "${report_dir}/fixture-${fixture_id}.sarif"
             scanner_exit=$?
             set -e
             node tools/platform/terraform-static-analysis.mjs record-fixture TFLINT "${fixture_id}" "${scanner_exit}"
