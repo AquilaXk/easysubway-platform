@@ -43,6 +43,8 @@ jobs:
           node --test tools/platform/no-mutable-contract-source.test.mjs
           node --test tools/platform/validate-deployment-input.test.mjs
           node --test tools/platform/validate-terraform-root-inventory.test.mjs
+          node --test tools/platform/terraform-static-analysis.test.mjs
+          node tools/platform/terraform-static-analysis.mjs validate-policy
           node --test tools/platform/journey-release-contract.test.mjs
           node --test tools/platform/stage-journey-release-tuple.test.mjs
           node --test tools/platform/read-staged-journey-release-tuple.test.mjs
@@ -82,3 +84,118 @@ jobs:
           terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color
           terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color
           git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl
+
+      - name: Pull pinned Terraform static-analysis scanner images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f
+          docker pull bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144
+
+      - name: Scan Terraform roots with pinned TFLint
+        id: tflint
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/terraform-static-analysis"
+          mkdir -p "${report_dir}"
+          set +e
+          docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+            -e TFLINT_DISABLE_VERSION_CHECK=1 \
+            ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f --version > "${report_dir}/tflint-version.stdout" 2> "${report_dir}/tflint-version.stderr"
+          version_exit=$?
+          set -e
+          node tools/platform/terraform-static-analysis.mjs record-tool-check TFLINT "${version_exit}"
+          while IFS=$'\t' read -r root_id root_path; do
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+              -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w /repo \
+              -e TFLINT_DISABLE_VERSION_CHECK=1 \
+              ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f \
+              --config=/repo/.tflint.hcl --chdir="${root_path}" --call-module-type=local --format=sarif --no-color \
+              > "${report_dir}/tflint-${root_id}.sarif"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-scan TFLINT "${root_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-roots)
+          while IFS= read -r fixture_id; do
+            fixture_name="${fixture_id}.tf.fixture"
+            fixture_dir="${report_dir}/fixtures/${fixture_name}"
+            mkdir -p "${fixture_dir}"
+            cp "tools/platform/fixtures/terraform-static-analysis/${fixture_name}" "${fixture_dir}/main.tf"
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/reports/fixtures/${fixture_name}" \
+              -e TFLINT_DISABLE_VERSION_CHECK=1 \
+              ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f \
+              --config=/repo/.tflint.hcl --chdir=. --call-module-type=local --format=sarif --no-color > "${report_dir}/fixture-${fixture_id}.sarif"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-fixture TFLINT "${fixture_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-fixtures TFLINT)
+
+      - name: Scan Terraform roots with pinned Checkov
+        id: checkov
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/terraform-static-analysis"
+          mkdir -p "${report_dir}"
+          set +e
+          docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+            bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144 --version > "${report_dir}/checkov-version.stdout" 2> "${report_dir}/checkov-version.stderr"
+          version_exit=$?
+          set -e
+          node tools/platform/terraform-static-analysis.mjs record-tool-check CHECKOV "${version_exit}"
+          while IFS=$'\t' read -r root_id root_path; do
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+              -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/repo/${root_path}" \
+              bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144 \
+              --framework terraform --directory . --download-external-modules false --skip-download \
+              -o sarif -o json --output-file-path "/reports/checkov-${root_id}.sarif,/reports/checkov-${root_id}.json"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-scan CHECKOV "${root_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-roots)
+          while IFS= read -r fixture_id; do
+            fixture_name="${fixture_id}.tf.fixture"
+            fixture_dir="${report_dir}/fixtures/${fixture_name}"
+            mkdir -p "${fixture_dir}"
+            cp "tools/platform/fixtures/terraform-static-analysis/${fixture_name}" "${fixture_dir}/main.tf"
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/reports/fixtures/${fixture_name}" \
+              bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144 \
+              --framework terraform --directory . --download-external-modules false --skip-download \
+              -o sarif -o json --output-file-path "/reports/fixture-${fixture_id}.sarif,/reports/fixture-${fixture_id}.json"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-fixture CHECKOV "${fixture_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-fixtures CHECKOV)
+
+      - name: Normalize current Terraform scanner reports
+        if: always()
+        shell: bash
+        run: |
+          node tools/platform/terraform-static-analysis.mjs analyze
+          cat "${RUNNER_TEMP}/terraform-static-analysis/terraform-static-analysis-summary.md" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Enforce Terraform static analysis verdict
+        if: always()
+        env:
+          TFLINT_OUTCOME: ${{ steps.tflint.outcome }}
+          CHECKOV_OUTCOME: ${{ steps.checkov.outcome }}
+        run: node tools/platform/terraform-static-analysis.mjs enforce
+
+      - name: Cleanup verified Terraform static analysis internals
+        if: success()
+        run: node tools/platform/terraform-static-analysis.mjs cleanup
+
+      - name: Upload Terraform static analysis report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: terraform-static-analysis-${{ github.sha }}
+          path: ${{ runner.temp }}/terraform-static-analysis
+          if-no-files-found: error
+          retention-days: 14

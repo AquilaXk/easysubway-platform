@@ -9,6 +9,8 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const inventoryPath = resolve(root, "tools/platform/terraform-root-inventory.json");
 const workflowPath = resolve(root, ".github/workflows/ci.yml");
 const gitignorePath = resolve(root, ".gitignore");
+const tflintConfigPath = resolve(root, ".tflint.hcl");
+const staticAnalysisRunnerPath = resolve(root, "tools/platform/terraform-static-analysis.mjs");
 
 test("Terraform candidate inventory is closed, exact, and tracked", () => {
   const inventoryBytes = readFileSync(inventoryPath, "utf8");
@@ -97,6 +99,54 @@ test("Platform CI validates each inventory root using readonly backendless Terra
   assert.equal(indexes.every((index, position) => position === 0 || indexes[position - 1] < index), true);
   assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color/g) ?? []).length, 1);
   assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex validate -no-color/g) ?? []).length, 1);
+});
+
+test("Platform CI keeps Terraform static analysis inventory-driven and isolated", () => {
+  const workflow = readFileSync(workflowPath, "utf8");
+  const config = readFileSync(tflintConfigPath, "utf8");
+  assert.equal(config, `tflint {\n  required_version = "= 0.64.0"\n}\n\nconfig {\n  call_module_type = "local"\n  force            = false\n}\n\nplugin "terraform" {\n  enabled = true\n  preset  = "recommended"\n}\n`);
+  assert.match(workflow, /node --test tools\/platform\/terraform-static-analysis\.test\.mjs/);
+  assert.match(workflow, /node tools\/platform\/terraform-static-analysis\.mjs validate-policy/);
+  assert.equal((workflow.match(/node tools\/platform\/terraform-static-analysis\.mjs list-roots/g) ?? []).length, 2);
+  assert.equal((workflow.match(/node tools\/platform\/terraform-static-analysis\.mjs list-fixtures (?:TFLINT|CHECKOV)/g) ?? []).length, 2);
+  for (const image of [
+    "ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f",
+    "bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144",
+  ]) assert.match(workflow, new RegExp(image));
+  assert.equal((workflow.match(/docker pull (?:ghcr\.io\/terraform-linters\/tflint|bridgecrew\/checkov)@sha256:/g) ?? []).length, 2);
+  assert.equal((workflow.match(/docker run --pull=never --rm --network none --read-only --tmpfs \/tmp/g) ?? []).length, 6);
+  assert.equal((workflow.match(/--network none --read-only --tmpfs \/tmp/g) ?? []).length, 6);
+  assert.match(workflow, /--download-external-modules false/);
+  assert.match(workflow, /--skip-download/);
+  assert.match(workflow, /--config=\/repo\/\.tflint\.hcl --chdir="\$\{root_path\}" --call-module-type=local --format=sarif --no-color/);
+  assert.match(workflow, /-w "\/reports\/fixtures\/\$\{fixture_name\}"[\s\\]+-e TFLINT_DISABLE_VERSION_CHECK=1[\s\\]+ghcr\.io\/terraform-linters\/tflint@sha256:[0-9a-f]+[\s\\]+--config=\/repo\/\.tflint\.hcl --chdir=\. --call-module-type=local --format=sarif --no-color/);
+  for (const forbiddenFixturePath of ["../reports/fixtures", "--chdir=\"/reports/fixtures/"]) assert.equal(workflow.includes(forbiddenFixturePath), false, `${forbiddenFixturePath} must not produce a traversal SARIF URI`);
+  assert.equal((workflow.match(/record-scan (?:TFLINT|CHECKOV) "\$\{root_id\}" "\$\{scanner_exit\}"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/record-fixture (?:TFLINT|CHECKOV) "\$\{fixture_id\}" "\$\{scanner_exit\}"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/record-tool-check (?:TFLINT|CHECKOV) "\$\{version_exit\}"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/TFLINT_DISABLE_VERSION_CHECK=1/g) ?? []).length, 3);
+  assert.match(workflow, /record-tool-check TFLINT "\$\{version_exit\}"/);
+  assert.match(workflow, /record-tool-check CHECKOV "\$\{version_exit\}"/);
+  assert.match(workflow, /--version > "\$\{report_dir\}\/tflint-version\.stdout" 2> "\$\{report_dir\}\/tflint-version\.stderr"/);
+  assert.match(workflow, /--version > "\$\{report_dir\}\/checkov-version\.stdout" 2> "\$\{report_dir\}\/checkov-version\.stderr"/);
+  assert.match(workflow, /-o sarif -o json --output-file-path/);
+  assert.match(workflow, /-w "\/repo\/\$\{root_path\}"[\s\\]+bridgecrew\/checkov@[\s\S]*?--framework terraform --directory \./);
+  assert.match(workflow, /-w "\/reports\/fixtures\/\$\{fixture_name\}"[\s\\]+bridgecrew\/checkov@[\s\S]*?--framework terraform --directory \./);
+  assert.match(workflow, /node tools\/platform\/terraform-static-analysis\.mjs analyze\n\s+cat "\$\{RUNNER_TEMP\}\/terraform-static-analysis\/terraform-static-analysis-summary\.md" >> "\$\{GITHUB_STEP_SUMMARY\}"/);
+  for (const command of ["record-tool-check", "record-scan", "record-fixture", "analyze", "enforce", "cleanup"]) assert.equal(new RegExp(`node tools/platform/terraform-static-analysis\\.mjs ${command}[^\\n]*(?:report_dir|root_path|fixture_name|rawSarifPath|structuredJsonPath)`).test(workflow), false, `${command} must not receive a filesystem path`);
+  const runner = readFileSync(staticAnalysisRunnerPath, "utf8");
+  assert.match(runner, /function productionReportDirectory\(\)/);
+  assert.equal(runner.includes("GITHUB_STEP_SUMMARY"), false);
+  const productionDirectorySource = runner.match(/function productionReportDirectory\(\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(productionDirectorySource);
+  assert.match(productionDirectorySource, /RUNNER_TEMP/);
+  assert.match(productionDirectorySource, /terraform-static-analysis/);
+  assert.equal(productionDirectorySource.includes("tmpdir"), false);
+  assert.equal(workflow.includes("combine-sarif"), false);
+  assert.equal((workflow.match(/set \+e/g) ?? []).length, 6);
+  assert.match(workflow, /name: terraform-static-analysis-\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /name: Enforce Terraform static analysis verdict/);
+  for (const forbidden of ["continue-on-error", "--skip-check", "--soft-fail", "--init", "--force", "trivy", "terraform-linters/tflint:latest", "bridgecrew/checkov:latest", "exit 0"]) assert.equal(workflow.includes(forbidden), false, `${forbidden} must remain forbidden`);
 });
 
 function trackedTerraformDirectories() {
