@@ -225,6 +225,8 @@ test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정�
     'read_pages "repos/${repo}/pulls/${pr}/reviews"',
     'read_pages "repos/${repo}/issues/${pr}/comments"',
     'read_pages "repos/${repo}/pulls/${pr}/commits"',
+    'read_pages "repos/${repo}/pulls/${pr}/files"',
+    'gh api "repos/${repo}/pulls/${pr}"',
     'read_pages "repos/${repo}/commits/${head}/check-runs"',
     'read_pages "repos/${repo}/commits/${head}/statuses"',
   ]) {
@@ -1164,6 +1166,11 @@ const makeRunQueue =
   writeFileSync(join(dir, 'rates'), `${remaining.join('\n')}\n`);
   for (const pr of prs) {
     const head = `head${pr.number}`;
+    const dependabot = {
+      login: pr.dependabotLogin ?? 'dependabot[bot]',
+      id: pr.dependabotId ?? 49699333,
+      type: pr.dependabotType ?? 'Bot',
+    };
     writeFileSync(
       join(dir, `pr-${pr.number}.json`),
       JSON.stringify({
@@ -1215,7 +1222,39 @@ const makeRunQueue =
     );
     writeFileSync(
       join(dir, `commits-${pr.number}.json`),
-      JSON.stringify((pr.commitHistory ?? [head]).map((sha) => ({ sha }))),
+      JSON.stringify(
+        Array.from(
+          { length: pr.dependencyCommitCount ?? 1 },
+          (_, index) => ({
+            sha: pr.commitHistory?.[index] ?? (index === 0 ? head : `previous-${index}`),
+            author: pr.dependabotCompose ? dependabot : { login: 'owner', id: 1, type: 'User' },
+          }),
+        ),
+      ),
+    );
+    writeFileSync(
+      join(dir, `rest-${pr.number}.json`),
+      JSON.stringify({
+        head: { sha: pr.dependencyHead ?? head },
+        user: pr.dependabotCompose ? dependabot : { login: 'owner', id: 1, type: 'User' },
+      }),
+    );
+    if (pr.restReadFails) writeFileSync(join(dir, `rest-fail-${pr.number}`), '1');
+    writeFileSync(
+      join(dir, `files-${pr.number}.json`),
+      pr.filesMalformed ? '{' : JSON.stringify(pr.filesOverflow
+        ? Array.from({ length: 100 }, () => ({ filename: 'infra/docker-compose.yml' }))
+        : [
+        {
+          filename: pr.dependencyFile ?? 'infra/docker-compose.yml',
+          patch: Object.hasOwn(pr, 'dependencyPatch')
+            ? pr.dependencyPatch
+            : '-    image: ghcr.io/a/image:1.0.0\n+    image: ghcr.io/a/image:1.0.1',
+          additions: pr.dependencyAdditions ?? 1,
+          deletions: pr.dependencyDeletions ?? 1,
+          changes: pr.dependencyChanges ?? 2,
+        },
+      ]),
     );
     writeFileSync(
       join(dir, `threads-${pr.number}.json`),
@@ -1275,9 +1314,11 @@ const makeRunQueue =
     `    "pr list"*) printf '%s\\n' ${JSON.stringify(JSON.stringify(prs.map((p) => p.number)))} ;;`,
     '    "pr view "*"--json headRefOid --jq .headRefOid") set -- $all; jq -r .headRefOid "$FIX/pr-$3.json" ;;',
     '    "pr view "*) set -- $all; cat "$FIX/pr-$3.json" ;;',
+    '    *repos/*/pulls/*/files*) n="${all#*pulls/}"; n="${n%%/files*}"; cat "$FIX/files-$n.json" ;;',
     '    *issues/*/comments*) n="${all#*issues/}"; n="${n%%/comments*}"; cat "$FIX/comments-$n.json" ;;',
     '    *pulls/*/commits*) n="${all#*pulls/}"; n="${n%%/commits*}"; cat "$FIX/commits-$n.json" ;;',
     '    *pulls/*/reviews*) n="${all#*pulls/}"; n="${n%%/reviews*}"; cat "$FIX/reviews-$n.json" ;;',
+    '    *repos/*/pulls/*) n="${all#*pulls/}"; n="${n%% *}"; [ -f "$FIX/rest-fail-$n" ] && return 1; cat "$FIX/rest-$n.json" ;;',
     '    *graphql*) n="${all#*number=}"; n="${n%% *}"; cat "$FIX/threads-$n.json" ;;',
     '    *check-runs*) h="${all#*commits/}"; h="${h%%/check-runs*}"; cat "$FIX/checks-$h.json" ;;',
     '    *statuses*) h="${all#*commits/}"; h="${h%%/statuses*}"; cat "$FIX/statuses-$h.json" ;;',
@@ -1451,6 +1492,86 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
   assert.equal(allBlocked.labelRemoved, true);
 });
 
+test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과한다', async () => {
+  const workflow = await readWorkflow();
+  const queueLoop = workflow.match(
+    /# queue-loop-begin\n([\s\S]*?)\n\s+# queue-loop-end/,
+  )?.[1];
+  assert.ok(queueLoop, 'queue loop must stay testable');
+  const runQueue = makeRunQueue(queueLoop, budgetConstantsOf(workflow));
+
+  const eligible = runQueue([
+    { number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true },
+  ]);
+  assert.equal(eligible.mergedPr, 41, 'exact dependency-only candidate must bypass only Review and marker');
+
+  for (const override of [
+    { dependabotLogin: 'dependabot-preview[bot]' },
+    { dependabotId: 1 },
+    { dependabotType: 'User' },
+    { dependencyCommitCount: 2 },
+    { dependencyHead: 'stale' },
+    { dependencyFile: '.github/workflows/ci.yml' },
+    { dependencyPatch: '+ environment:\n+   FOO: bar' },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: latest', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ${EASYSUBWAY_BACKEND_IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: "ghcr.io/a/image:latest"', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest # comment', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ${IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: null, dependencyAdditions: 0, dependencyDeletions: 0, dependencyChanges: 0 },
+    { dependencyChanges: 1 },
+    { dependencyAdditions: '1' },
+  ]) {
+    const rejected = runQueue([
+      { number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true, ...override },
+    ]);
+    assert.equal(rejected.mergedPr, null, `invalid dependency candidate must fail closed: ${JSON.stringify(override)}`);
+  }
+
+  for (const dependencyPatch of [
+    '+ image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z',
+    `+ image: ghcr.io/a/image@sha256:${'a'.repeat(64)}`,
+  ]) {
+    assert.equal(
+      runQueue([{
+        number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true,
+        dependencyPatch, dependencyDeletions: 0, dependencyChanges: 1,
+      }]).mergedPr,
+      41,
+      `pinned literal locator must be admitted: ${dependencyPatch}`,
+    );
+  }
+
+  for (const mergeStateStatus of ['HAS_HOOKS', 'UNSTABLE', 'BLOCKED']) {
+    assert.equal(
+      runQueue([{ number: 41, mergeStateStatus, reviewed: false, authorized: false, dependabotCompose: true }]).mergedPr,
+      null,
+      `Review-less dependency exemption must require CLEAN, got ${mergeStateStatus}`,
+    );
+  }
+
+  for (const failure of ['restReadFails', 'filesOverflow', 'filesMalformed']) {
+    assert.equal(
+      runQueue([{ number: 41, mergeStateStatus: 'CLEAN', [failure]: true }]).mergedPr,
+      41,
+      `ordinary reviewed PR must keep the Review path after ${failure}`,
+    );
+    assert.equal(
+      runQueue([{ number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true, [failure]: true }]).mergedPr,
+      null,
+      `Review-less dependency candidate must fail closed after ${failure}`,
+    );
+  }
+
+  assert.match(workflow, /# dependabot-compose-exception-begin/);
+  assert.match(workflow, /dependabot\[bot\]/);
+  assert.match(workflow, /49699333/);
+  assert.match(workflow, /infra\/docker-compose\.yml/);
+  assert.match(workflow, /EASYSUBWAY_BACKEND_IMAGE/);
+});
+
 test('후보 창은 API 지분·timeout·실측 큐 깊이 세 기준으로 유도되고 모든 후보에 도달한다', async () => {
   const workflow = await readWorkflow();
 
@@ -1536,9 +1657,9 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   // 남는다. fixed_cost 16은 label marker, PR-visible fail-closed와 API 응답 변동을 위한 보수적 여유다.
   assert.equal(reserve, 200, 'shared-limit reserve must stay pinned');
   assert.equal(fixedCost, 16);
-  // 후보당 청구는 호출 7회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
-  // (pr view 1 + reviewThreads 1 + REST 5종 * 3페이지). `--paginate`는 쓰지 않는다.
-  assert.equal(perCandidate, 17, 'per-candidate charge must match the page-capped reads');
+  // 후보당 청구는 호출 9회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
+  // (pr view 1 + reviewThreads 1 + REST PR 1 + REST 6종 * 3페이지). `--paginate`는 쓰지 않는다.
+  assert.equal(perCandidate, 21, 'per-candidate charge must match the page-capped reads');
 
   // 응답 payload를 주고 워크플로의 jq 질의를 실제 jq로 적용해 `gh --jq`를 그대로 흉내낸다.
   const runBudget = (stub) =>
@@ -1567,10 +1688,10 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   for (const [remaining, expected] of [
     [5000, 3],
     [1000, 3],
-    [269, 3],
-    [268, 3],
-    [251, 2],
-    [234, 1],
+    [279, 3],
+    [278, 2],
+    [257, 1],
+    [237, 1],
   ]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block failed at remaining=${remaining}: ${result.stderr}`);
@@ -1589,8 +1710,8 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   }
 
   // 두 버킷 값이 다르면 작은 쪽이 창을 정한다.
-  assert.equal(runPayload(buckets(5000, 251)).stdout.trim(), 'window=2');
-  assert.equal(runPayload(buckets(251, 5000)).stdout.trim(), 'window=2');
+  assert.equal(runPayload(buckets(5000, 251)).stdout.trim(), 'window=1');
+  assert.equal(runPayload(buckets(251, 5000)).stdout.trim(), 'window=1');
 
   // 예약분에 닿으면 큐만 건너뛴다. 실행을 실패시키지 않는다 — 실패로 남기면 그 check가
   // 다음 판정 입력을 오염시킨다.

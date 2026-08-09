@@ -120,16 +120,16 @@ jobs:
           #
           #  - API 예산 지분. GITHUB_TOKEN 한도는 저장소당 시간당 1,000회이고 이 저장소의
           #    다른 워크플로와 공유한다. 실행당 청구는 ruleset 1 + gh pr list 1 + 고정 비용
-          #    16 + 후보당 17 * window_max이고, window_max=3이면 69회로 한도의 6.9%다. 이
+          #    16 + 후보당 21 * window_max이고, window_max=3이면 81회로 한도의 8.1%다. 이
           #    저장소에는 큐 밖에서 GITHUB_TOKEN REST를 상시로 쓰는 워크플로가 없다 —
           #    ci.yml은 raw.githubusercontent와 registry만 받고 API를 부르지 않으며, cd.yml과
           #    sensitive-backup-retention.yml은 운영자 dispatch·schedule 전용이다. 그래서
           #    형제 저장소 data(5.0%)보다는 넓게, 그러나 한 실행이 한도를 독점하지 않는
-          #    8% 선 아래로 잡았다. 후보 한 건당 호출은 7회지만 요청은 그보다 많을 수 있다.
+          #    8% 선 아래로 잡았다. 후보 한 건당 호출은 9회지만 요청은 그보다 많을 수 있다.
           #    `gh pr view --json`(GraphQL)과 reviewThreads(GraphQL)는 페이지네이션이 없고
-          #    (reviewThreads는 first: 100 + hasNextPage fail closed), reviews·comments·commits·
-          #    check-runs·statuses(REST)는 페이지 상한 3(아래 paginated-read)까지 읽는다. 그래서 후보당
-          #    청구는 17회다 — pr view 1 + reviewThreads 1 + REST 5종 * 3페이지. `--paginate`를
+          #    (reviewThreads는 first: 100 + hasNextPage fail closed), REST PR 1회와 files·reviews·
+          #    comments·commits·check-runs·statuses(REST)는 페이지 상한 3(아래 paginated-read)까지 읽는다.
+          #    그래서 후보당 청구는 21회다 — pr view 1 + reviewThreads 1 + REST PR 1 + REST 6종 * 3페이지. `--paginate`를
           #    쓰지 않는 이유가 이것이다: 페이지 수에 상한이 없으면 이력이 유난히 긴 후보
           #    하나가 예산 모델을 통째로 넘긴다. 상한을 넘는 후보는 판정을 포기하고 건너뛴다.
           #    required context별 jq는 로컬 계산이라 요청을 쓰지 않는다. 후보 평가 밖의 고정
@@ -209,7 +209,7 @@ jobs:
           window_max=3
           reserve=200
           fixed_cost=16
-          per_candidate=17
+          per_candidate=21
           # 두 버킷이 모두 숫자일 때만 값을 낸다. 한쪽이 없거나 비정상인데 남은 하나로
           # 진행하면, 후보 평가가 실제로 소비하는 두 버킷 중 하나의 잔량을 모른 채 쓰는
           # 것이라 "모르는 예산은 쓰지 않는다"가 성립하지 않는다. 어느 쪽이든 비정상이면
@@ -246,7 +246,7 @@ jobs:
           # 페이지를 직접 돌며 상한을 둔다. `gh api --paginate`는 페이지 수에 상한이 없어
           # 이력이 유난히 긴 후보 하나가 위 예산 모델을 통째로 넘길 수 있다. 상한에 닿으면
           # 판정을 포기한다 — 모르는 이력 위에서 병합하지 않는다(fail closed). 상한 3이
-          # 후보당 청구 11회의 근거다.
+          # 후보당 청구 21회의 근거다.
           page_limit=3
           read_pages() {
             local endpoint="$1" page=1 body count pages='[]'
@@ -346,18 +346,71 @@ jobs:
             fi
             # merge-state-preflight-end
 
-            reviews="$(read_pages "repos/${repo}/pulls/${pr}/reviews")" || {
-              echo "PR #${pr}: review history exceeds the page budget; skipping."
-              continue
-            }
-            comments="$(read_pages "repos/${repo}/issues/${pr}/comments")" || {
-              echo "PR #${pr}: comment history exceeds the page budget; skipping."
-              continue
-            }
+            rest_pr=''
+            rest_pr_available=true
+            if ! rest_pr="$(gh api "repos/${repo}/pulls/${pr}")"; then
+              rest_pr_available=false
+            fi
+            files=''
+            files_available=true
+            if ! files="$(read_pages "repos/${repo}/pulls/${pr}/files")"; then
+              files_available=false
+            fi
             commits="$(read_pages "repos/${repo}/pulls/${pr}/commits")" || {
               echo "PR #${pr}: commit history exceeds the page budget; skipping."
               continue
             }
+            # dependabot-compose-exception-begin
+            # 정확히 구성된 Dependabot의 단일 Compose image locator patch만 Review/marker를
+            # 면제한다. API·페이지·patch 어느 하나라도 불완전하면 일반 Review 경로로 내려가
+            # fail closed한다. 이 분기는 thread/check/head/merge gate를 건너뛰지 않는다.
+            dependabot_compose=false
+            if [[ "${merge_state}" == "CLEAN" && "${rest_pr_available}" == true && "${files_available}" == true ]] &&
+              jq -s -e --arg head "${head}" '
+              .[0] as $pr |
+              .[1] as $files |
+              .[2] as $commits |
+              def dependabot:
+                .login == "dependabot[bot]" and .id == 49699333 and .type == "Bot";
+              def content_lines($patch):
+                $patch | split("\n") |
+                map(select((startswith("+") or startswith("-")) and
+                           (startswith("+++") | not) and (startswith("---") | not)));
+              ($pr.user | dependabot) and
+              $pr.head.sha == $head and
+              ($files | flatten) as $changed |
+              ($changed | length == 1 and .[0].filename == "infra/docker-compose.yml" and
+                (.[0]) as $file |
+                ($file.patch? | type == "string") and
+                ($file.patch | contains("\n...") | not) and
+                ($file.patch | contains("EASYSUBWAY_BACKEND_IMAGE") | not) and
+                (($file.additions | type == "number" and floor == . and . >= 0) and
+                 ($file.deletions | type == "number" and floor == . and . >= 0) and
+                 ($file.changes | type == "number" and floor == . and . >= 0) and
+                 $file.changes == ($file.additions + $file.deletions)) and
+                (content_lines($file.patch)) as $lines |
+                (($lines | map(select(startswith("+"))) | length) == $file.additions) and
+                (($lines | map(select(startswith("-"))) | length) == $file.deletions) and
+                ($lines | length > 0 and all(.[];
+                  (test("^[+-][[:space:]]*image:[[:space:]]*[A-Za-z0-9][A-Za-z0-9._-]*(?::[0-9]+)?(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._.-]*|@sha256:[a-f0-9]{64})[[:space:]]*$")) and
+                  ((test("(^|:)latest($|@)")) | not) and
+                  ((contains("EASYSUBWAY_BACKEND_IMAGE")) | not)))) and
+              ($commits | flatten) as $commit_set |
+              ($commit_set | length == 1 and .[0].sha == $head and (.[0].author | dependabot))
+            ' <(printf '%s\n' "${rest_pr}") <(printf '%s\n' "${files}") <(printf '%s\n' "${commits}") >/dev/null; then
+              dependabot_compose=true
+            fi
+            # dependabot-compose-exception-end
+
+            if [[ "${dependabot_compose}" != true ]]; then
+              reviews="$(read_pages "repos/${repo}/pulls/${pr}/reviews")" || {
+                echo "PR #${pr}: review history exceeds the page budget; skipping."
+                continue
+              }
+              comments="$(read_pages "repos/${repo}/issues/${pr}/comments")" || {
+                echo "PR #${pr}: comment history exceeds the page budget; skipping."
+                continue
+              }
             # review-state-filter-begin
             # frozen discovery는 라벨 이벤트에서 GitHub Actions가 기록한 exact-head marker가
             # 있을 때만 승계한다. 임의 author·다른 SHA·후속 push는 게이트를 통과하지 못한다.
@@ -412,6 +465,7 @@ jobs:
               continue
             fi
             # review-state-filter-end
+            fi
 
             # shellcheck disable=SC2016
             threads="$(gh api graphql -f owner="${owner}" -f name="${name}" -F number="${pr}" -f query='
