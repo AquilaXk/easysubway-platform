@@ -1514,6 +1514,8 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
     { dependencyFile: '.github/workflows/ci.yml' },
     { dependencyPatch: '+ environment:\n+   FOO: bar' },
     { dependencyPatch: '+ image: ghcr.io/a/image:latest', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest ', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest\t', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: latest', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: ${EASYSUBWAY_BACKEND_IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: "ghcr.io/a/image:latest"', dependencyDeletions: 0, dependencyChanges: 1 },
