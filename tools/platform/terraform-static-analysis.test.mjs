@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -94,6 +94,18 @@ test("pinned-output-shaped TFLint version and two-run SARIF fail closed", () => 
     write(directory, "tflint-root.sarif", tflintSarif("terraform_required_version", "versions.tf", { id: "other_rule" }));
     assert.throws(() => recordScan({ reportDirectory: directory, scanner: "TFLINT", rootId: "unknown-tflint-rule", rootPath, exit: 2, rawSarifPath: "tflint-root.sarif", structuredJsonPath: null }), /rule/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("report directory aliases and symlinks cannot become filesystem identities", () => {
+  const directory = mkdtempSync(join(tmpdir(), "terraform-static-analysis-path-"));
+  const alias = `${directory}-alias`;
+  try {
+    write(directory, "tflint-version.stdout", "TFLint version 0.64.0\n+ ruleset.terraform (0.15.0-bundled)\n");
+    write(directory, "tflint-version.stderr", "");
+    assert.throws(() => recordToolCheck({ reportDirectory: `${directory}/.`, scanner: "TFLINT", exit: 0, stdoutPath: "tflint-version.stdout", stderrPath: "tflint-version.stderr" }), /directory identity/);
+    symlinkSync(directory, alias);
+    assert.throws(() => recordToolCheck({ reportDirectory: alias, scanner: "TFLINT", exit: 0, stdoutPath: "tflint-version.stdout", stderrPath: "tflint-version.stderr" }), /real directory/);
+  } finally { rmSync(alias, { force: true }); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("Checkov joins JSON resource identity to exactly one normalized SARIF result", () => {
@@ -226,6 +238,14 @@ test("analysis generates normalized combined SARIF and binds raw/tool/fixture ev
     assert.equal(readFileSync(join(directory, "terraform-static-analysis-summary.md"), "utf8"), "tampered\n");
     write(directory, "terraform-static-analysis-summary.md", summaryBytes);
     enforce({ reportDirectory: directory, sourceSha: "a".repeat(40), tflintOutcome: "success", checkovOutcome: "success" });
+    const rawScanPath = join(directory, ".scanner-exits.json");
+    const rawScans = readFileSync(rawScanPath, "utf8");
+    const cleanupTargetMutation = JSON.parse(rawScans);
+    cleanupTargetMutation[0].rawSarifPath = "checkov.sarif";
+    write(directory, ".scanner-exits.json", `${JSON.stringify(cleanupTargetMutation)}\n`);
+    assert.throws(() => cleanup({ reportDirectory: directory }), /SARIF|raw evidence/);
+    assert.equal(readFileSync(join(directory, "checkov.sarif"), "utf8"), checkovBytes);
+    write(directory, ".scanner-exits.json", rawScans);
     write(directory, "tflint-version.stderr", "tampered\n");
     assert.throws(() => cleanup({ reportDirectory: directory }), /version probe|tool check|raw evidence/);
     write(directory, "tflint-version.stderr", "");

@@ -111,6 +111,8 @@ test("Platform CI keeps Terraform static analysis inventory-driven and isolated"
     "ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f",
     "bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144",
   ]) assert.match(workflow, new RegExp(image));
+  assert.equal((workflow.match(/docker pull (?:ghcr\.io\/terraform-linters\/tflint|bridgecrew\/checkov)@sha256:/g) ?? []).length, 2);
+  assert.equal((workflow.match(/docker run --pull=never --rm --network none --read-only --tmpfs \/tmp/g) ?? []).length, 6);
   assert.equal((workflow.match(/--network none --read-only --tmpfs \/tmp/g) ?? []).length, 6);
   assert.match(workflow, /--download-external-modules false/);
   assert.match(workflow, /--skip-download/);

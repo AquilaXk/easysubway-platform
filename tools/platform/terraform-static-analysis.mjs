@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const repository = fileURLToPath(new URL("../..", import.meta.url));
@@ -39,10 +40,28 @@ function readJson(path) {
   try { return { bytes, value: JSON.parse(bytes) }; } catch { fail(`${path} is malformed JSON`); }
 }
 function readRepositoryJson(relativePath) { return readCanonicalJson(resolve(repository, relativePath)); }
+function within(parent, candidate) { return candidate === parent || candidate.startsWith(`${parent}/`); }
+function runDirectory(reportDirectory) {
+  if (typeof reportDirectory !== "string" || !isAbsolute(reportDirectory) || reportDirectory !== resolve(reportDirectory)) fail("report directory identity is invalid");
+  const configuredRoot = process.env.RUNNER_TEMP ?? tmpdir();
+  const canonicalRoot = realpathSync(resolve(configuredRoot));
+  const metadata = lstatSync(reportDirectory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail("report directory must be a real directory");
+  const canonicalDirectory = realpathSync(reportDirectory);
+  if (!within(canonicalRoot, canonicalDirectory)) fail("report directory escapes the task-owned temp root");
+  return canonicalDirectory;
+}
 function internalPath(directory, path) {
   if (!safeRelativePath(path)) fail("internal report path is unsafe");
-  const absolute = resolve(directory, path);
-  if (!absolute.startsWith(`${resolve(directory)}/`)) fail("internal report path escapes the current run");
+  const canonicalDirectory = runDirectory(directory);
+  const absolute = resolve(canonicalDirectory, path);
+  if (!within(canonicalDirectory, absolute)) fail("internal report path escapes the current run");
+  const parent = realpathSync(dirname(absolute));
+  if (!within(canonicalDirectory, parent)) fail("internal report parent escapes the current run");
+  if (existsSync(absolute)) {
+    const metadata = lstatSync(absolute);
+    if (metadata.isSymbolicLink() || !within(canonicalDirectory, realpathSync(absolute))) fail("internal report path escapes the current run");
+  }
   return absolute;
 }
 function normalizeSarifPath(uri) {
@@ -65,10 +84,10 @@ function prefixedRootPath(rootPath, relativePath) {
 }
 function canonical(value) { return `${JSON.stringify(value, null, 2)}\n`; }
 function writeJson(path, value) { writeFileSync(path, canonical(value)); }
-function rawRecordsPath(directory) { return resolve(directory, ".scanner-exits.json"); }
-function fixtureRecordsPath(directory) { return resolve(directory, ".fixture-checks.json"); }
-function toolRecordsPath(directory) { return resolve(directory, ".tool-checks.json"); }
-function markerPath(directory) { return resolve(directory, ".enforced-success.json"); }
+function rawRecordsPath(directory) { return internalPath(directory, ".scanner-exits.json"); }
+function fixtureRecordsPath(directory) { return internalPath(directory, ".fixture-checks.json"); }
+function toolRecordsPath(directory) { return internalPath(directory, ".tool-checks.json"); }
+function markerPath(directory) { return internalPath(directory, ".enforced-success.json"); }
 function readRecords(path) { return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : []; }
 function expectedRoots(inventory) { return inventory.roots.flatMap(({ id, path }) => [["CHECKOV", id, path], ["TFLINT", id, path]]).sort((a, b) => compareCodepoint(JSON.stringify(a), JSON.stringify(b))); }
 function expectedFixtures() {
@@ -227,7 +246,7 @@ function validateScan(input) {
   return { scanner, rootId, rootPath, exit, rawSarifPath, rawSarifSha256: sha256(readFileSync(sarifPath, "utf8")), structuredJsonPath, structuredJsonSha256: jsonPath === null ? null : sha256(readFileSync(jsonPath, "utf8")) };
 }
 export function recordScan(input) {
-  const directory = resolve(input.reportDirectory);
+  const directory = runDirectory(input.reportDirectory);
   const record = validateScan({ ...input, reportDirectory: directory });
   const records = readRecords(rawRecordsPath(directory));
   if (records.some((item) => item.scanner === record.scanner && item.rootId === record.rootId)) fail(`duplicate ${record.scanner} record for ${record.rootId}`);
@@ -245,7 +264,7 @@ function validateFixture(input) {
   return { scanner, fixturePath, sourceSha256: sha256(readFileSync(resolve(repository, fixturePath))), expectedRuleId, exit, rawSarifPath, rawSarifSha256: sha256(readFileSync(sarifPath, "utf8")), structuredJsonPath, structuredJsonSha256: jsonPath === null ? null : sha256(readFileSync(jsonPath, "utf8")) };
 }
 export function recordFixture(input) {
-  const directory = resolve(input.reportDirectory);
+  const directory = runDirectory(input.reportDirectory);
   const record = validateFixture({ ...input, reportDirectory: directory });
   const records = readRecords(fixtureRecordsPath(directory));
   if (records.some((item) => item.fixturePath === record.fixturePath)) fail(`duplicate fixture record for ${record.fixturePath}`);
@@ -262,8 +281,8 @@ function validateToolCheck({ reportDirectory, scanner, exit, stdoutPath, stderrP
   return { scanner, version: scanner === "TFLINT" ? "0.64.0" : "3.3.9", ruleset: scanner === "TFLINT" ? "0.15.0-bundled" : null, exit, stdoutPath, stdoutSha256: sha256(output), stderrPath, stderrSha256: sha256(stderr) };
 }
 export function recordToolCheck(input) {
-  const record = validateToolCheck(input);
-  const { reportDirectory } = input;
+  const reportDirectory = runDirectory(input.reportDirectory);
+  const record = validateToolCheck({ ...input, reportDirectory });
   const records = readRecords(toolRecordsPath(reportDirectory));
   if (records.some((item) => item.scanner === record.scanner)) fail(`duplicate ${record.scanner} tool check`);
   writeJson(toolRecordsPath(reportDirectory), [...records, record]);
@@ -354,7 +373,7 @@ function buildResult({ reportDirectory, sourceSha }) {
   const { policy, bytes: policyBytes } = loadPolicy();
   const { inventory, bytes: inventoryBytes } = loadInventory();
   if (!/^[0-9a-f]{40}$/i.test(sourceSha ?? "")) fail("sourceSha must be an exact commit SHA");
-  const directory = resolve(reportDirectory);
+  const directory = runDirectory(reportDirectory);
   const { scans, fixtures, toolChecks } = readAndValidateRecords(directory, inventory);
   for (const scan of scans) scan.directory = directory;
   const tflint = combineSarifForScans(scans, "TFLINT");
@@ -386,19 +405,19 @@ function buildResult({ reportDirectory, sourceSha }) {
 }
 export function analyze(input) {
   const { result, directory, tflintBytes, checkovBytes, summaryBytes } = buildResult(input);
-  writeFileSync(resolve(directory, "tflint.sarif"), tflintBytes);
-  writeFileSync(resolve(directory, "checkov.sarif"), checkovBytes);
-  writeFileSync(resolve(directory, "terraform-static-analysis-result.json"), canonical(result));
-  writeFileSync(resolve(directory, "terraform-static-analysis-summary.md"), summaryBytes);
+  writeFileSync(internalPath(directory, "tflint.sarif"), tflintBytes);
+  writeFileSync(internalPath(directory, "checkov.sarif"), checkovBytes);
+  writeFileSync(internalPath(directory, "terraform-static-analysis-result.json"), canonical(result));
+  writeFileSync(internalPath(directory, "terraform-static-analysis-summary.md"), summaryBytes);
   return result;
 }
 function verifyFinalArtifacts(directory, { tflintBytes, checkovBytes, summaryBytes }) {
-  if (readFileSync(resolve(directory, "tflint.sarif"), "utf8") !== tflintBytes || readFileSync(resolve(directory, "checkov.sarif"), "utf8") !== checkovBytes) fail("final combined SARIF differs from analyzed evidence");
-  if (readFileSync(resolve(directory, "terraform-static-analysis-summary.md"), "utf8") !== summaryBytes) fail("final summary differs from analyzed evidence");
+  if (readFileSync(internalPath(directory, "tflint.sarif"), "utf8") !== tflintBytes || readFileSync(internalPath(directory, "checkov.sarif"), "utf8") !== checkovBytes) fail("final combined SARIF differs from analyzed evidence");
+  if (readFileSync(internalPath(directory, "terraform-static-analysis-summary.md"), "utf8") !== summaryBytes) fail("final summary differs from analyzed evidence");
 }
 export function enforce({ reportDirectory, sourceSha, tflintOutcome, checkovOutcome }) {
-  const directory = resolve(reportDirectory);
-  const resultPath = resolve(directory, "terraform-static-analysis-result.json");
+  const directory = runDirectory(reportDirectory);
+  const resultPath = internalPath(directory, "terraform-static-analysis-result.json");
   const { bytes: resultBytes, value: result } = readCanonicalJson(resultPath);
   exactKeys(result, resultKeys, "result");
   exactKeys(result.inventory, ["path", "sha256"], "result.inventory");
@@ -417,10 +436,10 @@ export function enforce({ reportDirectory, sourceSha, tflintOutcome, checkovOutc
   writeJson(markerPath(directory), { sourceSha, resultSha256: sha256(resultBytes) });
 }
 export function cleanup({ reportDirectory }) {
-  const directory = resolve(reportDirectory);
+  const directory = runDirectory(reportDirectory);
   const marker = readCanonicalJson(markerPath(directory)).value;
   exactKeys(marker, ["sourceSha", "resultSha256"], "cleanup marker");
-  const resultPath = resolve(directory, "terraform-static-analysis-result.json");
+  const resultPath = internalPath(directory, "terraform-static-analysis-result.json");
   const resultBytes = readFileSync(resultPath, "utf8");
   if (marker.resultSha256 !== sha256(resultBytes)) fail("cleanup marker does not bind the current result");
   const built = buildResult({ reportDirectory: directory, sourceSha: marker.sourceSha });
@@ -436,7 +455,8 @@ export function cleanup({ reportDirectory }) {
     unlinkSync(internalPath(directory, tool.stderrPath));
   }
   for (const hidden of [rawRecordsPath(directory), fixtureRecordsPath(directory), toolRecordsPath(directory), markerPath(directory)]) unlinkSync(hidden);
-  if (existsSync(resolve(directory, "fixtures"))) rmSync(resolve(directory, "fixtures"), { recursive: true, force: true });
+  const fixtureDirectory = internalPath(directory, "fixtures");
+  if (existsSync(fixtureDirectory)) rmSync(fixtureDirectory, { recursive: true, force: true });
   const expected = ["checkov.sarif", "terraform-static-analysis-result.json", "terraform-static-analysis-summary.md", "tflint.sarif"];
   if (JSON.stringify(readdirSync(directory).sort(compareCodepoint)) !== JSON.stringify(expected)) fail("cleanup did not leave the exact artifact set");
 }
@@ -459,7 +479,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     recordFixture({ reportDirectory, scanner, fixturePath, exit: Number(exit), expectedRuleId, rawSarifPath, structuredJsonPath: structuredJsonPath === "null" ? null : structuredJsonPath });
   } else if (command === "analyze") {
     const result = analyze({ reportDirectory: process.argv[3], sourceSha: process.env.GITHUB_SHA });
-    if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, readFileSync(resolve(process.argv[3], "terraform-static-analysis-summary.md"), "utf8"), { flag: "a" });
+    if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, readFileSync(internalPath(process.argv[3], "terraform-static-analysis-summary.md"), "utf8"), { flag: "a" });
     if (!result) fail("analysis did not produce a result");
   } else if (command === "enforce") enforce({ reportDirectory: process.argv[3], sourceSha: process.env.GITHUB_SHA, tflintOutcome: process.env.TFLINT_OUTCOME, checkovOutcome: process.env.CHECKOV_OUTCOME });
   else if (command === "cleanup") cleanup({ reportDirectory: process.argv[3] });
