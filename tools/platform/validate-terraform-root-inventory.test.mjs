@@ -1,0 +1,152 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { lstatSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, normalize, relative, resolve } from "node:path";
+import test from "node:test";
+
+const root = fileURLToPath(new URL("../..", import.meta.url));
+const inventoryPath = resolve(root, "tools/platform/terraform-root-inventory.json");
+const workflowPath = resolve(root, ".github/workflows/ci.yml");
+const gitignorePath = resolve(root, ".gitignore");
+
+test("Terraform candidate inventory is closed, exact, and tracked", () => {
+  const inventoryBytes = readFileSync(inventoryPath, "utf8");
+  assert.equal(inventoryBytes.includes("\r"), false);
+  assert.equal(inventoryBytes, `${inventoryBytes.trimEnd()}\n`);
+
+  const inventory = JSON.parse(inventoryBytes);
+  assert.deepEqual(Object.keys(inventory), ["schemaVersion", "artifactKind", "roots", "moduleOnlyExclusions"]);
+  assert.equal(inventory.schemaVersion, 1);
+  assert.equal(inventory.artifactKind, "terraform-root-inventory-v1");
+  assert.equal(Array.isArray(inventory.roots), true);
+  assert.equal(Array.isArray(inventory.moduleOnlyExclusions), true);
+  assert.deepEqual(inventory.moduleOnlyExclusions, []);
+  assert.equal(inventory.roots.length, 1);
+
+  const candidateDirectories = trackedTerraformDirectories();
+  const classified = new Set();
+  for (const entry of inventory.roots) {
+    assert.deepEqual(Object.keys(entry), [
+      "id",
+      "path",
+      "requiredTerraformVersion",
+      "providers",
+      "backendDisposition",
+      "executionPlatforms",
+      "ownerWorkflow",
+      "ownerJob",
+    ]);
+    assert.match(entry.id, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+    assert.equal(isAbsolute(entry.path), false);
+    assert.equal(normalize(entry.path), entry.path);
+    assert.equal(entry.path.includes(".."), false);
+    const absolutePath = resolve(root, entry.path);
+    assert.equal(relative(root, absolutePath).startsWith(".."), false);
+    assert.equal(lstatSync(absolutePath).isSymbolicLink(), false);
+    assert.equal(candidateDirectories.has(entry.path), true, `${entry.path} must contain tracked .tf files`);
+    assert.equal(classified.has(entry.path), false);
+    classified.add(entry.path);
+    assert.equal(entry.requiredTerraformVersion, ">= 1.6.0");
+    assert.deepEqual(entry.providers, [{ source: "registry.terraform.io/oracle/oci", constraint: "~> 8.8" }]);
+    assert.equal(entry.backendDisposition, "DISABLED_FOR_CI");
+    assert.deepEqual(entry.executionPlatforms, ["darwin_arm64", "linux_amd64"]);
+    assert.equal(entry.ownerWorkflow, ".github/workflows/ci.yml");
+    assert.equal(entry.ownerJob, "platform");
+    assertTerraformMetadataAndLock(entry);
+  }
+  assert.deepEqual([...classified].sort(), [...candidateDirectories].sort());
+  const paths = inventory.roots.map(({ path }) => path);
+  for (const path of paths) assert.equal(paths.some((other) => other !== path && path.startsWith(`${other}/`)), false);
+});
+
+test("Platform CI validates each inventory root using readonly backendless Terraform init", () => {
+  const workflow = readFileSync(workflowPath, "utf8");
+  const gitignore = readFileSync(gitignorePath, "utf8");
+  assert.match(workflow, /terraform_version: 1\.14\.6/);
+  assert.match(gitignore, /^\*\*\/\.terraform\.lock\.hcl$/m);
+  assert.deepEqual(
+    gitignore.split("\n").filter((line) => line.startsWith("!") && line.endsWith(".terraform.lock.hcl")),
+    ["!infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl"],
+  );
+  assert.match(workflow, /node --test tools\/platform\/validate-terraform-root-inventory\.test\.mjs/);
+  const terraformStep = workflow.match(/      - name: Validate Terraform roots\n        shell: bash\n        run: \|\n((?:          [^\n]*\n?)*)/);
+  assert.notEqual(terraformStep, null);
+  const terraformRun = terraformStep[1];
+  const terraformCommands = terraformRun
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /(?:^|\s)terraform(?:\s|$)/.test(line));
+  assert.deepEqual(terraformCommands, [
+    "terraform fmt -check -recursive infra/terraform",
+    "terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color",
+    "terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color",
+  ]);
+  const steps = [
+    "set -euo pipefail",
+    "tf_data_dir=\"${RUNNER_TEMP}/terraform-data/oci-always-free-a1-flex\"",
+    "rm -rf \"${tf_data_dir}\"",
+    "mkdir -p \"${tf_data_dir}\"",
+    "export TF_DATA_DIR=\"${tf_data_dir}\"",
+    "terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color",
+    "terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color",
+    "git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl",
+  ];
+  const indexes = steps.map((step) => terraformRun.indexOf(step));
+  assert.equal(indexes.every((index) => index >= 0), true);
+  assert.equal(indexes.every((index, position) => position === 0 || indexes[position - 1] < index), true);
+  assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color/g) ?? []).length, 1);
+  assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex validate -no-color/g) ?? []).length, 1);
+});
+
+function trackedTerraformDirectories() {
+  const paths = execFileSync("git", ["ls-files", "--", "*.tf"], { cwd: root, encoding: "utf8" })
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  return new Set(paths.map(dirname));
+}
+
+function assertTerraformMetadataAndLock(entry) {
+  const directory = resolve(root, entry.path);
+  const versions = readFileSync(resolve(directory, "versions.tf"), "utf8");
+  assert.match(versions, /required_version\s*=\s*">= 1\.6\.0"/);
+  assert.match(versions, /source\s*=\s*"oracle\/oci"/);
+  assert.match(versions, /version\s*=\s*"~> 8\.8"/);
+  const declaredSources = [...versions.matchAll(/source\s*=\s*"([^"]+)"/g)].map(([, source]) => `registry.terraform.io/${source}`);
+  const declaredConstraints = [...versions.matchAll(/^\s+version\s*=\s*"([^"]+)"/gm)].map(([, constraint]) => constraint);
+  assert.deepEqual(declaredSources, entry.providers.map(({ source }) => source));
+  assert.deepEqual(declaredConstraints, entry.providers.map(({ constraint }) => constraint));
+  const lock = readFileSync(resolve(directory, ".terraform.lock.hcl"), "utf8");
+  assert.equal(lock.includes("\r"), false);
+  assert.equal(lock, `${lock.trimEnd()}\n`);
+  const lockProviders = [...lock.matchAll(/provider "([^"]+)"/g)].map(([, source]) => source);
+  assert.deepEqual(lockProviders, entry.providers.map(({ source }) => source));
+  const lockVersions = [...lock.matchAll(/^\s+version\s*=\s*"([^"]+)"/gm)].map(([, version]) => version);
+  assert.deepEqual(lockVersions, ["8.25.0"]);
+  const lockConstraints = [...lock.matchAll(/constraints\s*=\s*"([^"]+)"/g)].map(([, constraint]) => constraint);
+  assert.deepEqual(lockConstraints, entry.providers.map(({ constraint }) => constraint));
+  const hashes = [...lock.matchAll(/"((?:h1|zh):[^"\n]+)"/g)].map(([, hash]) => hash);
+  const h1Hashes = hashes.filter((hash) => hash.startsWith("h1:"));
+  assert.deepEqual(h1Hashes, [
+    "h1:82a1SmkgRb6IrqlRUAiIZig3QFarzHGWEb1hxyuhwqc=",
+    "h1:UArfUfUx/91zaCDHGmeew7gVxVl6VT2mAHRU1ylOCnM=",
+  ]);
+  const zhHashes = hashes.filter((hash) => hash.startsWith("zh:"));
+  assert.deepEqual(zhHashes, [
+    "zh:185137d989290722d67f8e3395a431ffdf20fd15a908fb704a6c6973f7ed8a55",
+    "zh:267e4d14769f24350d83e3f6e361270a7b0bd8f7da4157c4cea7d6e9e65a288f",
+    "zh:2ec991cd28e4d4c7d80f744d5ae7c835797edfdd5ac57656e5050d3a8c55b163",
+    "zh:43ad9128708010a154a73488eb8dea8b60a694c954c7ecadf4b9bff417fc50da",
+    "zh:5a6405daa76e10cce58a788ac3181d382ba8d84a54ff8fe473622e20827269f3",
+    "zh:7025de9e5d6fe999d4d1788dc0df425b803d92f45ab48e848b12d8e9c222ab8a",
+    "zh:91b03d2f59200626528e0120bdc9d2d25597d79f0616256105b1bfce72627368",
+    "zh:9b12af85486a96aedd8d7984b0ff811a4b42e3d88dad1a3fb4c0b580d04fa425",
+    "zh:b432a1ab309911a4f4066cc1d5290db497b7579903747ea4e478d13224c0f78f",
+    "zh:c40d410d9ba1bfcaef0a92d2df0c331c3005d90db0a9b78af9362c93ca270f09",
+    "zh:ceccdbcbd52c989308e1e2fb202526416fd3af3559c7e0c00f44d4f4ba517a76",
+    "zh:da1a13b86051135ada7e5079f1221d8632a005ad8346e97c0c3efefad9115408",
+    "zh:da499bbfce5e862bbbb3f25ed7942025d71dddfaa765f36b46251a1ff0a5f1ba",
+    "zh:da952700bf8a77123fa15fb15b10f0639903794f12f64e2f13de47a2e2592f85",
+  ]);
+}

@@ -59,6 +59,7 @@ test('코디네이터는 PAT 없이 GITHUB_TOKEN으로만 동작한다', async (
   // PAT 의존은 형제 저장소의 큐를 통째로 정지시킨 원인이다. 어떤 형태로도 남기지 않는다.
   assert.doesNotMatch(workflow, /AUTOMERGE_PAT/);
   assert.doesNotMatch(workflow, /secrets\./);
+  assert.doesNotMatch(workflow, /update-branch/, 'coordinator must not mutate PR branches');
   // 관리자 우회 병합과 squash 이외의 병합 방식은 사용하지 않는다. main ruleset의
   // allowed_merge_methods도 squash 하나뿐이다.
   assert.doesNotMatch(workflow, /--admin|gh pr merge.+--merge|gh pr merge.+--rebase/);
@@ -71,6 +72,94 @@ test('코디네이터는 PAT 없이 GITHUB_TOKEN으로만 동작한다', async (
   assert.ok(!workflow.includes('  pull_request:\n'));
   // workflow_run 트리거는 이 저장소의 CI 워크플로 이름과 일치해야 한다.
   assert.ok(workflow.includes('workflows: [Platform CI]'));
+});
+
+test('automerge label 이벤트만 exact-head frozen discovery marker를 발행한다', async () => {
+  const workflow = await readWorkflow();
+
+  for (const contract of [
+    "EVENT_NAME: ${{ github.event_name }}",
+    "EVENT_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}",
+    "EVENT_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}",
+    "EVENT_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}",
+    "if: github.event_name != 'pull_request_target' || github.event.label.name == 'automerge'",
+    'pull_request_target:\n    types: [labeled]',
+  ]) {
+    assert.ok(workflow.includes(contract), `missing label authorization contract: ${contract}`);
+  }
+
+  const authorizationBlock = workflow.match(
+    /          if \[\[ "\$\{EVENT_NAME\}" == "pull_request_target" && "\$\{EVENT_LABEL\}" == "automerge" \]\]; then\n([\s\S]*?)\n          fi\n\n          # required context/,
+  )?.[0];
+  assert.ok(authorizationBlock, 'label authorization block must stay testable');
+  assert.equal(
+    (authorizationBlock.match(/gh api --method POST/g) ?? []).length,
+    1,
+    'label authorization must have exactly one marker emission path',
+  );
+
+  const runAuthorization = ({ eventName, label = 'automerge', pr, head }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'automerge-authorization-'));
+    const log = join(dir, 'gh.log');
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -euo pipefail',
+          `GH_LOG=${JSON.stringify(log)}`,
+          ': > "$GH_LOG"',
+          'gh() { printf "%s\\n" "gh $*" >> "$GH_LOG"; }',
+          'repo=o/r',
+          `EVENT_NAME=${JSON.stringify(eventName)}`,
+          `EVENT_LABEL=${JSON.stringify(label)}`,
+          `EVENT_PR=${JSON.stringify(pr)}`,
+          `EVENT_HEAD=${JSON.stringify(head)}`,
+          dedent(authorizationBlock),
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    return {
+      status: result.status,
+      calls: existsSync(log) ? readFileSync(log, 'utf8') : '',
+    };
+  };
+
+  const nonLabelEvent = runAuthorization({ eventName: 'workflow_run', pr: '', head: '' });
+  assert.equal(nonLabelEvent.status, 0);
+  assert.equal((nonLabelEvent.calls.match(/gh api --method POST/g) ?? []).length, 0);
+
+  const otherLabel = runAuthorization({
+    eventName: 'pull_request_target',
+    label: 'documentation',
+    pr: '42',
+    head: 'a'.repeat(40),
+  });
+  assert.equal(otherLabel.status, 0);
+  assert.equal((otherLabel.calls.match(/gh api --method POST/g) ?? []).length, 0);
+
+  const valid = runAuthorization({
+    eventName: 'pull_request_target',
+    pr: '42',
+    head: 'a'.repeat(40),
+  });
+  assert.equal(valid.status, 0);
+  assert.equal((valid.calls.match(/gh api --method POST/g) ?? []).length, 1);
+  assert.match(
+    valid.calls,
+    /repos\/o\/r\/issues\/42\/comments -f body=<!-- Automerge frozen discovery authorization: a{40} -->/,
+  );
+
+  for (const invalid of [
+    { pr: 'not-a-number', head: 'a'.repeat(40) },
+    { pr: '42', head: 'A'.repeat(40) },
+    { pr: '42', head: 'a'.repeat(39) },
+  ]) {
+    const rejected = runAuthorization({ eventName: 'pull_request_target', ...invalid });
+    assert.notEqual(rejected.status, 0);
+    assert.equal((rejected.calls.match(/gh api --method POST/g) ?? []).length, 0);
+  }
 });
 
 test('큐는 best-effort FIFO 후보 배열을 훑고 미해결 thread는 fail closed다', async () => {
@@ -134,6 +223,11 @@ test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정�
     'page_limit=3',
     'read_pages() {',
     'read_pages "repos/${repo}/pulls/${pr}/reviews"',
+    'read_pages "repos/${repo}/issues/${pr}/comments"',
+    'read_pages "repos/${repo}/pulls/${pr}/commits"',
+    'read_pages "repos/${repo}/pulls/${pr}/files"',
+    'gh api "repos/${repo}/pulls/${pr}"',
+    'gh api "repos/${repo}/actions/runs?head_sha=${head}&per_page=100"',
     'read_pages "repos/${repo}/commits/${head}/check-runs"',
     'read_pages "repos/${repo}/commits/${head}/statuses"',
   ]) {
@@ -203,11 +297,11 @@ test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정�
   assert.match(objectShape.stdout, /^STOPPED 2/);
 });
 
-test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리뷰를 함께 요구한다', async () => {
+test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 있는 frozen discovery를 함께 요구한다', async () => {
   const workflow = await readWorkflow();
 
   const reviewProgram = workflow.match(
-    /# review-state-filter-begin\n[\s\S]*?if ! jq -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' <<<"\$\{reviews\}" >\/dev\/null; then/,
+    /# review-state-filter-begin\n[\s\S]*?if ! jq -s -e --arg head "\$\{head\}" '\n([\s\S]*?)\n\s+' \\\n\s+<\(printf '%s\\n' "\$\{reviews\}"\) \\\n\s+<\(printf '%s\\n' "\$\{comments\}"\) \\\n\s+<\(printf '%s\\n' "\$\{commits\}"\) >\/dev\/null; then/,
   )?.[1];
   assert.ok(reviewProgram, 'review state jq program must stay testable');
 
@@ -223,11 +317,32 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     user: { login: 'reviewer' },
     ...overrides,
   });
-  const runReviewFilter = (reviews) => {
-    const result = spawnSync('jq', ['-e', '--arg', 'head', 'head', reviewProgram], {
-      input: JSON.stringify([reviews]),
-      encoding: 'utf8',
-    });
+  const marker = (sha = 'head', overrides = {}) => ({
+    body: `<!-- Automerge frozen discovery authorization: ${sha} -->`,
+    user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' },
+    ...overrides,
+  });
+  const runReviewFilter = (
+    reviews,
+    comments = [marker()],
+    commits = [{ sha: 'head' }, { sha: 'previous-head' }],
+  ) => {
+    const directory = mkdtempSync(join(tmpdir(), 'automerge-review-filter-'));
+    const reviewsPath = join(directory, 'reviews.json');
+    const commentsPath = join(directory, 'comments.json');
+    const commitsPath = join(directory, 'commits.json');
+    writeFileSync(reviewsPath, JSON.stringify([reviews]));
+    writeFileSync(commentsPath, JSON.stringify(comments));
+    writeFileSync(commitsPath, JSON.stringify(commits));
+    const result = spawnSync('jq', [
+      '-s',
+      '-e',
+      '--arg', 'head', 'head',
+      reviewProgram,
+      reviewsPath,
+      commentsPath,
+      commitsPath,
+    ], { encoding: 'utf8' });
     // jq -e는 결과가 false/null이면 1, 컴파일 오류면 3, 런타임 오류면 5를 낸다.
     // 0/1만 판정으로 인정해야 프로그램 파손이 "차단 성공"으로 새지 않는다.
     assert.ok(
@@ -237,19 +352,46 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     return result.status;
   };
 
+  const exactMarker = [marker()];
+
+  for (const comments of [
+    [],
+    [marker('different-head')],
+    [marker('head', { user: { login: 'other[bot]', id: 41898282, type: 'Bot' } })],
+    [marker('head', { user: { login: 'github-actions[bot]', id: 1, type: 'Bot' } })],
+    [marker('head', { user: { login: 'github-actions[bot]', id: 41898282, type: 'User' } })],
+  ]) {
+    assert.notEqual(
+      runReviewFilter([
+        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, { commit_id: 'previous-head' }),
+      ], comments),
+      0,
+    );
+  }
+
   // 기본 판정.
   assert.equal(
     runReviewFilter([
       review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z'),
       review(2, 'APPROVED', '2026-08-01T00:01:00Z'),
-    ]),
+    ], exactMarker),
+    0,
+  );
+  // force-push로 discovery commit이 현재 PR commit-set에서 제거되면 exact marker가 있어도
+  // 과거 Review를 병합 근거로 재사용하지 않는다.
+  assert.notEqual(
+    runReviewFilter(
+      [review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', { commit_id: 'removed-head' })],
+      exactMarker,
+      [{ sha: 'head' }],
+    ),
     0,
   );
   assert.notEqual(
     runReviewFilter([
       review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z'),
       review(2, 'COMMENTED', '2026-08-01T00:01:00Z'),
-    ]),
+    ], exactMarker),
     0,
   );
   assert.notEqual(
@@ -261,11 +403,65 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)]),
     0,
   );
+  assert.equal(
+    runReviewFilter(
+      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)],
+      [marker(), { body: 'x'.repeat(160 * 1024), user: { login: 'commenter' } }],
+    ),
+    0,
+    'bounded large comment payload must not depend on the OS argument-size limit',
+  );
   // 신뢰되지 않는 author_association은 어떤 본문으로도 게이트를 통과하지 못한다.
   assert.notEqual(
     runReviewFilter([
       review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
         author_association: 'NONE',
+      }),
+    ]),
+    0,
+  );
+  // CodeRabbit의 immutable Bot 식별자만 NONE association 예외로 신뢰한다.
+  const codeRabbit = {
+    author_association: 'NONE',
+    user: { login: 'coderabbitai[bot]', id: 136622811, type: 'Bot' },
+  };
+  assert.equal(
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', codeRabbit)]),
+    0,
+  );
+  // login, immutable id, Bot type 중 하나라도 다르면 NONE 리뷰는 신뢰하지 않는다.
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        ...codeRabbit,
+        user: { ...codeRabbit.user, type: 'User' },
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', {
+        author_association: 'NONE',
+        user: null,
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        ...codeRabbit,
+        user: { ...codeRabbit.user, login: 'other-bot[bot]' },
+      }),
+    ]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+        ...codeRabbit,
+        user: { ...codeRabbit.user, id: 1 },
       }),
     ]),
     0,
@@ -307,20 +503,39 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 current head 긍정 리
     ]),
     0,
   );
-  // 긍정 리뷰는 여전히 current head를 요구한다.
+  // GitHub가 stale native approval을 DISMISSED로 mutate하므로 native approval은 current
+  // head에서만 유효하다. Prior frozen discovery는 immutable COMMENTED provenance만 승계한다.
   assert.notEqual(
     runReviewFilter([
       review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', {
         commit_id: 'previous-head',
       }),
-    ]),
+    ], exactMarker),
     0,
   );
-  assert.notEqual(
+  assert.equal(
     runReviewFilter([
       review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
         commit_id: 'previous-head',
       }),
+    ], exactMarker),
+    0,
+  );
+  // CodeRabbit discovery도 marker가 있으면 prior head에서 인정하지만, active change
+  // request는 다른 승인이 있어도 막는다.
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', {
+        ...codeRabbit,
+        commit_id: 'previous-head',
+      }),
+    ], exactMarker),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', '', codeRabbit),
+      review(2, 'APPROVED', '2026-08-01T00:01:00Z'),
     ]),
     0,
   );
@@ -617,25 +832,19 @@ test('required context 판정은 후보별 건너뛰기로 수렴하고 실패�
   assert.equal(pending.warned, false, '대기 상태는 사람이 볼 신호가 아니다');
   assert.equal(pending.dispatchedCi, false, '대기 중인 check에 CI를 또 쏘지 않는다');
 
-  // 미부착(missing)은 다르다. GITHUB_TOKEN의 update-branch push는 synchronize를 만들지
-  // 못하므로, bounded wait보다 늦게 base 갱신이 반영된 PR에는 required context가 영영
-  // 붙지 않는다. 여기서 쏘지 않으면 아무도 쏘지 않는다(영구 대기).
+  // 미부착(missing)은 다르다. same-repository head에는 CI를 명시 dispatch해 required
+  // context를 붙인다. BEHIND·DIRTY는 이 블록보다 앞선 preflight에서 라벨이 제거된다.
   const missing = runContextLoop([]);
   assert.equal(missing.status, 0);
   assert.equal(missing.reached, false);
   assert.equal(missing.dispatchedCi, true, 'required context 부재는 CI dispatch로 푼다');
 
-  // BEHIND는 여기서 쏘지 않는다. 대신 병합 분기로 내려보내 base 갱신이 일어나게 한다.
-  // 여기서 건너뛰면 base가 영영 갱신되지 않고, base가 갱신되지 않으면 required context도
-  // 영영 붙지 않는다 — 방금 라벨이 붙어 아직 CI가 없는 behind PR이 그대로 정체한다.
+  // 추출한 context 블록만 실행해도 BEHIND 특례가 없음을 고정한다. 실제 workflow에서는
+  // structural preflight가 먼저 실행되어 이 상태가 여기까지 내려오지 않는다.
   const missingBehind = runContextLoop([], 'BEHIND');
   assert.equal(missingBehind.status, 0);
-  assert.equal(missingBehind.dispatchedCi, false, 'BEHIND는 base 갱신 경로가 맡는다');
-  assert.equal(
-    missingBehind.reached,
-    true,
-    'BEHIND + context 부재는 base 갱신 분기로 내려가야 한다',
-  );
+  assert.equal(missingBehind.dispatchedCi, true);
+  assert.equal(missingBehind.reached, false);
   // 부재가 아닌 사유(대기·실패)는 BEHIND라도 내려보내지 않는다. 대기는 곧 끝나고,
   // 실패는 사람이 고칠 상태다.
   assert.equal(runContextLoop(run(null), 'BEHIND').reached, false);
@@ -645,6 +854,123 @@ test('required context 판정은 후보별 건너뛰기로 수렴하고 실패�
   assert.equal(failed.status, 0);
   assert.equal(failed.reached, false);
   assert.equal(failed.warned, true, 'required context 실패는 ::warning::으로 드러나야 한다');
+});
+
+test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에서 제거한다', async () => {
+  const workflow = await readWorkflow();
+  const preflight = workflow.match(
+    /# merge-state-preflight-begin\n([\s\S]*?)\n\s+# merge-state-preflight-end/,
+  )?.[1];
+  assert.ok(preflight, 'merge state preflight must stay testable');
+
+  const markerPrefix = '<!-- easysubway-automerge-rebase-required:';
+  const runPreflight = (
+    mergeState,
+    {
+      existingHead,
+      headReads = ['current-head', 'current-head'],
+      headReadFails = [],
+      commentReadFails = false,
+      commentFails = false,
+      labelFails = false,
+      restoreFails = false,
+    } = {},
+  ) => {
+    const head = 'current-head';
+    const marker = `${markerPrefix}${head} -->`;
+    const comments = existingHead ? [[], [{ body: `${markerPrefix}${existingHead} -->` }]] : [[]];
+    const result = stubbedBash([
+      'set -euo pipefail',
+      `read_pages() { ${commentReadFails ? 'return 2' : `printf '%s' ${JSON.stringify(JSON.stringify(comments))}`}; }`,
+      'gh() {',
+      `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
+      '  case "$*" in',
+      '    "pr view"*)',
+      '      head_read="$(grep -c \'^gh pr view \' "$GH_LOG")"',
+      `      case " ${headReadFails.join(' ')} " in *" ${'${head_read}'} "*) return 43 ;; esac`,
+      `      printf '%s\\n' "${'${head_reads[$((head_read - 1))]:-${head}}'}" ;;`,
+      `    "pr comment"*) ${commentFails ? 'return 41' : ':'} ;;`,
+      `    "pr edit"*"--remove-label automerge"*) ${labelFails ? 'return 42' : ':'} ;;`,
+      `    "pr edit"*"--add-label automerge"*) ${restoreFails ? 'return 44' : ':'} ;;`,
+      '    *) return 1 ;;',
+      '  esac',
+      '}',
+      'pr=26',
+      'repo=o/r',
+      `head=${JSON.stringify(head)}`,
+      `head_reads=(${headReads.map((value) => JSON.stringify(value)).join(' ')})`,
+      'GITHUB_SERVER_URL=https://github.com',
+      'GITHUB_REPOSITORY=o/r',
+      'GITHUB_RUN_ID=1234',
+      `merge_state=${JSON.stringify(mergeState)}`,
+      'for _ in 1; do',
+      dedent(preflight, 12),
+      'done',
+      `printf 'SKIPPED\\n' >> "$GH_LOG"`,
+    ]);
+    return {
+      status: result.status,
+      commented: result.calls.includes('gh pr comment'),
+      labelRemoved: result.calls.includes('--remove-label automerge'),
+      labelRestored: result.calls.includes('--add-label automerge'),
+      updatedBranch: result.calls.includes('update-branch'),
+      skipped: result.calls.includes('SKIPPED'),
+      calls: result.calls,
+    };
+  };
+
+  for (const mergeState of ['BEHIND', 'DIRTY']) {
+    const result = runPreflight(mergeState);
+    assert.equal(result.status, 0);
+    assert.equal(result.commented, true);
+    assert.equal(result.labelRemoved, true);
+    assert.equal(result.labelRestored, false);
+    assert.equal(result.updatedBranch, false);
+    assert.equal(result.skipped, true);
+    assert.match(result.calls, new RegExp(`merge_state=${mergeState}`));
+  }
+
+  const existing = runPreflight('BEHIND', { existingHead: 'current-head' });
+  assert.equal(existing.commented, false, '같은 head marker가 두 번째 page에 있어도 안내를 중복 게시하지 않는다');
+  assert.equal(existing.labelRemoved, true);
+
+  const advancedHead = runPreflight('BEHIND', { existingHead: 'previous-head' });
+  assert.equal(advancedHead.commented, true, '새 head에는 이전 안내와 별도로 rebase 안내를 게시한다');
+  assert.equal(advancedHead.labelRemoved, true);
+
+  const changedHead = runPreflight('BEHIND', { headReads: ['new-head'] });
+  assert.equal(changedHead.labelRemoved, false, 'head가 바뀌면 새 head의 automerge label을 제거하지 않는다');
+  assert.equal(changedHead.labelRestored, false);
+  assert.equal(changedHead.commented, false, 'label을 유지한 head에 handoff 댓글을 남기지 않는다');
+
+  const unreadableHead = runPreflight('BEHIND', { headReadFails: [1] });
+  assert.equal(unreadableHead.labelRemoved, false, 'current head를 다시 읽지 못하면 automerge label을 제거하지 않는다');
+  assert.equal(unreadableHead.labelRestored, false);
+  assert.equal(unreadableHead.commented, false);
+
+  const changedAfterRemoval = runPreflight('BEHIND', { headReads: ['current-head', 'new-head'] });
+  assert.equal(changedAfterRemoval.labelRemoved, true);
+  assert.equal(changedAfterRemoval.labelRestored, true, 'label 제거 뒤 head가 바뀌면 automerge label을 복구한다');
+  assert.equal(changedAfterRemoval.commented, false, 'label을 복구한 head에 handoff 댓글을 남기지 않는다');
+
+  const unreadableAfterRemoval = runPreflight('BEHIND', { headReadFails: [2] });
+  assert.equal(unreadableAfterRemoval.labelRemoved, true);
+  assert.equal(unreadableAfterRemoval.labelRestored, true, 'label 제거 뒤 head를 읽지 못하면 automerge label을 복구한다');
+  assert.equal(unreadableAfterRemoval.commented, false);
+
+  const restoreFailed = runPreflight('BEHIND', { headReads: ['current-head', 'new-head'], restoreFails: true });
+  assert.equal(restoreFailed.status, 1, 'automerge label 복구 실패는 fail closed여야 한다');
+
+  const unreadable = runPreflight('BEHIND', { commentReadFails: true });
+  assert.equal(unreadable.commented, false, 'comment history를 확정하지 못하면 재게시하지 않는다');
+  assert.equal(unreadable.labelRemoved, true);
+
+  const commentFailed = runPreflight('DIRTY', { commentFails: true });
+  assert.equal(commentFailed.status, 0, '안내 실패가 label 제거를 막으면 안 된다');
+  assert.equal(commentFailed.labelRemoved, true);
+
+  const labelFailed = runPreflight('BEHIND', { labelFails: true });
+  assert.equal(labelFailed.status, 1, 'label 제거 실패는 fail closed여야 한다');
 });
 
 test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구분한다', async () => {
@@ -661,11 +987,8 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
   const runDispatch = (
     mergeState,
     {
-      headRepo = 'o/r',
-      newHead = 'updated-head',
-      mergeFails = false,
-      updateFails = false,
-      ciDispatchFails = false,
+      mergeFailureStatus = null,
+      commentFails = false,
     } = {},
   ) => {
     const result = stubbedBash([
@@ -673,18 +996,16 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
       'gh() {',
       `  printf '%s\\n' "gh $*" >> "$GH_LOG"`,
       '  case "$*" in',
-      `    *"pr view"*headRefOid*) printf '%s\\n' ${JSON.stringify(newHead)} ;;`,
-      `    "pr merge"*) ${mergeFails ? 'return 1' : ':'} ;;`,
-      `    *update-branch*) ${updateFails ? 'return 1' : ':'} ;;`,
-      `    "workflow run"*) ${ciDispatchFails ? 'return 1' : ':'} ;;`,
+      `    "pr merge"*) ${mergeFailureStatus ?? ':'} ;;`,
+      `    "pr comment"*) ${commentFails ? 'return 41' : ':'} ;;`,
       '  esac',
       '}',
-      'sleep() { :; }',
       'pr=26',
       'repo=o/r',
       'head=old-head',
-      `head_repo=${JSON.stringify(headRepo)}`,
-      'head_ref=feature',
+      'GITHUB_SERVER_URL=https://github.com',
+      'GITHUB_REPOSITORY=o/r',
+      'GITHUB_RUN_ID=1234',
       `merge_state=${JSON.stringify(mergeState)}`,
       'for _ in 1; do',
       dedent(dispatchBlock, 12),
@@ -694,10 +1015,10 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
     return {
       status: result.status,
       merged: result.calls.includes('gh pr merge'),
-      updatedBranch: result.calls.includes('update-branch'),
-      dispatchedCi: result.calls.includes('workflow run ci.yml'),
       skipped: result.calls.includes('SKIPPED'),
       warned: (result.stdout + result.stderr).includes('::warning::'),
+      commented: result.calls.includes('gh pr comment'),
+      labelRemoved: result.calls.includes('--remove-label automerge'),
       calls: result.calls,
     };
   };
@@ -710,29 +1031,24 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
       {
         status: result.status,
         merged: result.merged,
-        updatedBranch: result.updatedBranch,
-        dispatchedCi: result.dispatchedCi,
         skipped: result.skipped,
         warned: result.warned,
+        commented: result.commented,
+        labelRemoved: result.labelRemoved,
       },
-      { status: 0, merged: true, updatedBranch: false, dispatchedCi: false, skipped: false, warned: false },
+      {
+        status: 0,
+        merged: true,
+        skipped: false,
+        warned: false,
+        commented: false,
+        labelRemoved: false,
+      },
       `${mergeState} must proceed to merge`,
     );
     // 이 저장소는 auto-merge가 꺼져 있으므로 즉시 병합이고, head 고정은 서버가 한다.
     assert.match(result.calls, /gh pr merge --squash 26 --repo o\/r --match-head-commit old-head/);
   }
-  // base 갱신이 필요한 상태는 update-branch 후 CI를 명시 dispatch한다.
-  const behind = runDispatch('BEHIND');
-  assert.equal(behind.status, 0);
-  assert.equal(behind.merged, false);
-  assert.equal(behind.updatedBranch, true);
-  assert.equal(behind.dispatchedCi, true);
-  // update-branch는 비동기라 bounded wait 안에 head가 안 바뀔 수 있다. 계약 위반이
-  // 아니라 대기 상태이므로 stale ref로 CI를 쏘지 않고 실패하지도 않는다.
-  const behindPending = runDispatch('BEHIND', { newHead: 'old-head' });
-  assert.equal(behindPending.status, 0);
-  assert.equal(behindPending.updatedBranch, true);
-  assert.equal(behindPending.dispatchedCi, false);
   // 병합할 수 없는 상태는 전부 "이 후보만 건너뛴다"로 수렴한다. 실행을 실패시키면
   // 그 실패 check가 PR을 UNSTABLE로 만들고 큐 전체가 뒤의 후보까지 굶긴다.
   for (const mergeState of ['BLOCKED', 'UNKNOWN']) {
@@ -741,38 +1057,32 @@ test('merge-state 분기는 상태별로 병합·물러남·건너뛰기를 구�
     assert.equal(result.merged, false);
     assert.equal(result.skipped, true, `${mergeState} must skip to the next candidate`);
     assert.equal(result.warned, false);
+    assert.equal(result.commented, false);
+    assert.equal(result.labelRemoved, false);
   }
   // 사람이 봐야 하는 상태는 건너뛰되 신호를 남긴다. 실행은 실패시키지 않는다.
-  for (const mergeState of ['DIRTY', 'SOME_NEW_STATE']) {
+  for (const mergeState of ['SOME_NEW_STATE']) {
     const result = runDispatch(mergeState);
     assert.equal(result.status, 0, `${mergeState} must not fail the run`);
     assert.equal(result.merged, false);
     assert.equal(result.skipped, true);
     assert.equal(result.warned, true, `${mergeState} must skip with an operator-visible warning`);
+    assert.equal(result.commented, false);
+    assert.equal(result.labelRemoved, false);
   }
-  // 병합·base 갱신 API 호출 실패도 다른 상태와 같게 다룬다. 판정 이후의 head 변경·
-  // ruleset 거부·일시적 오류는 전부 "다음 트리거에서 다시 판정"으로 수렴하며, 여기서
-  // 실행을 죽이면 그 실패 check가 다음 판정 입력을 오염시킨다.
-  const mergeFailed = runDispatch('CLEAN', { mergeFails: true });
-  assert.equal(mergeFailed.status, 0, 'merge call failure must not fail the run');
-  assert.equal(mergeFailed.warned, true, 'merge call failure must stay operator-visible');
-  const updateFailed = runDispatch('BEHIND', { updateFails: true });
-  assert.equal(updateFailed.status, 0, 'update-branch failure must not fail the run');
-  assert.equal(updateFailed.warned, true, 'update-branch failure must stay operator-visible');
-  assert.equal(updateFailed.dispatchedCi, false, '갱신에 실패했으면 CI를 쏘지 않는다');
-
-  // CI dispatch 호출 실패도 같다. base는 이미 갱신됐고 다음 트리거가 다시 판정한다.
-  const ciDispatchFailed = runDispatch('BEHIND', { ciDispatchFails: true });
-  assert.equal(ciDispatchFailed.status, 0, 'CI dispatch failure must not fail the run');
-  assert.equal(ciDispatchFailed.warned, true, 'CI dispatch failure must stay operator-visible');
-
-  // fork head에 base 저장소 CI를 dispatch하지 않는다. 거부하되 큐는 계속 진행한다.
-  const fork = runDispatch('BEHIND', { headRepo: 'fork/r' });
-  assert.equal(fork.status, 0);
-  assert.equal(fork.updatedBranch, false);
-  assert.equal(fork.dispatchedCi, false);
-  assert.equal(fork.skipped, true);
-  assert.equal(fork.warned, true);
+  // 병합 API 호출 실패는 PR에 실패 상태를 남기고 라벨을 제거한 뒤 즉시 실패한다.
+  const mergeFailed = runDispatch('CLEAN', { mergeFailureStatus: 'return 17' });
+  assert.equal(mergeFailed.status, 17, 'merge call failure must preserve the failed status');
+  assert.equal(mergeFailed.commented, true, 'merge failure must be visible on the PR');
+  assert.equal(mergeFailed.labelRemoved, true, 'merge failure must remove automerge');
+  assert.match(mergeFailed.calls, /병합 호출/);
+  assert.match(mergeFailed.calls, /merge_state=CLEAN/);
+  assert.match(mergeFailed.calls, /exit status=17/);
+  assert.match(mergeFailed.calls, /https:\/\/github\.com\/o\/r\/actions\/runs\/1234/);
+  const commentFailed = runDispatch('CLEAN', { mergeFailureStatus: 'return 17', commentFails: true });
+  assert.equal(commentFailed.status, 17, 'comment failure must not replace the merge status');
+  assert.equal(commentFailed.commented, true, 'failure comment must still be attempted');
+  assert.equal(commentFailed.labelRemoved, true, 'comment failure must still remove automerge');
 });
 
 test('게이트는 후보별로 병합 분기보다 앞선다', async () => {
@@ -857,6 +1167,11 @@ const makeRunQueue =
   writeFileSync(join(dir, 'rates'), `${remaining.join('\n')}\n`);
   for (const pr of prs) {
     const head = `head${pr.number}`;
+    const dependabot = {
+      login: pr.dependabotLogin ?? 'dependabot[bot]',
+      id: pr.dependabotId ?? 49699333,
+      type: pr.dependabotType ?? 'Bot',
+    };
     writeFileSync(
       join(dir, `pr-${pr.number}.json`),
       JSON.stringify({
@@ -871,6 +1186,24 @@ const makeRunQueue =
       }),
     );
     writeFileSync(
+      join(dir, `comments-${pr.number}.json`),
+      JSON.stringify(
+        [
+          ...(pr.authorized === false
+            ? []
+            : [
+                {
+                  body: `<!-- Automerge frozen discovery authorization: ${head} -->`,
+                  user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' },
+                },
+              ]),
+          ...(pr.hasRebaseMarker
+            ? [{ body: `<!-- easysubway-automerge-rebase-required:${head} -->` }]
+            : []),
+        ],
+      ),
+    );
+    writeFileSync(
       join(dir, `reviews-${pr.number}.json`),
       JSON.stringify(
         pr.reviewed === false
@@ -880,13 +1213,72 @@ const makeRunQueue =
                 id: 1,
                 state: 'APPROVED',
                 submitted_at: '2026-08-01T00:00:00Z',
-                commit_id: head,
+                commit_id: pr.reviewCommit ?? head,
                 author_association: 'OWNER',
                 body: '',
                 user: { login: 'reviewer' },
               },
             ],
       ),
+    );
+    writeFileSync(
+      join(dir, `commits-${pr.number}.json`),
+      JSON.stringify(
+        Array.from(
+          { length: pr.dependencyCommitCount ?? 1 },
+          (_, index) => ({
+            sha: pr.commitHistory?.[index] ?? (index === 0 ? head : `previous-${index}`),
+            author: pr.dependabotCompose ? dependabot : { login: 'owner', id: 1, type: 'User' },
+          }),
+        ),
+      ),
+    );
+    writeFileSync(
+      join(dir, `rest-${pr.number}.json`),
+      JSON.stringify({
+        head: {
+          sha: pr.dependencyHead ?? head,
+          ref: pr.dependencyRef ?? `feature-${pr.number}`,
+          repo: { full_name: pr.dependencyRepository ?? 'o/r' },
+        },
+        user: pr.dependabotCompose ? dependabot : { login: 'owner', id: 1, type: 'User' },
+      }),
+    );
+    if (pr.restReadFails) writeFileSync(join(dir, `rest-fail-${pr.number}`), '1');
+    writeFileSync(
+      join(dir, `runs-${pr.number}.json`),
+      pr.workflowRunsMalformed ? '{' : JSON.stringify({
+        total_count: pr.workflowRunTotalCount ?? 1,
+        workflow_runs: pr.workflowRunsOverflow
+          ? Array.from({ length: 100 }, () => ({}))
+          : [{
+              workflow_id: pr.workflowRunId ?? 324173434,
+              head_sha: pr.workflowRunHead ?? head,
+              head_branch: pr.workflowRunBranch ?? `feature-${pr.number}`,
+              event: pr.workflowRunEvent ?? 'pull_request',
+              repository: { full_name: pr.workflowRunRepository ?? 'o/r' },
+              head_repository: { full_name: pr.workflowRunHeadRepository ?? 'o/r' },
+              actor: pr.workflowRunActor ?? dependabot,
+              triggering_actor: pr.workflowRunTriggeringActor ?? dependabot,
+            }],
+      }),
+    );
+    if (pr.workflowRunsFail) writeFileSync(join(dir, `runs-fail-${pr.number}`), '1');
+    writeFileSync(
+      join(dir, `files-${pr.number}.json`),
+      pr.filesMalformed ? '{' : JSON.stringify(pr.filesOverflow
+        ? Array.from({ length: 100 }, () => ({ filename: 'infra/docker-compose.yml' }))
+        : [
+        {
+          filename: pr.dependencyFile ?? 'infra/docker-compose.yml',
+          patch: Object.hasOwn(pr, 'dependencyPatch')
+            ? pr.dependencyPatch
+            : '-    image: ghcr.io/a/image:1.0.0\n+    image: ghcr.io/a/image:1.0.1',
+          additions: pr.dependencyAdditions ?? 1,
+          deletions: pr.dependencyDeletions ?? 1,
+          changes: pr.dependencyChanges ?? 2,
+        },
+      ]),
     );
     writeFileSync(
       join(dir, `threads-${pr.number}.json`),
@@ -944,27 +1336,31 @@ const makeRunQueue =
     '      [ -n "$rv" ] || rv="$(tail -1 "$FIX/rates")"',
     `      printf '%s\\n' "$rv" ;;`,
     `    "pr list"*) printf '%s\\n' ${JSON.stringify(JSON.stringify(prs.map((p) => p.number)))} ;;`,
-    // BEHIND 경로의 bounded wait는 같은 `gh pr view`를 `--json headRefOid`로 부른다.
-    // 두 호출을 한 패턴으로 잡으면 new_head에 JSON 문서 전체가 들어가고, 테스트가
-    // 잘못된 이유로 통과한다. 좁은 패턴을 먼저 둔다.
-    '    "pr view "*"--json headRefOid"*) set -- $all; jq -r ".headRefOid" "$FIX/pr-$3.json" ;;',
+    '    "pr view "*"--json headRefOid --jq .headRefOid") set -- $all; jq -r .headRefOid "$FIX/pr-$3.json" ;;',
     '    "pr view "*) set -- $all; cat "$FIX/pr-$3.json" ;;',
+    '    *repos/*/pulls/*/files*) n="${all#*pulls/}"; n="${n%%/files*}"; cat "$FIX/files-$n.json" ;;',
+    '    *issues/*/comments*) n="${all#*issues/}"; n="${n%%/comments*}"; cat "$FIX/comments-$n.json" ;;',
+    '    *pulls/*/commits*) n="${all#*pulls/}"; n="${n%%/commits*}"; cat "$FIX/commits-$n.json" ;;',
     '    *pulls/*/reviews*) n="${all#*pulls/}"; n="${n%%/reviews*}"; cat "$FIX/reviews-$n.json" ;;',
+    '    *actions/runs*) h="${all#*head_sha=}"; h="${h%%&*}"; n="${h#head}"; [ -f "$FIX/runs-fail-$n" ] && return 1; cat "$FIX/runs-$n.json" ;;',
+    '    *repos/*/pulls/*) n="${all#*pulls/}"; n="${n%% *}"; [ -f "$FIX/rest-fail-$n" ] && return 1; cat "$FIX/rest-$n.json" ;;',
     '    *graphql*) n="${all#*number=}"; n="${n%% *}"; cat "$FIX/threads-$n.json" ;;',
     '    *check-runs*) h="${all#*commits/}"; h="${h%%/check-runs*}"; cat "$FIX/checks-$h.json" ;;',
     '    *statuses*) h="${all#*commits/}"; h="${h%%/statuses*}"; cat "$FIX/statuses-$h.json" ;;',
     // 응답이 필요 없는 실제 동작. 로그에만 남기고 조용히 성공한다.
-    '    "pr merge"* | *update-branch* | "workflow run"*) ;;',
+    '    "pr merge"* | "pr comment"* | "pr edit"* | "workflow run"*) ;;',
     // 기본 분기가 없으면 워크플로가 새 gh 호출을 늘렸을 때 스텁이 빈 출력 + 종료 코드 0을
     // 낸다. 큐 루프는 그것을 "빈 API 응답"으로 읽고 후보를 건너뛰므로, 하네스가 덮지 못한
     // 호출이 조용히 통과한다. 실패시켜 즉시 드러낸다.
     `    *) printf 'unstubbed gh call: %s\\n' "$all" >&2; return 1 ;;`,
     '  esac',
     '}',
-    'sleep() { :; }',
     'repo=o/r',
     'owner=o',
     'name=r',
+    'GITHUB_SERVER_URL=https://github.com',
+    'GITHUB_REPOSITORY=o/r',
+    'GITHUB_RUN_ID=1234',
     `required='[{"context":"Platform CI","integration_id":null}]'`,
     'candidates="$(gh pr list)"',
     budgetConstants,
@@ -978,13 +1374,14 @@ const makeRunQueue =
   return {
     status: result.status,
     mergedPr: merged ? Number(merged) : null,
-    // 후보 평가 1건당 1회만 세야 한다. bounded wait의 headRefOid 조회까지 세면 같은
-    // 후보가 두 번 잡혀 "실행당 실제 동작 최대 한 건" 계약이 헐거워진다.
+    // 후보 평가 1건당 1회의 metadata 조회만 세야 한다.
     evaluated: [...calls.matchAll(/gh pr view (\d+) --repo [^\n]*--json baseRefName/g)].map((m) =>
       Number(m[1]),
     ),
     updatedBranch: calls.includes('update-branch'),
     dispatchedCi: calls.includes('workflow run ci.yml'),
+    commented: calls.includes('gh pr comment'),
+    labelRemoved: calls.includes('--remove-label automerge'),
     rateCalls: (calls.match(/gh api rate_limit/g) ?? []).length,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
@@ -1023,6 +1420,28 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
     ]).mergedPr,
     2,
   );
+  // 라벨 뒤 push는 label-head marker와 SHA가 달라진다. 새 marker 없이 prior discovery를
+  // 승계하면 안 되므로 이 후보만 fail closed하고 뒤 후보를 계속 평가한다.
+  assert.equal(
+    runQueue([
+      { number: 1, mergeStateStatus: 'CLEAN', authorized: false },
+      { number: 2, mergeStateStatus: 'CLEAN' },
+    ]).mergedPr,
+    2,
+  );
+  // force-push로 reviewed commit이 current PR history에서 제거된 후보도 건너뛴다.
+  assert.equal(
+    runQueue([
+      {
+        number: 1,
+        mergeStateStatus: 'CLEAN',
+        reviewCommit: 'removed-head',
+        commitHistory: ['head1'],
+      },
+      { number: 2, mergeStateStatus: 'CLEAN' },
+    ]).mergedPr,
+    2,
+  );
   // 미해결 thread가 있는 후보도 건너뛴다.
   assert.equal(
     runQueue([
@@ -1042,16 +1461,17 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
       `required context ${checkState} must skip only that candidate`,
     );
   }
-  // BEHIND인데 required context가 아직 없는 후보는 base 갱신 분기까지 내려가야 한다.
-  // 여기서 건너뛰면 base 갱신도, CI도 영영 일어나지 않는다.
+  // BEHIND는 required context와 무관하게 먼저 라벨을 내려 branch owner에게 넘긴다.
   const behindMissing = runQueue([
     { number: 1, mergeStateStatus: 'BEHIND', checkState: 'missing' },
     { number: 2, mergeStateStatus: 'CLEAN' },
   ]);
   assert.equal(behindMissing.status, 0);
-  assert.equal(behindMissing.updatedBranch, true, 'BEHIND + 부재는 base를 갱신해야 한다');
-  assert.equal(behindMissing.mergedPr, null);
-  assert.deepEqual(behindMissing.evaluated, [1], 'base 갱신도 한 실행에 한 건이다');
+  assert.equal(behindMissing.updatedBranch, false);
+  assert.equal(behindMissing.commented, true);
+  assert.equal(behindMissing.labelRemoved, true);
+  assert.equal(behindMissing.mergedPr, 2);
+  assert.deepEqual(behindMissing.evaluated, [1, 2]);
 
   // 부재는 건너뛰기만 하는 것이 아니라 CI를 쏴서 교착을 푼다. 그러면서도 뒤의 병합 가능한
   // 후보를 굶기지 않아야 한다 — 이 dispatch는 실행을 끝내지 않는다.
@@ -1075,18 +1495,18 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
     { number: 2, mergeStateStatus: 'CLEAN' },
   ]);
   assert.equal(serialized.evaluated.length, 1, '병합하면 그 실행은 거기서 끝난다');
-  // base 갱신도 실제 동작이므로 같은 규칙을 따른다. 픽스처의 head는 갱신 뒤에도 그대로라
-  // bounded wait가 대기로 끝나야 하고, stale ref로 CI를 쏘면 안 된다.
+  // BEHIND handoff는 branch를 바꾸지 않고 뒤의 병합 가능한 후보도 굶기지 않는다.
   const behind = runQueue([
     { number: 1, mergeStateStatus: 'BEHIND' },
     { number: 2, mergeStateStatus: 'CLEAN' },
   ]);
   assert.equal(behind.status, 0);
-  assert.equal(behind.mergedPr, null);
-  assert.deepEqual(behind.evaluated, [1], 'base 갱신도 한 실행에 한 건이다');
-  assert.equal(behind.updatedBranch, true);
-  assert.equal(behind.dispatchedCi, false, 'stale ref에 CI를 dispatch하면 안 된다');
-  // 아무 후보도 병합할 수 없으면 병합 없이 성공으로 끝난다. 라벨은 건드리지 않는다.
+  assert.equal(behind.mergedPr, 2);
+  assert.deepEqual(behind.evaluated, [1, 2]);
+  assert.equal(behind.updatedBranch, false);
+  assert.equal(behind.dispatchedCi, false);
+  assert.equal(behind.labelRemoved, true);
+  // 아무 후보도 병합할 수 없으면 병합 없이 성공하며 DIRTY 라벨만 제거한다.
   const allBlocked = runQueue([
     { number: 1, mergeStateStatus: 'BLOCKED' },
     { number: 2, mergeStateStatus: 'DIRTY' },
@@ -1094,6 +1514,117 @@ test('막힌 후보는 뒤의 후보를 굶기지 않고 게이트는 후보별�
   assert.equal(allBlocked.status, 0);
   assert.equal(allBlocked.mergedPr, null);
   assert.equal(allBlocked.evaluated.length, 2);
+  assert.equal(allBlocked.labelRemoved, true);
+});
+
+test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과한다', async () => {
+  const workflow = await readWorkflow();
+  const queueLoop = workflow.match(
+    /# queue-loop-begin\n([\s\S]*?)\n\s+# queue-loop-end/,
+  )?.[1];
+  assert.ok(queueLoop, 'queue loop must stay testable');
+  const runQueue = makeRunQueue(queueLoop, budgetConstantsOf(workflow));
+
+  const tagAndDigest = `ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(64)}`;
+  const eligible = runQueue([
+    {
+      number: 41,
+      mergeStateStatus: 'CLEAN',
+      reviewed: false,
+      authorized: false,
+      dependabotCompose: true,
+      dependencyPatch: `-    image: ghcr.io/a/image:1.0.0@sha256:${'b'.repeat(64)}\n+    image: ${tagAndDigest}`,
+    },
+  ]);
+  assert.equal(eligible.mergedPr, 41, 'exact dependency-only candidate must bypass only Review and marker');
+
+  for (const override of [
+    { dependabotLogin: 'dependabot-preview[bot]' },
+    { dependabotId: 1 },
+    { dependabotType: 'User' },
+    { dependencyCommitCount: 2 },
+    { dependencyHead: 'stale' },
+    { dependencyRef: 'other-ref' },
+    { dependencyRepository: 'other/repo' },
+    { dependencyFile: '.github/workflows/ci.yml' },
+    { dependencyPatch: '+ environment:\n+   FOO: bar' },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest ', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest\t', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: latest', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ${EASYSUBWAY_BACKEND_IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: "ghcr.io/a/image:latest"', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:latest # comment', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:latest@sha256:${'a'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ghcr.io/a/image:1.0.1', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:@sha256:${'a'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'A'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(63)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(64)}@sha256:${'b'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ${IMAGE}', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: '+ image: ', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: null, dependencyAdditions: 0, dependencyDeletions: 0, dependencyChanges: 0 },
+    { dependencyChanges: 1 },
+    { dependencyAdditions: '1' },
+    { workflowRunsFail: true },
+    { workflowRunsMalformed: true },
+    { workflowRunsOverflow: true, workflowRunTotalCount: 100 },
+    { workflowRunTotalCount: 2 },
+    { workflowRunHead: 'stale' },
+    { workflowRunBranch: 'other-ref' },
+    { workflowRunRepository: 'other/repo' },
+    { workflowRunHeadRepository: 'other/repo' },
+    { workflowRunId: 1 },
+    { workflowRunEvent: 'push' },
+    { workflowRunActor: { login: 'owner', id: 1, type: 'User' } },
+    { workflowRunTriggeringActor: { login: 'owner', id: 1, type: 'User' } },
+  ]) {
+    const rejected = runQueue([
+      { number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true, ...override },
+    ]);
+    assert.equal(rejected.mergedPr, null, `invalid dependency candidate must fail closed: ${JSON.stringify(override)}`);
+  }
+
+  for (const dependencyPatch of [
+    `+ image: ${tagAndDigest}`,
+    `+ image: ghcr.io/a/image@sha256:${'a'.repeat(64)}`,
+  ]) {
+    assert.equal(
+      runQueue([{
+        number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true,
+        dependencyPatch, dependencyDeletions: 0, dependencyChanges: 1,
+      }]).mergedPr,
+      41,
+      `pinned literal locator must be admitted: ${dependencyPatch}`,
+    );
+  }
+
+  for (const mergeStateStatus of ['HAS_HOOKS', 'UNSTABLE', 'BLOCKED']) {
+    assert.equal(
+      runQueue([{ number: 41, mergeStateStatus, reviewed: false, authorized: false, dependabotCompose: true }]).mergedPr,
+      null,
+      `Review-less dependency exemption must require CLEAN, got ${mergeStateStatus}`,
+    );
+  }
+
+  for (const failure of ['restReadFails', 'filesOverflow', 'filesMalformed']) {
+    assert.equal(
+      runQueue([{ number: 41, mergeStateStatus: 'CLEAN', [failure]: true }]).mergedPr,
+      41,
+      `ordinary reviewed PR must keep the Review path after ${failure}`,
+    );
+    assert.equal(
+      runQueue([{ number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true, [failure]: true }]).mergedPr,
+      null,
+      `Review-less dependency candidate must fail closed after ${failure}`,
+    );
+  }
+
+  assert.match(workflow, /# dependabot-compose-exception-begin/);
+  assert.match(workflow, /dependabot\[bot\]/);
+  assert.match(workflow, /49699333/);
+  assert.match(workflow, /infra\/docker-compose\.yml/);
+  assert.match(workflow, /EASYSUBWAY_BACKEND_IMAGE/);
 });
 
 test('후보 창은 API 지분·timeout·실측 큐 깊이 세 기준으로 유도되고 모든 후보에 도달한다', async () => {
@@ -1102,7 +1633,7 @@ test('후보 창은 API 지분·timeout·실측 큐 깊이 세 기준으로 유�
   // 창 크기는 이 저장소 값으로 다시 계산해야 한다. 형제 저장소 상수(backend 6, mobile 20)를
   // 그대로 쓰면 실행당 청구가 이 저장소가 허용하기로 한 지분을 넘는다.
   const declaredWindow = declaredWindowOf(workflow);
-  assert.equal(declaredWindow, 4, 'window ceiling must stay pinned to the derived value');
+  assert.equal(declaredWindow, 3, 'window ceiling must stay pinned to the derived value');
   const rationale = workflow.slice(
     workflow.indexOf('# queue-loop-begin'),
     workflow.indexOf('# candidate-budget-begin'),
@@ -1174,16 +1705,16 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   const reserve = budgetConstantOf(workflow, 'reserve');
   const fixedCost = budgetConstantOf(workflow, 'fixed_cost');
   const perCandidate = budgetConstantOf(workflow, 'per_candidate');
-  assert.equal(windowMax, 4);
+  assert.equal(windowMax, 3);
   // 이 저장소에는 큐가 지켜 줘야 할 producer 체인이 없다. 예약분은 큐가 자기 다음 실행과
-  // 운영자 조회 몫까지 태우지 않게 하는 하한이다. 실행당 고정 비용은 17회(ruleset 1 +
-  // gh pr list 1 + 아래 fixed_cost 15)이고, 200회면 그 기준으로 11회 실행분(187회)이
-  // 남는다. fixed_cost 15는 그중 BEHIND 경로 몫이다.
+  // 운영자 조회 몫까지 태우지 않게 하는 하한이다. 실행당 고정 비용은 18회(ruleset 1 +
+  // gh pr list 1 + 아래 fixed_cost 16)이고, 200회면 그 기준으로 11회 실행분(198회)이
+  // 남는다. fixed_cost 16은 label marker, PR-visible fail-closed와 API 응답 변동을 위한 보수적 여유다.
   assert.equal(reserve, 200, 'shared-limit reserve must stay pinned');
-  assert.equal(fixedCost, 15);
-  // 후보당 청구는 호출 5회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
-  // (pr view 1 + reviewThreads 1 + REST 3종 * 3페이지). `--paginate`는 쓰지 않는다.
-  assert.equal(perCandidate, 11, 'per-candidate charge must match the page-capped reads');
+  assert.equal(fixedCost, 16);
+  // 후보당 청구는 호출 10회가 아니라 read_pages와 provenance 조회의 상한까지 덮는 값이다
+  // (pr view 1 + reviewThreads 1 + REST PR 1 + REST 6종 * 3페이지 + actions-runs 3회). `--paginate`는 쓰지 않는다.
+  assert.equal(perCandidate, 24, 'per-candidate charge must match the page-capped reads');
 
   // 응답 payload를 주고 워크플로의 jq 질의를 실제 jq로 적용해 `gh --jq`를 그대로 흉내낸다.
   const runBudget = (stub) =>
@@ -1210,12 +1741,13 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   // 기대값은 워크플로 상수로 되계산하지 않고 고정한다. 유도식을 바꾸는 것은 결정이므로
   // 테스트도 함께 고쳐야 한다.
   for (const [remaining, expected] of [
-    [5000, 4],
-    [1000, 4],
-    [259, 4],
-    [258, 3],
-    [248, 3],
-    [226, 1],
+    [5000, 3],
+    [1000, 3],
+    [288, 3],
+    [287, 2],
+    [264, 2],
+    [263, 1],
+    [240, 1],
   ]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block failed at remaining=${remaining}: ${result.stderr}`);
@@ -1234,12 +1766,12 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   }
 
   // 두 버킷 값이 다르면 작은 쪽이 창을 정한다.
-  assert.equal(runPayload(buckets(5000, 248)).stdout.trim(), 'window=3');
-  assert.equal(runPayload(buckets(248, 5000)).stdout.trim(), 'window=3');
+  assert.equal(runPayload(buckets(5000, 251)).stdout.trim(), 'window=1');
+  assert.equal(runPayload(buckets(251, 5000)).stdout.trim(), 'window=1');
 
   // 예약분에 닿으면 큐만 건너뛴다. 실행을 실패시키지 않는다 — 실패로 남기면 그 check가
   // 다음 판정 입력을 오염시킨다.
-  for (const remaining of [225, 220, 200, 0]) {
+  for (const remaining of [239, 220, 200, 0]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block must not fail at remaining=${remaining}`);
     assert.match(result.stdout, /::warning::/, `low budget must be announced at remaining=${remaining}`);
@@ -1640,7 +2172,7 @@ test('코디네이터는 main push CI를 되살리지 않는다', async () => {
   // 실행이 0건인 것을 실측했다. 네 저장소의 병합 경로를 일치시키기 위해 억제를 수용한다.
   const dispatches = [...workflow.matchAll(/gh workflow run ([^\s]+)[^\n]*--ref ([^\s"']+|"[^"]+")/g)]
     .map((match) => `${match[1]} ${match[2]}`);
-  assert.deepEqual(dispatches, ['ci.yml "${head_ref}"', 'ci.yml "${head_ref}"']);
+  assert.deepEqual(dispatches, ['ci.yml "${head_ref}"']);
   for (const basis of [
     'main push 실행도 되살리지 않는다',
     'mergedBy가',
@@ -1650,11 +2182,10 @@ test('코디네이터는 main push CI를 되살리지 않는다', async () => {
   }
 });
 
-test('BEHIND 경로의 CI 재부착이 명시 dispatch로 성립한다', async () => {
+test('required context 부재 복구용 CI dispatch가 성립한다', async () => {
   const ciWorkflow = await readFile(ciWorkflowUrl, 'utf8');
 
-  // GITHUB_TOKEN의 update-branch push는 synchronize를 만들지 못한다. 새 head에 required
-  // context를 붙이는 유일한 경로가 dispatch다.
+  // same-repository head에 required context가 없을 때 붙이는 경로가 dispatch다.
   assert.ok(ciWorkflow.includes('  workflow_dispatch:'));
   // dispatch 실행도 required context와 같은 이름의 check를 만들어야 한다.
   assert.match(ciWorkflow, /^ {4}name: Platform CI$/m);
@@ -1682,12 +2213,11 @@ test('병합 후 dispatch가 필요한 producer가 없다는 전제를 고정한
     'push 트리거 워크플로가 늘었다면 병합 후 명시 dispatch가 필요한지 다시 판정해야 한다',
   );
 
-  // 코디네이터가 만드는 명시 dispatch는 PR CI뿐이어야 한다(BEHIND 경로의 base 갱신 후,
-  // required context 부재 복구 두 자리). producer dispatch를 몰래 늘리면 판정 근거(위
-  // 실측)와 어긋난다.
+  // 코디네이터가 만드는 명시 dispatch는 required context 부재 복구용 PR CI 하나뿐이어야
+  // 한다. producer dispatch를 몰래 늘리면 판정 근거(위 실측)와 어긋난다.
   const workflow = await readWorkflow();
   const dispatches = [...workflow.matchAll(/gh workflow run ([^\s]+)/g)].map((match) => match[1]);
-  assert.deepEqual(dispatches, ['ci.yml', 'ci.yml']);
+  assert.deepEqual(dispatches, ['ci.yml']);
   // 판정 근거는 주석으로 남아 있어야 한다. 근거 없이 값만 남으면 다음 사람이 되돌린다.
   for (const basis of ['cd.yml', 'sensitive-backup-retention.yml', '병합 후 실행되어야 하는 producer는 없다']) {
     assert.ok(workflow.includes(basis), `producer 판정 근거 누락: ${basis}`);

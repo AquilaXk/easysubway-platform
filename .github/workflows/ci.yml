@@ -1,9 +1,8 @@
 name: Platform CI
 
 on:
-  # automerge coordinator가 BEHIND PR의 base를 GITHUB_TOKEN으로 갱신하면 synchronize
-  # 이벤트가 뜨지 않아 새 head에 required context(Platform CI)가 붙지 않는다.
-  # 그 경로를 잇는 유일한 수단이 명시 dispatch다.
+  # automerge-queue가 same-repository head의 required context 누락을 복구하려고
+  # gh workflow run ci.yml을 호출한다.
   workflow_dispatch:
   pull_request:
   push:
@@ -19,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -34,28 +33,20 @@ jobs:
             rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
-
-      - name: Stage pinned contracts
-        shell: bash
-        run: |
-          curl --fail --silent --show-error --location \
-            --retry 3 --retry-delay 2 --retry-all-errors \
-            --connect-timeout 10 --max-time 60 \
-            --output "${RUNNER_TEMP}/platform-contracts.json" \
-            https://raw.githubusercontent.com/AquilaXk/easysubway/main/contracts/bundles/platform-contracts-v1.0.0.json
-          node tools/platform/stage-contracts.mjs \
-            --lock contracts.lock.json \
-            --input "${RUNNER_TEMP}/platform-contracts.json" \
-            --output build/contracts
 
       - name: Test platform contracts
         run: |
           node --test tools/ci/automerge-queue.test.mjs
-          node --test tools/platform/stage-contracts.test.mjs
+          node --test tools/platform/no-mutable-contract-source.test.mjs
           node --test tools/platform/validate-deployment-input.test.mjs
+          node --test tools/platform/validate-terraform-root-inventory.test.mjs
+          node --test tools/platform/journey-release-contract.test.mjs
+          node --test tools/platform/stage-journey-release-tuple.test.mjs
+          node --test tools/platform/read-staged-journey-release-tuple.test.mjs
+          node --test tools/ops/post-deploy-smoke.test.mjs
 
       - name: Validate production Compose
         env:
@@ -75,9 +66,19 @@ jobs:
           bash -n tools/ops/postgres-restore-rehearsal.sh
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
         with:
           terraform_version: 1.14.6
 
-      - name: Check Terraform formatting
-        run: terraform fmt -check -recursive infra/terraform
+      - name: Validate Terraform roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform fmt -check -recursive infra/terraform
+          tf_data_dir="${RUNNER_TEMP}/terraform-data/oci-always-free-a1-flex"
+          rm -rf "${tf_data_dir}"
+          mkdir -p "${tf_data_dir}"
+          export TF_DATA_DIR="${tf_data_dir}"
+          terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color
+          terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color
+          git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl
