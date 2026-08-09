@@ -1557,6 +1557,7 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
     { dependencyPatch: '+ image: ghcr.io/a/image:latest # comment', dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: `+ image: ghcr.io/a/image:latest@sha256:${'a'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: '+ image: ghcr.io/a/image:1.0.1', dependencyDeletions: 0, dependencyChanges: 1 },
+    { dependencyPatch: `+ image: ghcr.io/a/image:@sha256:${'a'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'A'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(63)}`, dependencyDeletions: 0, dependencyChanges: 1 },
     { dependencyPatch: `+ image: ghcr.io/a/image:1.0.1@sha256:${'a'.repeat(64)}@sha256:${'b'.repeat(64)}`, dependencyDeletions: 0, dependencyChanges: 1 },
