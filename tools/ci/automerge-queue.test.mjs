@@ -227,6 +227,7 @@ test('REST 목록 조회는 페이지 상한 안에서 읽고 넘치면 판정�
     'read_pages "repos/${repo}/pulls/${pr}/commits"',
     'read_pages "repos/${repo}/pulls/${pr}/files"',
     'gh api "repos/${repo}/pulls/${pr}"',
+    'gh api "repos/${repo}/actions/runs?head_sha=${head}&per_page=100"',
     'read_pages "repos/${repo}/commits/${head}/check-runs"',
     'read_pages "repos/${repo}/commits/${head}/statuses"',
   ]) {
@@ -1235,11 +1236,34 @@ const makeRunQueue =
     writeFileSync(
       join(dir, `rest-${pr.number}.json`),
       JSON.stringify({
-        head: { sha: pr.dependencyHead ?? head },
+        head: {
+          sha: pr.dependencyHead ?? head,
+          ref: pr.dependencyRef ?? `feature-${pr.number}`,
+          repo: { full_name: pr.dependencyRepository ?? 'o/r' },
+        },
         user: pr.dependabotCompose ? dependabot : { login: 'owner', id: 1, type: 'User' },
       }),
     );
     if (pr.restReadFails) writeFileSync(join(dir, `rest-fail-${pr.number}`), '1');
+    writeFileSync(
+      join(dir, `runs-${pr.number}.json`),
+      pr.workflowRunsMalformed ? '{' : JSON.stringify({
+        total_count: pr.workflowRunTotalCount ?? 1,
+        workflow_runs: pr.workflowRunsOverflow
+          ? Array.from({ length: 100 }, () => ({}))
+          : [{
+              workflow_id: pr.workflowRunId ?? 324173434,
+              head_sha: pr.workflowRunHead ?? head,
+              head_branch: pr.workflowRunBranch ?? `feature-${pr.number}`,
+              event: pr.workflowRunEvent ?? 'pull_request',
+              repository: { full_name: pr.workflowRunRepository ?? 'o/r' },
+              head_repository: { full_name: pr.workflowRunHeadRepository ?? 'o/r' },
+              actor: pr.workflowRunActor ?? dependabot,
+              triggering_actor: pr.workflowRunTriggeringActor ?? dependabot,
+            }],
+      }),
+    );
+    if (pr.workflowRunsFail) writeFileSync(join(dir, `runs-fail-${pr.number}`), '1');
     writeFileSync(
       join(dir, `files-${pr.number}.json`),
       pr.filesMalformed ? '{' : JSON.stringify(pr.filesOverflow
@@ -1318,6 +1342,7 @@ const makeRunQueue =
     '    *issues/*/comments*) n="${all#*issues/}"; n="${n%%/comments*}"; cat "$FIX/comments-$n.json" ;;',
     '    *pulls/*/commits*) n="${all#*pulls/}"; n="${n%%/commits*}"; cat "$FIX/commits-$n.json" ;;',
     '    *pulls/*/reviews*) n="${all#*pulls/}"; n="${n%%/reviews*}"; cat "$FIX/reviews-$n.json" ;;',
+    '    *actions/runs*) h="${all#*head_sha=}"; h="${h%%&*}"; n="${h#head}"; [ -f "$FIX/runs-fail-$n" ] && return 1; cat "$FIX/runs-$n.json" ;;',
     '    *repos/*/pulls/*) n="${all#*pulls/}"; n="${n%% *}"; [ -f "$FIX/rest-fail-$n" ] && return 1; cat "$FIX/rest-$n.json" ;;',
     '    *graphql*) n="${all#*number=}"; n="${n%% *}"; cat "$FIX/threads-$n.json" ;;',
     '    *check-runs*) h="${all#*commits/}"; h="${h%%/check-runs*}"; cat "$FIX/checks-$h.json" ;;',
@@ -1511,6 +1536,8 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
     { dependabotType: 'User' },
     { dependencyCommitCount: 2 },
     { dependencyHead: 'stale' },
+    { dependencyRef: 'other-ref' },
+    { dependencyRepository: 'other/repo' },
     { dependencyFile: '.github/workflows/ci.yml' },
     { dependencyPatch: '+ environment:\n+   FOO: bar' },
     { dependencyPatch: '+ image: ghcr.io/a/image:latest', dependencyDeletions: 0, dependencyChanges: 1 },
@@ -1525,6 +1552,18 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
     { dependencyPatch: null, dependencyAdditions: 0, dependencyDeletions: 0, dependencyChanges: 0 },
     { dependencyChanges: 1 },
     { dependencyAdditions: '1' },
+    { workflowRunsFail: true },
+    { workflowRunsMalformed: true },
+    { workflowRunsOverflow: true, workflowRunTotalCount: 100 },
+    { workflowRunTotalCount: 2 },
+    { workflowRunHead: 'stale' },
+    { workflowRunBranch: 'other-ref' },
+    { workflowRunRepository: 'other/repo' },
+    { workflowRunHeadRepository: 'other/repo' },
+    { workflowRunId: 1 },
+    { workflowRunEvent: 'push' },
+    { workflowRunActor: { login: 'owner', id: 1, type: 'User' } },
+    { workflowRunTriggeringActor: { login: 'owner', id: 1, type: 'User' } },
   ]) {
     const rejected = runQueue([
       { number: 41, mergeStateStatus: 'CLEAN', reviewed: false, authorized: false, dependabotCompose: true, ...override },
@@ -1659,9 +1698,9 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   // 남는다. fixed_cost 16은 label marker, PR-visible fail-closed와 API 응답 변동을 위한 보수적 여유다.
   assert.equal(reserve, 200, 'shared-limit reserve must stay pinned');
   assert.equal(fixedCost, 16);
-  // 후보당 청구는 호출 9회가 아니라 read_pages의 page_limit=3까지 덮는 값이다
-  // (pr view 1 + reviewThreads 1 + REST PR 1 + REST 6종 * 3페이지). `--paginate`는 쓰지 않는다.
-  assert.equal(perCandidate, 21, 'per-candidate charge must match the page-capped reads');
+  // 후보당 청구는 호출 10회가 아니라 read_pages와 provenance 조회의 상한까지 덮는 값이다
+  // (pr view 1 + reviewThreads 1 + REST PR 1 + REST 6종 * 3페이지 + actions-runs 3회). `--paginate`는 쓰지 않는다.
+  assert.equal(perCandidate, 24, 'per-candidate charge must match the page-capped reads');
 
   // 응답 payload를 주고 워크플로의 jq 질의를 실제 jq로 적용해 `gh --jq`를 그대로 흉내낸다.
   const runBudget = (stub) =>
@@ -1690,10 +1729,11 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
   for (const [remaining, expected] of [
     [5000, 3],
     [1000, 3],
-    [279, 3],
-    [278, 2],
-    [257, 1],
-    [237, 1],
+    [288, 3],
+    [287, 2],
+    [264, 2],
+    [263, 1],
+    [240, 1],
   ]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block failed at remaining=${remaining}: ${result.stderr}`);
@@ -1717,7 +1757,7 @@ test('창은 실측 잔량에서 정해지고 예약분 아래로는 큐를 돌�
 
   // 예약분에 닿으면 큐만 건너뛴다. 실행을 실패시키지 않는다 — 실패로 남기면 그 check가
   // 다음 판정 입력을 오염시킨다.
-  for (const remaining of [232, 220, 200, 0]) {
+  for (const remaining of [239, 220, 200, 0]) {
     const result = windowAt(remaining);
     assert.equal(result.status, 0, `budget block must not fail at remaining=${remaining}`);
     assert.match(result.stdout, /::warning::/, `low budget must be announced at remaining=${remaining}`);
