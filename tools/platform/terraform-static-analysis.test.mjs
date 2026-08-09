@@ -12,6 +12,17 @@ const publicBucketFixture = "tools/platform/fixtures/terraform-static-analysis/c
 const sshFixture = "tools/platform/fixtures/terraform-static-analysis/checkov-oci-unrestricted-ssh.tf.fixture";
 const tflintInfoUri = "https://github.com/terraform-linters/tflint";
 const testReportRoot = process.env.RUNNER_TEMP ?? tmpdir();
+const approvedDecisions = [
+  ["CKV_OCI_10", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약", "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음", "40", "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거", "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제"],
+  ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 datapack delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
+  ["CKV_OCI_9", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 object data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제"],
+  ["CKV_OCI_2", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 approved backup/restore architecture와 retention·cost·monitoring contract가 없음", "volume loss/corruption 시 재구성 불가능한 Docker data가 RPO/RTO 보장 없이 손실될 수 있음", "48", "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소", "approved backup policy·RPO/RTO·retention/cost·monitoring/alert owner·restore rehearsal, CKV_OCI_2 0, policy decision 삭제"],
+  ["CKV_OCI_3", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 block-volume data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, volume kms_key_id plan evidence, CKV_OCI_3 0, policy decision 삭제"],
+].map(([ruleId, file, resourceAddress, disposition, reason, impact, issue, ownerIssueTitle, removalCondition]) => ({
+  scanner: "CHECKOV", ruleId, rootId, path: `${rootPath}/${file}`, resourceAddress, resourceIdentitySource: "RESOURCE", disposition, reason, impact,
+  ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2026-11-07",
+}));
+const currentCheckovFindings = approvedDecisions.map(({ ruleId, path, resourceAddress }) => ({ ruleId, path: path.slice(`${rootPath}/`.length), resourceAddress }));
 
 function write(directory, path, value) { writeFileSync(join(directory, path), value); }
 function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: ruleId, name: ruleId } : null) {
@@ -21,8 +32,16 @@ function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: r
     { tool: { driver: { name: "tflint-errors", version: "0.64.0", informationUri: tflintInfoUri, rules: [] } }, results: [] },
   ] });
 }
+function checkovSarifRecords(records, driverName = "Checkov", rules = records.map(({ ruleId }) => ({ id: ruleId, name: ruleId }))) {
+  return JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: driverName, version: "3.3.9", rules } }, results: records.map(({ ruleId, path }) => ({ ruleId, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] })) }] });
+}
 function checkovSarif(ruleId = null, uri = "datapack_object_storage.tf", driverName = "Checkov", rules = ruleId ? [{ id: ruleId, name: ruleId }] : []) {
-  return JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: driverName, version: "3.3.9", rules } }, results: ruleId ? [{ ruleId, locations: [{ physicalLocation: { artifactLocation: { uri } } }] }] : [] }] });
+  return checkovSarifRecords(ruleId ? [{ ruleId, path: uri }] : [], driverName, rules);
+}
+function checkovJsonRecords(records) {
+  return JSON.stringify({ check_type: "terraform", results: {
+    passed_checks: [], failed_checks: records.map(({ ruleId, path, resourceAddress }) => ({ check_id: ruleId, check_result: { result: "FAILED" }, file_path: `/${path}`, resource_address: null, resource: resourceAddress })), skipped_checks: [], parsing_errors: [],
+  }, summary: { passed: 0, failed: records.length, skipped: 0, parsing_errors: 0, resource_count: 1, checkov_version: "3.3.9" }, url: null });
 }
 function checkovJson(ruleId = null, path = "/datapack_object_storage.tf", resourceAddress = null, resource = "oci_objectstorage_bucket.datapack") {
   return JSON.stringify({ check_type: "terraform", results: {
@@ -51,10 +70,10 @@ function recordFixtures(directory) {
     recordFixture({ reportDirectory: directory, scanner, fixturePath, exit, expectedRuleId, rawSarifPath: `${stem}.sarif`, structuredJsonPath: json ? `${stem}.json` : null });
   }
 }
-function recordApprovedReports(directory) {
+function recordApprovedReports(directory, findings = currentCheckovFindings) {
   write(directory, "tflint-root.sarif", tflintSarif());
-  write(directory, "checkov-root.sarif", checkovSarif("CKV_OCI_10"));
-  write(directory, "checkov-root.json", checkovJson("CKV_OCI_10"));
+  write(directory, "checkov-root.sarif", checkovSarifRecords(findings));
+  write(directory, "checkov-root.json", checkovJsonRecords(findings));
   recordScan({ reportDirectory: directory, scanner: "TFLINT", rootId, rootPath, exit: 0, rawSarifPath: "tflint-root.sarif", structuredJsonPath: null });
   recordScan({ reportDirectory: directory, scanner: "CHECKOV", rootId, rootPath, exit: 1, rawSarifPath: "checkov-root.sarif", structuredJsonPath: "checkov-root.json" });
 }
@@ -63,17 +82,34 @@ test("policy is closed and pins the exact bundled TFLint ruleset", () => {
   const { policy } = loadPolicy();
   assert.deepEqual(Object.keys(policy), ["schemaVersion", "artifactKind", "inventoryPath", "toolchain", "execution", "report", "suppressions"]);
   assert.equal(policy.toolchain.tflint.rulesetVersion, "0.15.0-bundled");
-  assert.equal(policy.suppressions[0].ruleId, "CKV_OCI_10");
-  assert.equal(policy.suppressions[0].resourceIdentitySource, "RESOURCE");
-  for (const key of ["reason", "impact", "ownerIssueTitle", "removalCondition", "resourceIdentitySource"]) {
+  assert.deepEqual(policy.suppressions, approvedDecisions);
+  for (const key of ["ownerIssueUrl", "ownerIssueTitle", "ownerIssueState", "expiresAt", "path", "resourceAddress", "ruleId", "reason", "impact", "removalCondition", "resourceIdentitySource"]) {
     const mutated = structuredClone(policy);
     mutated.suppressions[0][key] = "mutated";
-    assert.throws(() => validatePolicy(mutated), /approved Platform #40/);
+    assert.throws(() => validatePolicy(mutated), /approved Platform decisions/);
   }
+  const reordered = structuredClone(policy);
+  reordered.suppressions.reverse();
+  assert.throws(() => validatePolicy(reordered), /approved Platform decisions/);
+  const duplicated = structuredClone(policy);
+  duplicated.suppressions.push(structuredClone(duplicated.suppressions[0]));
+  assert.throws(() => validatePolicy(duplicated), /approved Platform decisions/);
 });
 
 test("test report directories use the production RUNNER_TEMP root", () => {
   assert.equal(testReportRoot, process.env.RUNNER_TEMP ?? tmpdir());
+});
+
+test("only the five approved current Checkov identities normalize away from FIX_REQUIRED", () => {
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-unclassified-"));
+  try {
+    recordToolChecks(directory);
+    recordApprovedReports(directory, [...currentCheckovFindings, { ruleId: "CKV_OCI_999", path: "storage.tf", resourceAddress: "oci_core_volume.data[0]" }]);
+    recordFixtures(directory);
+    const result = analyze({ reportDirectory: directory, sourceSha: "a".repeat(40) });
+    assert.equal(result.outcome, "FAIL");
+    assert.deepEqual(result.findings.find(({ ruleId }) => ruleId === "CKV_OCI_999"), { scanner: "CHECKOV", ruleId: "CKV_OCI_999", rootId, path: `${rootPath}/storage.tf`, resourceAddress: "oci_core_volume.data[0]", resourceIdentitySource: "RESOURCE", disposition: "FIX_REQUIRED" });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("pinned-output-shaped TFLint version and two-run SARIF fail closed", () => {
@@ -227,7 +263,7 @@ test("analysis generates normalized combined SARIF and binds raw/tool/fixture ev
     assert.equal(result.outcome, "PASS");
     assert.deepEqual(Object.keys(result.reports), ["tflintSarif", "checkovSarif", "toolChecks", "scans", "fixtureChecks"]);
     assert.deepEqual(result.reports.toolChecks.map(({ scanner, version, ruleset }) => [scanner, version, ruleset]), [["CHECKOV", "3.3.9", null], ["TFLINT", "0.64.0", "0.15.0-bundled"]]);
-    assert.deepEqual(result.findings, [{ scanner: "CHECKOV", ruleId: "CKV_OCI_10", rootId, path: `${rootPath}/datapack_object_storage.tf`, resourceAddress: "oci_objectstorage_bucket.datapack", resourceIdentitySource: "RESOURCE", disposition: "ACCEPTED_BOUNDED_RISK" }]);
+    assert.deepEqual(result.findings, approvedDecisions.map(({ scanner, ruleId, rootId: findingRootId, path, resourceAddress, resourceIdentitySource, disposition }) => ({ scanner, ruleId, rootId: findingRootId, path, resourceAddress, resourceIdentitySource, disposition })).sort((left, right) => JSON.stringify(left) < JSON.stringify(right) ? -1 : JSON.stringify(left) > JSON.stringify(right) ? 1 : 0));
     assert.deepEqual(Object.keys(result.findings[0]), ["scanner", "ruleId", "rootId", "path", "resourceAddress", "resourceIdentitySource", "disposition"]);
     assert.deepEqual(Object.keys(result.reports.fixtureChecks[0]), ["scanner", "fixturePath", "sourceSha256", "expectedRuleId", "exit", "rawSarifSha256", "structuredJsonSha256"]);
     const combined = JSON.parse(readFileSync(join(directory, "checkov.sarif"), "utf8"));

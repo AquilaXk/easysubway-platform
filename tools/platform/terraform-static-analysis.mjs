@@ -41,19 +41,41 @@ function readJson(path) {
 }
 function readRepositoryJson(relativePath) { return readCanonicalJson(resolve(repository, relativePath)); }
 function within(parent, candidate) { return candidate === parent || candidate.startsWith(`${parent}/`); }
-function runDirectory(reportDirectory) {
+function canonicalTemporaryRoot(root, label) {
+  if (typeof root !== "string" || root.length === 0 || !isAbsolute(root) || root !== resolve(root)) fail(`${label} is invalid`);
+  const metadata = lstatSync(root);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail(`${label} must be a real directory`);
+  return realpathSync(root);
+}
+function runDirectory(reportDirectory, approvedRoot) {
   if (typeof reportDirectory !== "string" || !isAbsolute(reportDirectory) || reportDirectory !== resolve(reportDirectory)) fail("report directory identity is invalid");
-  const configuredRoot = process.env.RUNNER_TEMP ?? tmpdir();
-  const canonicalRoot = realpathSync(resolve(configuredRoot));
   const metadata = lstatSync(reportDirectory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail("report directory must be a real directory");
   const canonicalDirectory = realpathSync(reportDirectory);
-  if (!within(canonicalRoot, canonicalDirectory)) fail("report directory escapes the task-owned temp root");
+  if (!within(approvedRoot, canonicalDirectory)) fail("report directory escapes the task-owned temp root");
   return canonicalDirectory;
+}
+function productionReportDirectory() {
+  const runnerTemp = process.env.RUNNER_TEMP;
+  const canonicalRunnerTemp = canonicalTemporaryRoot(runnerTemp, "RUNNER_TEMP");
+  return runDirectory(resolve(canonicalRunnerTemp, "terraform-static-analysis"), canonicalRunnerTemp);
+}
+function testReportDirectory(reportDirectory) {
+  return runDirectory(reportDirectory, canonicalTemporaryRoot(process.env.RUNNER_TEMP ?? tmpdir(), "test report root"));
+}
+function resolvedRunDirectory({ reportDirectory, approvedRoot }) {
+  return approvedRoot === undefined ? testReportDirectory(reportDirectory) : runDirectory(reportDirectory, approvedRoot);
+}
+function productionInput() {
+  const reportDirectory = productionReportDirectory();
+  return { reportDirectory, approvedRoot: reportDirectory };
 }
 function internalPath(directory, path) {
   if (!safeRelativePath(path)) fail("internal report path is unsafe");
-  const canonicalDirectory = runDirectory(directory);
+  if (typeof directory !== "string" || !isAbsolute(directory) || directory !== resolve(directory)) fail("current run directory identity is invalid");
+  const directoryMetadata = lstatSync(directory);
+  if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) fail("current run directory must be a real directory");
+  const canonicalDirectory = realpathSync(directory);
   const absolute = resolve(canonicalDirectory, path);
   if (!within(canonicalDirectory, absolute)) fail("internal report path escapes the current run");
   const parent = realpathSync(dirname(absolute));
@@ -89,14 +111,48 @@ function fixtureRecordsPath(directory) { return internalPath(directory, ".fixtur
 function toolRecordsPath(directory) { return internalPath(directory, ".tool-checks.json"); }
 function markerPath(directory) { return internalPath(directory, ".enforced-success.json"); }
 function readRecords(path) { return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : []; }
+const fixtureRegistry = [
+  { scanner: "CHECKOV", id: "checkov-oci-public-bucket", fixturePath: "tools/platform/fixtures/terraform-static-analysis/checkov-oci-public-bucket.tf.fixture", expectedRuleId: "CKV_OCI_10" },
+  { scanner: "CHECKOV", id: "checkov-oci-unrestricted-ssh", fixturePath: "tools/platform/fixtures/terraform-static-analysis/checkov-oci-unrestricted-ssh.tf.fixture", expectedRuleId: "CKV_OCI_19" },
+  { scanner: "TFLINT", id: "tflint-required-version", fixturePath: "tools/platform/fixtures/terraform-static-analysis/tflint-required-version.tf.fixture", expectedRuleId: "terraform_required_version" },
+];
+const toolReportPaths = {
+  TFLINT: { stdoutPath: "tflint-version.stdout", stderrPath: "tflint-version.stderr" },
+  CHECKOV: { stdoutPath: "checkov-version.stdout", stderrPath: "checkov-version.stderr" },
+};
 function expectedRoots(inventory) { return inventory.roots.flatMap(({ id, path }) => [["CHECKOV", id, path], ["TFLINT", id, path]]).sort((a, b) => compareCodepoint(JSON.stringify(a), JSON.stringify(b))); }
-function expectedFixtures() {
-  return [
-    ["CHECKOV", "tools/platform/fixtures/terraform-static-analysis/checkov-oci-public-bucket.tf.fixture", "CKV_OCI_10"],
-    ["CHECKOV", "tools/platform/fixtures/terraform-static-analysis/checkov-oci-unrestricted-ssh.tf.fixture", "CKV_OCI_19"],
-    ["TFLINT", "tools/platform/fixtures/terraform-static-analysis/tflint-required-version.tf.fixture", "terraform_required_version"],
-  ];
+function expectedFixtures() { return fixtureRegistry.map(({ scanner, fixturePath, expectedRuleId }) => [scanner, fixturePath, expectedRuleId]); }
+function scanReportPaths(scanner, rootId) {
+  if (!scannerNames.has(scanner) || typeof rootId !== "string" || !rootId) fail("scan identity is invalid");
+  const prefix = `${scanner.toLowerCase()}-${rootId}`;
+  return { rawSarifPath: `${prefix}.sarif`, structuredJsonPath: scanner === "TFLINT" ? null : `${prefix}.json` };
 }
+function fixtureDefinition(scanner, fixtureId) {
+  const fixture = fixtureRegistry.find((item) => item.scanner === scanner && item.id === fixtureId);
+  if (!fixture) fail("fixture identity is invalid");
+  return fixture;
+}
+function fixtureReportPaths(scanner, fixtureId) {
+  fixtureDefinition(scanner, fixtureId);
+  const prefix = `fixture-${fixtureId}`;
+  return { rawSarifPath: `${prefix}.sarif`, structuredJsonPath: scanner === "TFLINT" ? null : `${prefix}.json` };
+}
+function inventoryRoot(rootId) {
+  const root = loadInventory().inventory.roots.find((item) => item.id === rootId);
+  if (!root) fail("inventory root identity is invalid");
+  return root;
+}
+const approvedSuppressionRows = [
+  ["CKV_OCI_10", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약", "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음", "40", "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거", "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제"],
+  ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 datapack delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
+  ["CKV_OCI_9", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 object data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제"],
+  ["CKV_OCI_2", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 approved backup/restore architecture와 retention·cost·monitoring contract가 없음", "volume loss/corruption 시 재구성 불가능한 Docker data가 RPO/RTO 보장 없이 손실될 수 있음", "48", "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소", "approved backup policy·RPO/RTO·retention/cost·monitoring/alert owner·restore rehearsal, CKV_OCI_2 0, policy decision 삭제"],
+  ["CKV_OCI_3", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 block-volume data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, volume kms_key_id plan evidence, CKV_OCI_3 0, policy decision 삭제"],
+];
+const approvedSuppressions = approvedSuppressionRows.map(([ruleId, file, resourceAddress, disposition, reason, impact, issue, ownerIssueTitle, removalCondition]) => ({
+  scanner: "CHECKOV", ruleId, rootId: "oci-always-free-a1-flex", path: `infra/terraform/oci/always-free-a1-flex/${file}`, resourceAddress, resourceIdentitySource: "RESOURCE", disposition, reason, impact,
+  ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2026-11-07",
+}));
 
 export function validatePolicy(policy) {
   exactKeys(policy, requiredPolicyKeys, "policy");
@@ -111,10 +167,9 @@ export function validatePolicy(policy) {
   if (policy.execution.network !== "NONE" || policy.execution.repositoryMount !== "READ_ONLY" || policy.execution.reportMount !== "READ_WRITE" || policy.execution.callModuleType !== "LOCAL" || JSON.stringify(policy.execution.forbiddenInputs) !== JSON.stringify(["credentials", "state", "plan", "tfvars", "cloudApi"])) fail("execution isolation is invalid");
   exactKeys(policy.report, ["schemaVersion", "artifactKind", "filenames", "sarifVersion", "hashAlgorithm", "retentionDays"], "report");
   if (policy.report.schemaVersion !== 1 || policy.report.artifactKind !== "terraform-static-analysis-result-v1" || policy.report.sarifVersion !== "2.1.0" || policy.report.hashAlgorithm !== "sha256" || policy.report.retentionDays !== 14 || JSON.stringify(policy.report.filenames) !== JSON.stringify(["tflint.sarif", "checkov.sarif", "terraform-static-analysis-result.json", "terraform-static-analysis-summary.md"])) fail("report contract is invalid");
-  if (!Array.isArray(policy.suppressions) || policy.suppressions.length !== 1) fail("initial suppressions must be the singleton approved decision");
-  const [decision] = policy.suppressions;
-  exactKeys(decision, requiredSuppressionKeys, "suppression");
-  if (decision.scanner !== "CHECKOV" || decision.ruleId !== "CKV_OCI_10" || decision.rootId !== "oci-always-free-a1-flex" || decision.path !== "infra/terraform/oci/always-free-a1-flex/datapack_object_storage.tf" || decision.resourceAddress !== "oci_objectstorage_bucket.datapack" || decision.resourceIdentitySource !== "RESOURCE" || decision.disposition !== "ACCEPTED_BOUNDED_RISK" || decision.reason !== "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약" || decision.impact !== "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음" || decision.ownerIssueUrl !== "https://github.com/AquilaXk/easysubway-platform/issues/40" || decision.ownerIssueTitle !== "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거" || decision.ownerIssueState !== "OPEN" || decision.removalCondition !== "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제" || decision.expiresAt !== "2026-11-07" || new Date(`${decision.expiresAt}T00:00:00Z`) < new Date()) fail("suppression is not the approved Platform #40 decision");
+  if (!Array.isArray(policy.suppressions) || policy.suppressions.length !== approvedSuppressions.length) fail("suppressions are not the approved Platform decisions");
+  for (const decision of policy.suppressions) exactKeys(decision, requiredSuppressionKeys, "suppression");
+  if (JSON.stringify(policy.suppressions) !== JSON.stringify(approvedSuppressions)) fail("suppressions are not the approved Platform decisions");
   return policy;
 }
 export function loadPolicy() {
@@ -246,7 +301,7 @@ function validateScan(input) {
   return { scanner, rootId, rootPath, exit, rawSarifPath, rawSarifSha256: sha256(readFileSync(sarifPath, "utf8")), structuredJsonPath, structuredJsonSha256: jsonPath === null ? null : sha256(readFileSync(jsonPath, "utf8")) };
 }
 export function recordScan(input) {
-  const directory = runDirectory(input.reportDirectory);
+  const directory = resolvedRunDirectory(input);
   const record = validateScan({ ...input, reportDirectory: directory });
   const records = readRecords(rawRecordsPath(directory));
   if (records.some((item) => item.scanner === record.scanner && item.rootId === record.rootId)) fail(`duplicate ${record.scanner} record for ${record.rootId}`);
@@ -264,7 +319,7 @@ function validateFixture(input) {
   return { scanner, fixturePath, sourceSha256: sha256(readFileSync(resolve(repository, fixturePath))), expectedRuleId, exit, rawSarifPath, rawSarifSha256: sha256(readFileSync(sarifPath, "utf8")), structuredJsonPath, structuredJsonSha256: jsonPath === null ? null : sha256(readFileSync(jsonPath, "utf8")) };
 }
 export function recordFixture(input) {
-  const directory = runDirectory(input.reportDirectory);
+  const directory = resolvedRunDirectory(input);
   const record = validateFixture({ ...input, reportDirectory: directory });
   const records = readRecords(fixtureRecordsPath(directory));
   if (records.some((item) => item.fixturePath === record.fixturePath)) fail(`duplicate fixture record for ${record.fixturePath}`);
@@ -281,7 +336,7 @@ function validateToolCheck({ reportDirectory, scanner, exit, stdoutPath, stderrP
   return { scanner, version: scanner === "TFLINT" ? "0.64.0" : "3.3.9", ruleset: scanner === "TFLINT" ? "0.15.0-bundled" : null, exit, stdoutPath, stdoutSha256: sha256(output), stderrPath, stderrSha256: sha256(stderr) };
 }
 export function recordToolCheck(input) {
-  const reportDirectory = runDirectory(input.reportDirectory);
+  const reportDirectory = resolvedRunDirectory(input);
   const record = validateToolCheck({ ...input, reportDirectory });
   const records = readRecords(toolRecordsPath(reportDirectory));
   if (records.some((item) => item.scanner === record.scanner)) fail(`duplicate ${record.scanner} tool check`);
@@ -369,11 +424,11 @@ function resultFindings(scans, inventory, policy) {
   if (new Set(findings.map((item) => JSON.stringify(item))).size !== findings.length) fail("duplicate normalized finding");
   return findings;
 }
-function buildResult({ reportDirectory, sourceSha }) {
+function buildResult({ reportDirectory, sourceSha, approvedRoot }) {
   const { policy, bytes: policyBytes } = loadPolicy();
   const { inventory, bytes: inventoryBytes } = loadInventory();
   if (!/^[0-9a-f]{40}$/i.test(sourceSha ?? "")) fail("sourceSha must be an exact commit SHA");
-  const directory = runDirectory(reportDirectory);
+  const directory = resolvedRunDirectory({ reportDirectory, approvedRoot });
   const { scans, fixtures, toolChecks } = readAndValidateRecords(directory, inventory);
   for (const scan of scans) scan.directory = directory;
   const tflint = combineSarifForScans(scans, "TFLINT");
@@ -415,8 +470,8 @@ function verifyFinalArtifacts(directory, { tflintBytes, checkovBytes, summaryByt
   if (readFileSync(internalPath(directory, "tflint.sarif"), "utf8") !== tflintBytes || readFileSync(internalPath(directory, "checkov.sarif"), "utf8") !== checkovBytes) fail("final combined SARIF differs from analyzed evidence");
   if (readFileSync(internalPath(directory, "terraform-static-analysis-summary.md"), "utf8") !== summaryBytes) fail("final summary differs from analyzed evidence");
 }
-export function enforce({ reportDirectory, sourceSha, tflintOutcome, checkovOutcome }) {
-  const directory = runDirectory(reportDirectory);
+export function enforce({ reportDirectory, sourceSha, tflintOutcome, checkovOutcome, approvedRoot }) {
+  const directory = resolvedRunDirectory({ reportDirectory, approvedRoot });
   const resultPath = internalPath(directory, "terraform-static-analysis-result.json");
   const { bytes: resultBytes, value: result } = readCanonicalJson(resultPath);
   exactKeys(result, resultKeys, "result");
@@ -429,20 +484,20 @@ export function enforce({ reportDirectory, sourceSha, tflintOutcome, checkovOutc
   exactKeys(result.reports.checkovSarif, ["path", "sha256"], "result.reports.checkovSarif");
   exactKeys(result.summary, ["tflint", "checkov", "suppressed", "unclassified"], "result.summary");
   for (const finding of result.findings) exactKeys(finding, findingKeys, "result finding");
-  const built = buildResult({ reportDirectory: directory, sourceSha });
+  const built = buildResult({ reportDirectory: directory, sourceSha, approvedRoot: directory });
   const expected = built.result;
   verifyFinalArtifacts(directory, built);
   if (JSON.stringify(result) !== JSON.stringify(expected) || result.outcome !== "PASS" || tflintOutcome !== "success" || checkovOutcome !== "success") fail("current scanner result is not a successful PASS");
   writeJson(markerPath(directory), { sourceSha, resultSha256: sha256(resultBytes) });
 }
-export function cleanup({ reportDirectory }) {
-  const directory = runDirectory(reportDirectory);
+export function cleanup({ reportDirectory, approvedRoot }) {
+  const directory = resolvedRunDirectory({ reportDirectory, approvedRoot });
   const marker = readCanonicalJson(markerPath(directory)).value;
   exactKeys(marker, ["sourceSha", "resultSha256"], "cleanup marker");
   const resultPath = internalPath(directory, "terraform-static-analysis-result.json");
   const resultBytes = readFileSync(resultPath, "utf8");
   if (marker.resultSha256 !== sha256(resultBytes)) fail("cleanup marker does not bind the current result");
-  const built = buildResult({ reportDirectory: directory, sourceSha: marker.sourceSha });
+  const built = buildResult({ reportDirectory: directory, sourceSha: marker.sourceSha, approvedRoot: directory });
   const { result } = built;
   verifyFinalArtifacts(directory, built);
   if (JSON.stringify(JSON.parse(resultBytes)) !== JSON.stringify(result)) fail("cleanup raw evidence differs from the enforced result");
@@ -461,27 +516,38 @@ export function cleanup({ reportDirectory }) {
   if (JSON.stringify(readdirSync(directory).sort(compareCodepoint)) !== JSON.stringify(expected)) fail("cleanup did not leave the exact artifact set");
 }
 function inventoryRoots() { return loadInventory().inventory.roots.map(({ id, path }) => `${id}\t${path}`); }
+function fixtureIds(scanner) {
+  if (!scannerNames.has(scanner)) fail("fixture scanner is invalid");
+  return fixtureRegistry.filter((fixture) => fixture.scanner === scanner).map(({ id }) => id);
+}
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const command = process.argv[2];
   if (command === "validate-policy") { loadPolicy(); process.stdout.write("terraform static analysis policy valid\n"); }
   else if (command === "list-roots") process.stdout.write(`${inventoryRoots().join("\n")}\n`);
+  else if (command === "list-fixtures") process.stdout.write(`${fixtureIds(process.argv[3]).join("\n")}\n`);
   else if (command === "record-tool-check") {
-    const [reportDirectory, scanner, exit, stdoutPath, stderrPath] = process.argv.slice(3);
-    if (!reportDirectory || !scanner || !exit || !stdoutPath || !stderrPath) fail("record-tool-check requires report directory, scanner, exit, stdout, and stderr paths");
-    recordToolCheck({ reportDirectory, scanner, exit: Number(exit), stdoutPath, stderrPath });
+    const [scanner, exit] = process.argv.slice(3);
+    if (!scanner || !exit || process.argv.length !== 5 || !toolReportPaths[scanner]) fail("record-tool-check requires scanner and exit");
+    recordToolCheck({ ...productionInput(), scanner, exit: Number(exit), ...toolReportPaths[scanner] });
   } else if (command === "record-scan") {
-    const [reportDirectory, scanner, rootId, rootPath, exit, rawSarifPath, structuredJsonPath] = process.argv.slice(3);
-    if (!reportDirectory || !scanner || !rootId || !rootPath || !exit || !rawSarifPath || structuredJsonPath === undefined) fail("record-scan requires exact raw report paths");
-    recordScan({ reportDirectory, scanner, rootId, rootPath, exit: Number(exit), rawSarifPath, structuredJsonPath: structuredJsonPath === "null" ? null : structuredJsonPath });
+    const [scanner, rootId, exit] = process.argv.slice(3);
+    if (!scanner || !rootId || !exit || process.argv.length !== 6) fail("record-scan requires scanner, root ID, and exit");
+    const root = inventoryRoot(rootId);
+    recordScan({ ...productionInput(), scanner, rootId: root.id, rootPath: root.path, exit: Number(exit), ...scanReportPaths(scanner, root.id) });
   } else if (command === "record-fixture") {
-    const [reportDirectory, scanner, fixturePath, exit, expectedRuleId, rawSarifPath, structuredJsonPath] = process.argv.slice(3);
-    if (!reportDirectory || !scanner || !fixturePath || !exit || !expectedRuleId || !rawSarifPath || structuredJsonPath === undefined) fail("record-fixture requires exact raw report paths");
-    recordFixture({ reportDirectory, scanner, fixturePath, exit: Number(exit), expectedRuleId, rawSarifPath, structuredJsonPath: structuredJsonPath === "null" ? null : structuredJsonPath });
+    const [scanner, fixtureId, exit] = process.argv.slice(3);
+    if (!scanner || !fixtureId || !exit || process.argv.length !== 6) fail("record-fixture requires scanner, fixture ID, and exit");
+    const fixture = fixtureDefinition(scanner, fixtureId);
+    recordFixture({ ...productionInput(), scanner, fixturePath: fixture.fixturePath, expectedRuleId: fixture.expectedRuleId, exit: Number(exit), ...fixtureReportPaths(scanner, fixture.id) });
   } else if (command === "analyze") {
-    const result = analyze({ reportDirectory: process.argv[3], sourceSha: process.env.GITHUB_SHA });
-    if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, readFileSync(internalPath(process.argv[3], "terraform-static-analysis-summary.md"), "utf8"), { flag: "a" });
+    if (process.argv.length !== 3) fail("analyze does not accept arguments");
+    const result = analyze({ ...productionInput(), sourceSha: process.env.GITHUB_SHA });
     if (!result) fail("analysis did not produce a result");
-  } else if (command === "enforce") enforce({ reportDirectory: process.argv[3], sourceSha: process.env.GITHUB_SHA, tflintOutcome: process.env.TFLINT_OUTCOME, checkovOutcome: process.env.CHECKOV_OUTCOME });
-  else if (command === "cleanup") cleanup({ reportDirectory: process.argv[3] });
-  else fail("expected validate-policy, list-roots, record-tool-check, record-scan, record-fixture, analyze, enforce, or cleanup");
+  } else if (command === "enforce") {
+    if (process.argv.length !== 3) fail("enforce does not accept arguments");
+    enforce({ ...productionInput(), sourceSha: process.env.GITHUB_SHA, tflintOutcome: process.env.TFLINT_OUTCOME, checkovOutcome: process.env.CHECKOV_OUTCOME });
+  } else if (command === "cleanup") {
+    if (process.argv.length !== 3) fail("cleanup does not accept arguments");
+    cleanup(productionInput());
+  } else fail("expected validate-policy, list-roots, list-fixtures, record-tool-check, record-scan, record-fixture, analyze, enforce, or cleanup");
 }
