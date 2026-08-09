@@ -16,8 +16,6 @@ locals {
   )
 
   # Canonical source: https://www.cloudflare.com/ips-v4/ (checked 2026-07-12).
-  cloudflare_ipv4_source_url   = "https://www.cloudflare.com/ips-v4/"
-  cloudflare_ipv4_checked_date = "2026-07-12"
   cloudflare_ipv4_ingress_cidrs = toset([
     "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
     "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
