@@ -2,6 +2,10 @@ name: Public Sensitivity Owner Receipt Caller
 
 on:
   workflow_dispatch:
+    inputs:
+      observed_at:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -9,6 +13,8 @@ permissions:
 
 jobs:
   receipt:
-    uses: AquilaXk/easysubway/.github/workflows/public-sensitivity-owner-receipt.yml@3d1590baa98c929ceabd0d2d44414cebcc643c6f
+    uses: AquilaXk/easysubway/.github/workflows/public-sensitivity-owner-receipt.yml@fa2f2602573651af6694e7f56077414b685987b9
+    with:
+      observed_at: ${{ inputs.observed_at }}
     secrets:
       D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}
