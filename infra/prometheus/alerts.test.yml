@@ -109,7 +109,7 @@ tests:
         alertname: AquilaBackendAppMetricsScrapeDown
         exp_alerts: []
 
-  # #2434: 높은 5xx + 충분한 트래픽(>1 req/min)이면 Critical multi-window burn-rate가 발화한다.
+  # Hub Issue #2434: 높은 5xx + 충분한 트래픽(>1 req/min)이면 Critical multi-window burn-rate가 발화한다.
   # interval 1m × 70표본으로 1h/5m 창을 채운다. rate()*60 ≈ 분당 증가분.
   - interval: 1m
     name: Backend5xxBurnRateCritical fires with high 5xx and traffic
@@ -132,7 +132,7 @@ tests:
               impact_ko: "짧은 시간에 오류 예산이 빠르게 소진되고 있어 사용자 요청 실패가 급증했을 수 있습니다."
               action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
 
-  # #2434: 트래픽 가드(<1 req/min)에서는 5xx가 있어도 Critical이 발화하지 않는다.
+  # Hub Issue #2434: 트래픽 가드(<1 req/min)에서는 5xx가 있어도 Critical이 발화하지 않는다.
   - interval: 1m
     name: Backend5xxBurnRateCritical stays silent under traffic guard
     input_series:
@@ -143,7 +143,7 @@ tests:
         alertname: Backend5xxBurnRateCritical
         exp_alerts: []
 
-  # #2434: Warning(6h+30m, 6x) — interval 5m × 85표본으로 6h/30m 창을 채운다.
+  # Hub Issue #2434: Warning(6h+30m, 6x) — interval 5m × 85표본으로 6h/30m 창을 채운다.
   - interval: 5m
     name: Backend5xxBurnRateWarning fires with high 5xx and traffic
     input_series:
@@ -165,7 +165,7 @@ tests:
               impact_ko: "중기 창에서 오류 예산 소진이 계속되면 SLO(99.9%) 위반으로 이어질 수 있습니다."
               action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
 
-  # #2434: Ticket(3d+6h, 1x) — interval 1h × 80표본으로 3d/6h 창을 채운다.
+  # Hub Issue #2434: Ticket(3d+6h, 1x) — interval 1h × 80표본으로 3d/6h 창을 채운다.
   # traffic guard: rate*60 > 1 → 1h 표본당 증가분이 60 초과여야 함(0+70/0+10 ≈ 80/h).
   - interval: 1h
     name: Backend5xxBurnRateTicket fires with high 5xx and traffic
