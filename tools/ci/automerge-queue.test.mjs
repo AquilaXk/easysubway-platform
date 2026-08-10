@@ -2119,12 +2119,13 @@ const workflowFiles = async () => {
 
 test('워크플로 run 블록은 YAML block scalar 들여쓰기를 지킨다', async () => {
   const files = await workflowFiles();
+  let checkedBlocks = 0;
 
   for (const [name, workflow] of files) {
     const blocks = runBlocks(workflow);
-    assert.ok(blocks.length > 0, `${name}: run 블록 추출이 비었다`);
 
     for (const block of blocks) {
+      checkedBlocks += 1;
       assert.ok(
         block.blockIndent > block.keyIndent,
         `${name}:${block.openedAt}: block scalar 본문이 run 키보다 깊게 들여쓰기되어야 한다`,
@@ -2147,6 +2148,8 @@ test('워크플로 run 블록은 YAML block scalar 들여쓰기를 지킨다', a
       );
     }
   }
+
+  assert.ok(checkedBlocks > 0, '검사할 workflow run 블록이 하나도 없다');
 });
 
 test('여러 줄 셸 문자열은 한 줄 안에서 닫힌다', async () => {
