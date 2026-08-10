@@ -87,7 +87,7 @@ services:
 
   # Transient blue/green standby: boots the candidate image on an alternate
   # port so deploy-backend.sh can validate it before promoting it onto the
-  # canonical "backend" container above (issue #2331). Never started by a
+  # canonical "backend" container above (Hub Issue #2331). Never started by a
   # bare `up`/`up -d` (deploy-backend.sh always names services explicitly);
   # `restart: "no"` keeps it from lingering if the host reboots mid-deploy —
   # every deploy run either promotes and removes it, or removes it on
@@ -99,7 +99,7 @@ services:
   # snapshot swap commit here, against the live database, before canonical is
   # touched — "old backend untouched" is a process/Nginx-level guarantee, not
   # a data-layer one. See the migration contract comment at the top of
-  # tools/deploy/deploy-backend.sh (issue #2331 review).
+  # tools/deploy/deploy-backend.sh (Hub Issue #2331 review).
   backend-standby:
     image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
     container_name: easysubway-backend-standby
@@ -354,7 +354,7 @@ services:
     depends_on:
       loki:
         condition: service_healthy
-    # grafana/alloy 이미지에 wget/curl이 없어 bash /dev/tcp로 ready를 판정한다 (#2449).
+    # grafana/alloy 이미지에 wget/curl이 없어 bash /dev/tcp로 ready를 판정한다 (Hub Issue #2449).
     healthcheck:
       test:
         [
