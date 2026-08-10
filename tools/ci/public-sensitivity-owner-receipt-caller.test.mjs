@@ -8,12 +8,16 @@ const callerUrl = new URL(
 );
 const ciWorkflowUrl = new URL('../../.github/workflows/ci.yml', import.meta.url);
 const commonWorkflow =
-  'AquilaXk/easysubway/.github/workflows/public-sensitivity-owner-receipt.yml@3d1590baa98c929ceabd0d2d44414cebcc643c6f';
+  'AquilaXk/easysubway/.github/workflows/public-sensitivity-owner-receipt.yml@fa2f2602573651af6694e7f56077414b685987b9';
 const expectedCaller = [
   'name: Public Sensitivity Owner Receipt Caller',
   '',
   'on:',
   '  workflow_dispatch:',
+  '    inputs:',
+  '      observed_at:',
+  '        required: true',
+  '        type: string',
   '',
   'permissions:',
   '  contents: read',
@@ -22,6 +26,8 @@ const expectedCaller = [
   'jobs:',
   '  receipt:',
   `    uses: ${commonWorkflow}`,
+  '    with:',
+  '      observed_at: ${{ inputs.observed_at }}',
   '    secrets:',
   '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}',
   '',
@@ -33,7 +39,10 @@ const validateCaller = (caller) => {
   const code = codeLines.join('\n');
 
   assert.match(code, /^name: Public Sensitivity Owner Receipt Caller$/m);
-  assert.match(code, /^on:\n  workflow_dispatch:\n\npermissions:/m);
+  assert.match(
+    code,
+    /^on:\n  workflow_dispatch:\n    inputs:\n      observed_at:\n        required: true\n        type: string\n\npermissions:/m,
+  );
   assert.match(code, /^permissions:\n  contents: read\n  actions: read\n\njobs:/m);
 
   const jobs = code.match(/^jobs:\n([\s\S]*)$/m)?.[1];
@@ -44,36 +53,98 @@ const validateCaller = (caller) => {
   );
   assert.equal((jobs.match(/^    uses:/gm) ?? []).length, 1, 'caller must invoke one reusable workflow');
   assert.match(jobs, new RegExp(`^    uses: ${commonWorkflow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.match(jobs, /^    with:\n      observed_at: \$\{\{ inputs\.observed_at \}\}\n    secrets:/m);
   assert.match(
     jobs,
     /^    secrets:\n      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: \$\{\{ secrets\.D20_SECRET_SCANNING_ALERTS_READ_TOKEN \}\}\s*$/m,
   );
+  assert.doesNotMatch(code, /secrets:\s*inherit/);
   assert.equal(
     (jobs.match(/^      [\w-]+:/gm) ?? []).length,
-    1,
-    'caller must map only the required token',
+    2,
+    'caller must forward only observed_at and map only the required token',
   );
 
-  assert.doesNotMatch(code, /secrets:\s*inherit/);
-  assert.doesNotMatch(jobs, /^ {4}(?:runs-on|steps|permissions|with):/m);
+  assert.doesNotMatch(jobs, /^ {4}(?:runs-on|steps|permissions):/m);
   assert.doesNotMatch(code, /self-hosted|\brun:/);
   assert.doesNotMatch(code, /actions:\s*write|contents:\s*write|permissions:\s*\{/);
-  assert.doesNotMatch(code, /public-sensitivity-owner-receipt\.yml@(?!3d1590baa98c929ceabd0d2d44414cebcc643c6f)/);
+  assert.doesNotMatch(code, /public-sensitivity-owner-receipt\.yml@(?!fa2f2602573651af6694e7f56077414b685987b9)/);
 };
 
 test('public sensitivity owner receipt caller is a least-privilege immutable reusable-workflow call', async () => {
   validateCaller(await readFile(callerUrl, 'utf8'));
 });
 
-test('caller contract rejects a quoted additional secret mapping', async () => {
+test('caller contract rejects a missing observed_at input', async () => {
   const caller = await readFile(callerUrl, 'utf8');
   const mutation = caller.replace(
-    '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}\n',
-    '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}\n' +
-      '      "ANOTHER_TOKEN": ${{ secrets.ANOTHER_TOKEN }}\n',
+    '    inputs:\n      observed_at:\n        required: true\n        type: string\n',
+    '',
   );
   assert.notEqual(mutation, caller);
   assert.throws(() => validateCaller(mutation));
+});
+
+test('caller contract rejects a wrong observed_at input', async () => {
+  const caller = await readFile(callerUrl, 'utf8');
+  const mutation = caller.replace('        type: string\n', '        type: boolean\n');
+  assert.notEqual(mutation, caller);
+  assert.throws(() => validateCaller(mutation));
+});
+
+test('caller contract rejects a default observed_at input', async () => {
+  const caller = await readFile(callerUrl, 'utf8');
+  const mutation = caller.replace('        type: string\n', '        type: string\n        default: now\n');
+  assert.notEqual(mutation, caller);
+  assert.throws(() => validateCaller(mutation));
+});
+
+test('caller contract rejects missing, extra, or wrong observed_at forwarding', async () => {
+  const caller = await readFile(callerUrl, 'utf8');
+  const mutations = [
+    caller.replace('    with:\n      observed_at: ${{ inputs.observed_at }}\n', ''),
+    caller.replace(
+      '      observed_at: ${{ inputs.observed_at }}\n',
+      '      observed_at: ${{ inputs.observed_at }}\n      extra: value\n',
+    ),
+    caller.replace('      observed_at: ${{ inputs.observed_at }}\n', '      observed_at: ${{ github.event.inputs.observed_at }}\n'),
+  ];
+
+  for (const mutation of mutations) {
+    assert.notEqual(mutation, caller);
+    assert.throws(() => validateCaller(mutation));
+  }
+});
+
+test('caller contract rejects an old or mutable reusable-workflow pin', async () => {
+  const caller = await readFile(callerUrl, 'utf8');
+  const mutations = [
+    caller.replace('fa2f2602573651af6694e7f56077414b685987b9', '3d1590baa98c929ceabd0d2d44414cebcc643c6f'),
+    caller.replace('fa2f2602573651af6694e7f56077414b685987b9', 'main'),
+  ];
+
+  for (const mutation of mutations) {
+    assert.notEqual(mutation, caller);
+    assert.throws(() => validateCaller(mutation));
+  }
+});
+
+test('caller contract rejects an extra secret, permission, or job', async () => {
+  const caller = await readFile(callerUrl, 'utf8');
+  const mutations = [
+    caller.replace(
+      '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}\n',
+      '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}\n' +
+        '      ANOTHER_TOKEN: ${{ secrets.ANOTHER_TOKEN }}\n',
+    ),
+    caller.replace('  actions: read\n', '  actions: read\n  checks: read\n'),
+    caller.replace('  receipt:\n', '  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  receipt:\n'),
+  ];
+
+  for (const mutation of mutations) {
+    assert.notEqual(mutation, caller);
+    assert.throws(() => validateCaller(mutation));
+  }
 });
 
 test('Platform CI discovers the focused caller contract test explicitly', async () => {
