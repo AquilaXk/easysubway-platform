@@ -9,9 +9,26 @@ const callerUrl = new URL(
 const ciWorkflowUrl = new URL('../../.github/workflows/ci.yml', import.meta.url);
 const commonWorkflow =
   'AquilaXk/easysubway/.github/workflows/public-sensitivity-owner-receipt.yml@3d1590baa98c929ceabd0d2d44414cebcc643c6f';
+const expectedCaller = [
+  'name: Public Sensitivity Owner Receipt Caller',
+  '',
+  'on:',
+  '  workflow_dispatch:',
+  '',
+  'permissions:',
+  '  contents: read',
+  '  actions: read',
+  '',
+  'jobs:',
+  '  receipt:',
+  `    uses: ${commonWorkflow}`,
+  '    secrets:',
+  '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}',
+  '',
+].join('\n');
 
-test('public sensitivity owner receipt caller is a least-privilege immutable reusable-workflow call', async () => {
-  const caller = await readFile(callerUrl, 'utf8');
+const validateCaller = (caller) => {
+  assert.equal(caller, expectedCaller);
   const codeLines = caller.split('\n').filter((line) => !/^\s*#/.test(line));
   const code = codeLines.join('\n');
 
@@ -42,6 +59,21 @@ test('public sensitivity owner receipt caller is a least-privilege immutable reu
   assert.doesNotMatch(code, /self-hosted|\brun:/);
   assert.doesNotMatch(code, /actions:\s*write|contents:\s*write|permissions:\s*\{/);
   assert.doesNotMatch(code, /public-sensitivity-owner-receipt\.yml@(?!3d1590baa98c929ceabd0d2d44414cebcc643c6f)/);
+};
+
+test('public sensitivity owner receipt caller is a least-privilege immutable reusable-workflow call', async () => {
+  validateCaller(await readFile(callerUrl, 'utf8'));
+});
+
+test('caller contract rejects a quoted additional secret mapping', async () => {
+  const caller = await readFile(callerUrl, 'utf8');
+  const mutation = caller.replace(
+    '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}\n',
+    '      D20_SECRET_SCANNING_ALERTS_READ_TOKEN: ${{ secrets.D20_SECRET_SCANNING_ALERTS_READ_TOKEN }}\n' +
+      '      "ANOTHER_TOKEN": ${{ secrets.ANOTHER_TOKEN }}\n',
+  );
+  assert.notEqual(mutation, caller);
+  assert.throws(() => validateCaller(mutation));
 });
 
 test('Platform CI discovers the focused caller contract test explicitly', async () => {
