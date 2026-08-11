@@ -1,0 +1,85 @@
+name: Epic
+description: 여러 PBI의 사용자·시스템 결과와 의존성만 관리합니다.
+title: '[Epic] '
+body:
+- type: markdown
+  attributes:
+    value: 'Epic은 구현 티켓이 아니라 PBI의 목표·순서·terminal 결과를 관리합니다.
+
+      Platform은 IaC, protected environment, immutable deployment input, readiness·activation·rollback과 operations를 소유합니다.
+      Data·Backend·Mobile 제품 구현과 Hub final decision은 소유하지 않습니다.
+
+      현재 실행 중인 PBI를 합치거나 재번호화하지 않고 기존 issue·branch·worktree·PR 경계를 그대로 연결합니다.'
+- type: textarea
+  id: objective
+  attributes:
+    label: Epic 목표
+    description: 사용자 또는 시스템 결과를 한 문단으로 적습니다.
+  validations:
+    required: true
+- type: textarea
+  id: success
+  attributes:
+    label: 성공 기준
+    description: Epic 자체 테스트가 아니라 모든 필수 PBI가 제공해야 할 terminal 결과를 적습니다.
+  validations:
+    required: true
+- type: textarea
+  id: pbi
+  attributes:
+    label: PBI 목록
+    description: 기존 repository-qualified issue URL을 사용합니다.
+    placeholder: '- [ ] owner/repository#issue — 결과
+
+      - [ ] owner/repository#issue — 결과'
+  validations:
+    required: true
+- type: textarea
+  id: dependency_order
+  attributes:
+    label: 의존성·실행 순서
+    description: Blocks / Blocked by 관계만 적습니다. 독립 PBI는 병렬 가능 여부를 표시합니다.
+  validations:
+    required: true
+- type: textarea
+  id: ownership
+  attributes:
+    label: Accountable plan·owner
+    placeholder: '- Accountable plan:
+
+      - Epic owner:
+
+      - External plans consumed:
+
+      - Write scope:'
+  validations:
+    required: true
+- type: textarea
+  id: completion
+  attributes:
+    label: Epic 완료 조건
+    placeholder: '- [ ] 모든 필수 PBI terminal
+
+      - [ ] dependency blocker 0
+
+      - [ ] 최종 handoff 또는 receipt 존재'
+  validations:
+    required: true
+- type: textarea
+  id: non_goals
+  attributes:
+    label: 제외 범위
+    description: Epic이 직접 구현·재검증하지 않는 범위를 적습니다.
+  validations:
+    required: true
+- type: checkboxes
+  id: policy
+  attributes:
+    label: 운영 원칙
+    options:
+    - label: Epic에서 child 구현, full test, CI 또는 Review를 다시 실행하지 않습니다.
+      required: true
+    - label: 현재 작업 중인 이슈를 합치거나 닫지 않고 기존 번호와 owner 경계를 유지합니다.
+      required: true
+    - label: 새 PBI는 독립 owner·PR·산출물이 있을 때만 만들고 중복 coordinator를 만들지 않습니다.
+      required: true
