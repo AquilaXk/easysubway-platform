@@ -245,10 +245,11 @@ export async function inspectAcquiredServerRouteBundleCandidate({
 
   const candidate = await inspectCandidateDirectory(candidateRoot);
   const firstTree = await inspectCandidateTree(candidate, "OUTPUT_POLICY_VIOLATION");
-  const handoffBytes = await readRegularFile(
+  const handoffSnapshot = await readRegularFileSnapshot(
     join(candidate.absoluteRoot, "handoff.json"),
     "HANDOFF_SHAPE_INVALID",
   );
+  const handoffBytes = handoffSnapshot.bytes;
   const handoff = parseJson(handoffBytes, "HANDOFF_SHAPE_INVALID");
   validateHandoff(handoff, handoffBytes, contract);
   if (basename(candidate.absoluteRoot) !== handoff.handoffSha256) {
@@ -268,7 +269,7 @@ export async function inspectAcquiredServerRouteBundleCandidate({
       entries: handoff.publicationReceipt.objects.map((entry) => ({ ...entry })),
     });
   }
-  await verifyObjectPass(
+  const secondPassIdentities = await verifyObjectPass(
     candidate.objectRoot,
     handoff.publicationReceipt.objects,
     2,
@@ -276,11 +277,14 @@ export async function inspectAcquiredServerRouteBundleCandidate({
     "OBJECT_READ_UNSTABLE",
   );
 
-  const handoffSecondRead = await readRegularFile(
+  const handoffSecondSnapshot = await readRegularFileSnapshot(
     join(candidate.absoluteRoot, "handoff.json"),
     "OBJECT_READ_UNSTABLE",
   );
-  if (!handoffBytes.equals(handoffSecondRead)) {
+  if (
+    !handoffBytes.equals(handoffSecondSnapshot.bytes) ||
+    !sameFileIdentity(handoffSnapshot.identity, handoffSecondSnapshot.identity)
+  ) {
     throw failure("OBJECT_READ_UNSTABLE");
   }
   const secondTree = await inspectCandidateTree(
@@ -292,6 +296,23 @@ export async function inspectAcquiredServerRouteBundleCandidate({
     !sameDirectoryIdentity(firstTree.candidateIdentity, secondTree.candidateIdentity) ||
     !sameDirectoryIdentity(firstTree.objectIdentity, secondTree.objectIdentity) ||
     !sameDirectoryIdentity(firstTree.payloadIdentity, secondTree.payloadIdentity)
+  ) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+  await verifyFinalFileIdentities({
+    candidate,
+    handoffIdentity: handoffSecondSnapshot.identity,
+    objectIdentities: secondPassIdentities,
+  });
+  const finalTree = await inspectCandidateTree(
+    candidate,
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (
+    secondTree.inventory !== finalTree.inventory ||
+    !sameDirectoryIdentity(secondTree.candidateIdentity, finalTree.candidateIdentity) ||
+    !sameDirectoryIdentity(secondTree.objectIdentity, finalTree.objectIdentity) ||
+    !sameDirectoryIdentity(secondTree.payloadIdentity, finalTree.payloadIdentity)
   ) {
     throw failure("OBJECT_READ_UNSTABLE");
   }
@@ -402,6 +423,7 @@ async function verifySecondRead(objectRoot, entries, onSecondReadChunk) {
       join(objectRoot, entry.path),
       "OBJECT_READ_UNSTABLE",
       (bytesRead) => onSecondReadChunk?.({ path: entry.path, bytesRead }),
+      entry.sizeBytes,
     );
     if (identity.size !== entry.sizeBytes || identity.sha256 !== entry.sha256) {
       throw failure("OBJECT_READ_UNSTABLE");
@@ -416,16 +438,20 @@ async function verifyObjectPass(
   onReadChunk,
   code,
 ) {
+  const identities = new Map();
   for (const entry of entries) {
     const identity = await hashRegularFile(
       join(objectRoot, entry.path),
       code,
       (bytesRead) => onReadChunk?.({ pass, path: entry.path, bytesRead }),
+      entry.sizeBytes,
     );
     if (identity.size !== entry.sizeBytes || identity.sha256 !== entry.sha256) {
       throw failure(code);
     }
+    identities.set(entry.path, identity.fileIdentity);
   }
+  return identities;
 }
 
 async function writeNewFile(path, bytes, openOutputFile) {
@@ -464,6 +490,10 @@ async function writeAll(handle, bytes) {
 }
 
 async function readRegularFile(path, code) {
+  return (await readRegularFileSnapshot(path, code)).bytes;
+}
+
+async function readRegularFileSnapshot(path, code) {
   if (typeof path !== "string" || path.length === 0) throw failure(code, 2);
   let handle;
   try {
@@ -471,9 +501,14 @@ async function readRegularFile(path, code) {
       path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw failure(code, 2);
-    return await handle.readFile();
+    const initialStat = await handle.stat({ bigint: true });
+    if (!initialStat.isFile()) throw failure(code, 2);
+    const bytes = await handle.readFile();
+    const finalStat = await handle.stat({ bigint: true });
+    const initialIdentity = fileIdentity(initialStat);
+    const finalIdentity = fileIdentity(finalStat);
+    if (!sameFileIdentity(initialIdentity, finalIdentity)) throw failure(code);
+    return { bytes, identity: finalIdentity };
   } catch (error) {
     if (error instanceof AcquisitionError) throw error;
     throw failure(code, 2);
@@ -482,15 +517,21 @@ async function readRegularFile(path, code) {
   }
 }
 
-async function hashRegularFile(path, code, onChunk) {
+async function hashRegularFile(path, code, onChunk, expectedSize) {
   let handle;
+  let initialIdentity;
   try {
     handle = await open(
       path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const stat = await handle.stat();
+    const stat = await handle.stat({ bigint: true });
     if (!stat.isFile()) throw failure(code, 2);
+    initialIdentity = fileIdentity(stat);
+    if (
+      expectedSize !== undefined &&
+      initialIdentity.size !== BigInt(expectedSize)
+    ) throw failure(code);
   } catch (error) {
     await handle?.close().catch(() => {});
     if (error instanceof AcquisitionError) throw error;
@@ -506,19 +547,25 @@ async function hashRegularFile(path, code, onChunk) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       size += bytesRead;
+      if (expectedSize !== undefined && size > expectedSize) {
+        throw failure(code);
+      }
       digest.update(buffer.subarray(0, bytesRead));
       onChunk?.(bytesRead);
     }
   } catch {
     readError = failure(code);
   }
+  let finalIdentity;
   try {
+    finalIdentity = fileIdentity(await handle.stat({ bigint: true }));
     await handle.close();
   } catch {
     readError ??= failure(code);
   }
   if (readError !== undefined) throw readError;
-  return { size, sha256: digest.digest("hex") };
+  if (!sameFileIdentity(initialIdentity, finalIdentity)) throw failure(code);
+  return { size, sha256: digest.digest("hex"), fileIdentity: finalIdentity };
 }
 
 function validateRuntimeHooks({ beforeSecondRead, openOutputFile, onSecondReadChunk }) {
@@ -624,6 +671,66 @@ async function requireRegularNonSymlink(path, code) {
     if (error instanceof AcquisitionError) throw error;
     throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
   }
+}
+
+async function verifyFinalFileIdentities({
+  candidate,
+  handoffIdentity,
+  objectIdentities,
+}) {
+  const reversedObjects = [...objectIdentities.entries()].toReversed();
+  for (const [relativePath, expectedIdentity] of reversedObjects) {
+    const currentIdentity = await readRegularFileIdentity(
+      join(candidate.objectRoot, relativePath),
+      "OBJECT_READ_UNSTABLE",
+    );
+    if (!sameFileIdentity(expectedIdentity, currentIdentity)) {
+      throw failure("OBJECT_READ_UNSTABLE");
+    }
+  }
+  const currentHandoffIdentity = await readRegularFileIdentity(
+    join(candidate.absoluteRoot, "handoff.json"),
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (!sameFileIdentity(handoffIdentity, currentHandoffIdentity)) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+}
+
+async function readRegularFileIdentity(path, code) {
+  let handle;
+  try {
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = await handle.stat({ bigint: true });
+    if (!stat.isFile()) throw failure(code);
+    return fileIdentity(stat);
+  } catch (error) {
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code);
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function fileIdentity(stat) {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+  };
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
 }
 
 function sameDirectoryIdentity(left, right) {

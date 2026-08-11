@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -241,7 +241,7 @@ async function main() {
   process.stdout.write(formatCandidateBindingSuccess(binding));
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (isMainModule()) {
   main().catch((error) => {
     const failure = error instanceof CandidateBindingError
       ? error
@@ -249,4 +249,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     process.stderr.write(`${failure.code} ${failure.message}\n`);
     process.exitCode = failure.exitCode;
   });
+}
+
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  const entryPath = resolve(process.argv[1]);
+  try {
+    return realpathSync(modulePath) === realpathSync(entryPath);
+  } catch {
+    return modulePath === entryPath;
+  }
 }

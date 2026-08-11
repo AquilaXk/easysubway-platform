@@ -754,6 +754,51 @@ test("rejects object, handoff, and directory mutation between candidate passes",
   }
 });
 
+test("rejects an object mutated after its second-pass bytes were hashed", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  let mutated = false;
+
+  await assert.rejects(
+    inspectAcquiredServerRouteBundleCandidate({
+      contractPath,
+      candidateRoot,
+      onReadChunk: (event) => {
+        if (mutated || event.pass !== 2 || event.path !== objectPaths[0]) return;
+        mutated = true;
+        const target = join(candidateRoot, "objects", objectPaths[0]);
+        writeFileSync(target, Buffer.alloc(readFileSync(target).length, 0x78));
+      },
+    }),
+    errorWithCode("OBJECT_READ_UNSTABLE"),
+  );
+  assert.equal(mutated, true);
+});
+
+test("rejects an oversized candidate object before hashing its bytes", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  writeFileSync(
+    join(candidateRoot, "objects", objectPaths[0]),
+    Buffer.alloc(256 * 1024, 0x78),
+  );
+  let oversizedBytesRead = 0;
+
+  await assert.rejects(
+    inspectAcquiredServerRouteBundleCandidate({
+      contractPath,
+      candidateRoot,
+      onReadChunk: (event) => {
+        if (event.pass === 1 && event.path === objectPaths[0]) {
+          oversizedBytesRead += event.bytesRead;
+        }
+      },
+    }),
+    errorWithCode("OBJECT_IDENTITY_MISMATCH"),
+  );
+  assert.equal(oversizedBytesRead, 0);
+});
+
 test("inspects only the exact candidate and leaves sibling-shaped sources untouched", async () => {
   const fixture = makeFixture();
   const candidateRoot = await acquireFixture(fixture);
@@ -825,6 +870,50 @@ test("binding CLI emits exact canonical success or sanitized typed failure", asy
   assert.match(failure.stderr, /^CANDIDATE_BINDING_USAGE [^\n]+\n$/);
   assert.equal(failure.stderr.includes(suppliedSecret), false);
   assert.equal(failure.stderr.includes(repositoryRoot), false);
+});
+
+test("binding CLI executes through a symlinked entrypoint", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  const tuple = stagedTuple(fixture);
+  const tuplePath = writeTuple(fixture, tuple);
+  const linkedTools = join(fixture.root, "linked-tools");
+  mkdirSync(linkedTools);
+  const linkedScript = join(linkedTools, "bind-journey-release-candidate.mjs");
+  symlinkSync(bindingScriptPath, linkedScript);
+  symlinkSync(
+    join(repositoryRoot, "tools/platform/acquire-server-route-bundle.mjs"),
+    join(linkedTools, "acquire-server-route-bundle.mjs"),
+  );
+  const expected = {
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    artifactKind: "journey-release-candidate-binding",
+    orchestrator: "COMPOSE",
+    tupleSha256: tuple.tupleSha256,
+    deploymentRevision: tuple.deploymentRevision,
+    environmentIdentity: tuple.environmentIdentity,
+    handoffSha256: fixture.handoff.handoffSha256,
+    serverRouteBundleDigest:
+      fixture.handoff.platformRelease.serverRouteBundleDigest,
+  };
+
+  for (const nodeOptions of [[], ["--preserve-symlinks-main"]]) {
+    const result = spawnSync(process.execPath, [
+      ...nodeOptions,
+      linkedScript,
+      "--contract",
+      contractPath,
+      "--tuple",
+      tuplePath,
+      "--candidate",
+      candidateRoot,
+      "--orchestrator",
+      "COMPOSE",
+    ], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${JSON.stringify(expected)}\n`);
+    assert.equal(result.stderr, "");
+  }
 });
 
 test("Platform CI runs the exact acquisition test once in jobs.platform", () => {
