@@ -1,55 +1,80 @@
-<!--
-API/schema/DB migration/deploy/security/privacy/artifact/release처럼 실패 비용이 큰 PBI에 사용합니다.
-상세 설계는 Tech Spec/ADR에 두고 PR에는 실제 diff, 검증, 위험과 rollout만 기록합니다.
--->
+<!-- High-risk IaC, environment, security, deployment, activation, traffic, recovery or release changes. -->
 
-## 관련 작업
+## Related issue
 
-- Epic:
-- PBI / Sub-task:
-- `Closes` 또는 `Refs`:
-- Tech Spec / ADR:
+Related #
 
-## 목적·범위
+## Summary
 
-- 해결할 문제:
-- 포함:
-- 제외:
-- accountable owner / plan:
+- Problem:
+- Outcome:
 
-## 변경 내용
+## Changes
 
 -
 
-## 검증
+## Scope
 
-- Focused RED → GREEN:
-- Affected integration:
-- Required CI:
-- Manual / device / production-like 확인: `NONE`
-
-## 실패·호환·rollout
-
-- 실패 시 상태 변화:
-- 호환성 / migration:
-- rollout / activation:
-- rollback:
-- fallback 또는 이전 결과를 current success로 사용하는 경로: `없음`
-
-## 필요한 증거
-
-<!-- 실제 변경에 필요한 항목만 남깁니다. -->
-- CI / test:
-- UI / accessibility / device: `NONE`
-- artifact / deploy / operations: `NONE`
-
-## 리뷰 포인트
+### Included
 
 -
 
-## 확인
+### Excluded
 
-- [ ] 하나의 PBI/Sub-task와 한 accountable owner의 변경입니다.
-- [ ] 다른 작업자의 issue·branch·worktree·PR 경계를 변경하지 않았습니다.
-- [ ] 검증은 risk-based focused matrix이며 동일 full suite를 여러 계층에서 반복하지 않습니다.
-- [ ] required CI와 repository Review 정책을 PR gate에서 확인합니다.
+-
+
+### Ownership / dependencies
+
+- Accountable owner or plan:
+- Required predecessor output:
+- Concurrent work overlap: None
+
+## Contract & Compatibility
+
+- Deployment / environment / state contract:
+- Immutable release identity:
+- Backward compatibility:
+- Migration or cutover:
+
+## Verification
+
+| Check | Result / Evidence |
+| --- | --- |
+| Focused RED → GREEN | |
+| Affected integration | |
+| Required CI | |
+| Deploy / activation / traffic | Not required — reason: |
+| Security / DR / operations | Not applicable — reason: |
+
+## Not run
+
+- Check: None
+- Reason:
+- Rerun owner / condition:
+
+## Risk
+
+- Level: High
+- Main risk:
+- Failure behavior:
+- Candidate / active / traffic / environment mutation on failure:
+- Fallback or degraded-success path introduced: No
+
+## Rollout / Recovery
+
+- Rollout or activation:
+- Monitoring / success signal:
+- Rollback or recovery:
+- State / config / deployment compatibility after rollback:
+
+## Review focus
+
+-
+
+## Checklist
+
+- [ ] 이슈 범위와 실제 diff가 일치합니다.
+- [ ] 관련 없는 변경이나 다른 owner의 surface를 포함하지 않았습니다.
+- [ ] 위험에 필요한 검증과 미실행 사유를 기록했습니다.
+- [ ] 실패·호환성·activation·recovery 동작이 명확합니다.
+- [ ] current failure를 previous/alternate/orchestrator 경로의 성공으로 바꾸지 않습니다.
