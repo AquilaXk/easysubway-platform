@@ -1,147 +1,112 @@
-name: PBI / Sub-task
-description: 한 저장소·한 owner가 완료할 수 있는 실행 작업을 등록합니다.
-title: '[Feat] '
+name: "작업 / 개선"
+description: "기능, 개선, 리팩터링, 자동화 작업을 등록합니다."
+title: ""
 body:
-- type: markdown
-  attributes:
-    value: '이 양식은 `Epic → PBI → 필요 시 Sub-task` 계층을 사용합니다.
+  - type: markdown
+    attributes:
+      value: |
+        하나의 이슈는 하나의 accountable 결과를 소유합니다.
+        상위 이슈는 조정과 완료 판정만 담당하고, 하위 이슈의 구현·검증 절차를 복제하지 않습니다.
+        과거 실행 로그는 댓글이나 연결된 계획서에 남기고 본문에는 현재 계약만 유지합니다.
+        기존 issue·branch·worktree·PR 소유권은 보존하며, 첫 의미 있는 변경 뒤 Draft PR을 열어 실제 diff를 기준으로 협업합니다.
 
-      Platform은 IaC, protected environment, immutable deployment input, readiness·activation·rollback과 operations를 소유합니다.
-      Data·Backend·Mobile 제품 구현과 Hub final decision은 소유하지 않습니다.
-
-      같은 owner·같은 PR·같은 검증 경계의 작업은 한 PBI에 유지하고, 독립 owner 또는 독립 PR이 있을 때만 Sub-task를 만듭니다.
-
-      기존 이슈 번호, 현재 작업 계획서, branch/worktree/PR 소유권은 유지합니다.'
-- type: dropdown
-  id: work_item_type
-  attributes:
-    label: 작업 단위
-    description: 독립적인 결과를 내면 PBI, 기존 PBI 안의 독립 owner·PR 작업이면 Sub-task를 선택합니다.
-    options:
-    - PBI
-    - Sub-task
-  validations:
-    required: true
-- type: dropdown
-  id: area
-  attributes:
-    label: 책임 영역
-    options:
-    - IaC / environment
-    - Deploy / release input
-    - Readiness / activation / rollback
-    - Observability / DR / security
-    - CI / tooling
-  validations:
-    required: true
-- type: input
-  id: parent
-  attributes:
-    label: 상위 Epic 또는 PBI
-    description: Repository-qualified issue URL을 적습니다. 상위가 없으면 NONE.
-    placeholder: 예) https://github.com/AquilaXk/easysubway/issues/2742
-  validations:
-    required: true
-- type: textarea
-  id: outcome
-  attributes:
-    label: 목표 결과
-    description: 완료 뒤 사용자 또는 시스템에 생기는 결과를 1~3개로 적습니다.
-    placeholder: '- ...
-
-      - ...'
-  validations:
-    required: true
-- type: textarea
-  id: problem
-  attributes:
-    label: 현재 문제
-    description: 현재 동작과 실제 영향만 적습니다. 긴 설계 배경은 Tech Spec/ADR로 분리합니다.
-  validations:
-    required: true
-- type: textarea
-  id: scope
-  attributes:
-    label: 범위
-    description: 이 PBI가 직접 바꾸는 컴포넌트·경계와 예상 PR 단위를 적습니다.
-    placeholder: '- 포함:
-
-      - 변경 경계:
-
-      - 예상 PR:'
-  validations:
-    required: true
-- type: input
-  id: spec
-  attributes:
-    label: Tech Spec / ADR
-    description: API·schema·DB·deploy·security 경계 또는 2일 이상 설계가 필요하면 링크합니다. 없으면 NONE.
-    placeholder: NONE 또는 URL
-  validations:
-    required: true
-- type: textarea
-  id: dependencies
-  attributes:
-    label: 의존성
-    description: Blocked by / Blocks / Relates to만 적고 전체 프로젝트 DAG를 반복하지 않습니다.
-    placeholder: '- Blocked by:
-
-      - Blocks:
-
-      - Relates to:'
-- type: textarea
-  id: ownership
-  attributes:
-    label: 작업 소유권·충돌 확인
-    description: Accountable plan, owner, 현재 branch/worktree/PR, 겹치는 작업 여부를 적습니다.
-    placeholder: '- Accountable plan: PLAN-DOC | PLAN-REPO | PLAN-JOURNEY | PLAN-QUALITY
-
-      - Owner:
-
-      - Existing branch/worktree/PR:
-
-      - Overlap disposition:'
-  validations:
-    required: true
-- type: textarea
-  id: acceptance
-  attributes:
-    label: 완료 조건
-    description: 결과 중심 체크리스트를 적습니다. child의 CI·Review를 parent에서 반복하지 않습니다.
-    placeholder: '- [ ] 핵심 결과
-
-      - [ ] 대표 실패 동작
-
-      - [ ] 후행 owner가 소비할 handoff 또는 receipt'
-  validations:
-    required: true
-- type: textarea
-  id: verification
-  attributes:
-    label: 검증
-    description: Focused test와 required repository CI만 적습니다. 수동·device·deploy 검증은 실제 필요할 때만 추가합니다.
-    placeholder: '- Focused:
-
-      - Required CI:
-
-      - Manual/device/deploy (필요한 경우만):'
-  validations:
-    required: true
-- type: textarea
-  id: out_of_scope
-  attributes:
-    label: 제외 범위
-    description: 다른 저장소 구현, 후행 release gate와 이번 PBI에서 하지 않을 일을 적습니다.
-  validations:
-    required: true
-- type: checkboxes
-  id: ready
-  attributes:
-    label: 착수 전 확인
-    options:
-    - label: 기존 이슈·계획서·열린 PR·branch/worktree를 확인했고 현재 작업자의 경계를 합치거나 인수하지 않았습니다.
+  - type: dropdown
+    id: task_type
+    attributes:
+      label: Task Type
+      options:
+        - Feature
+        - Improvement
+        - Refactor
+        - Build / CI
+        - Infrastructure / security
+        - Operations
+        - Investigation
+    validations:
       required: true
-    - label: 이 작업은 한 저장소·한 accountable owner·한 PR 경계로 완료 가능하며, 그렇지 않으면 독립 PBI/Sub-task로 분리합니다.
+
+  - type: input
+    id: domain
+    attributes:
+      label: Domain
+      description: 관련 IaC, environment, deploy input, readiness, activation, rollback 또는 운영 영역을 적습니다.
+      placeholder: 예) release candidate admission, traffic activation, Terraform, production environment
+    validations:
       required: true
-    - label: Focused 검증 뒤 Draft PR을 열고, full suite와 Review는 repository의 PR gate에서 수행합니다.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 현재 문제, 실제 운영·시스템 영향, 이번 작업이 만들 결과를 간결하게 적습니다.
+      placeholder: |
+        Current:
+        - ...
+
+        Impact:
+        - ...
+
+        Outcome:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done When
+      description: 구현 과정이 아니라 완료 후 관찰 가능한 결과를 체크리스트로 적습니다.
+      placeholder: |
+        - [ ] 핵심 인프라 또는 운영 결과가 동작한다.
+        - [ ] 대표 실패 경로가 상태 변경 없이 명시적으로 실패한다.
+        - [ ] 필요한 후속 owner가 소비할 receipt 또는 handoff가 남는다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: execution_contract
+    attributes:
+      label: Execution Contract
+      description: 이번 이슈의 포함·제외 범위, owner, 실제 dependency와 실패 동작을 적습니다.
+      placeholder: |
+        Included:
+        - ...
+
+        Excluded:
+        - ...
+
+        Owner / dependency:
+        - Accountable plan or owner:
+        - Related active issue / PR:
+        - Required input or output:
+
+        Failure behavior:
+        - 실패 시 candidate, active, traffic, environment 상태를 변경하지 않는다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification_delivery
+    attributes:
+      label: Verification & Delivery
+      description: 변경 위험에 필요한 최소 검증과 전달 방식을 적습니다. deploy·activation·DR rehearsal은 실제 surface를 바꿀 때만 요구합니다.
+      placeholder: |
+        Focused verification:
+        - ...
+
+        Required CI:
+        - Platform required checks
+
+        Deploy / activation / operations:
+        - Not required — reason: ...
+
+        Not run:
+        - Check:
+        - Reason:
+        - Rerun owner / condition:
+
+        Delivery:
+        - 첫 의미 있는 변경 뒤 Draft PR
+        - merge/closure 전 필요한 evidence:
+    validations:
       required: true
