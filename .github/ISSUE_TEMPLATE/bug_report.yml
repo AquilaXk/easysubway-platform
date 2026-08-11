@@ -1,0 +1,129 @@
+name: Bug PBI
+description: 재현 가능한 결함을 한 owner의 수정·회귀 검증 단위로 등록합니다.
+title: '[Fix] '
+body:
+- type: markdown
+  attributes:
+    value: '버그 이슈도 하나의 PBI입니다.
+
+      Platform은 IaC, protected environment, immutable deployment input, readiness·activation·rollback과 operations를 소유합니다.
+      Data·Backend·Mobile 제품 구현과 Hub final decision은 소유하지 않습니다.
+
+      원인 조사, 수정, 대표 회귀 검증만 소유하고 별도 release/audit 작업을 흡수하지 않습니다.
+
+      기존 작업자의 issue·branch·worktree·PR은 유지합니다.'
+- type: dropdown
+  id: priority
+  attributes:
+    label: 우선순위
+    options:
+    - P0 - 출시·데이터·보안 차단
+    - P1 - 핵심 흐름 또는 운영 저하
+    - P2 - 우회 가능·후속 개선
+    - P3 - 경미한 결함
+  validations:
+    required: true
+- type: dropdown
+  id: area
+  attributes:
+    label: 책임 영역
+    options:
+    - IaC / environment
+    - Deploy / release input
+    - Readiness / activation / rollback
+    - Observability / DR / security
+    - CI / tooling
+  validations:
+    required: true
+- type: input
+  id: parent
+  attributes:
+    label: 관련 Epic / PBI
+    description: Repository-qualified issue URL을 적습니다. 없으면 NONE.
+  validations:
+    required: true
+- type: textarea
+  id: reproduction
+  attributes:
+    label: 재현
+    description: 최소 재현 조건과 순서를 적습니다.
+    placeholder: '1. ...
+
+      2. ...
+
+      3. ...'
+  validations:
+    required: true
+- type: textarea
+  id: actual
+  attributes:
+    label: 실제 결과
+  validations:
+    required: true
+- type: textarea
+  id: expected
+  attributes:
+    label: 기대 결과
+  validations:
+    required: true
+- type: textarea
+  id: impact
+  attributes:
+    label: 영향
+    description: 사용자, 데이터, 보안, 배포 또는 운영 영향을 적습니다.
+  validations:
+    required: true
+- type: textarea
+  id: fix_scope
+  attributes:
+    label: 수정 범위
+    description: 직접 수정할 경계와 하지 않을 일을 함께 적습니다.
+    placeholder: '- 포함:
+
+      - 제외:'
+  validations:
+    required: true
+- type: textarea
+  id: ownership
+  attributes:
+    label: 작업 소유권·충돌 확인
+    placeholder: '- Accountable plan:
+
+      - Owner:
+
+      - Existing branch/worktree/PR:
+
+      - Overlap disposition:'
+  validations:
+    required: true
+- type: textarea
+  id: done
+  attributes:
+    label: 완료 조건
+    placeholder: '- [ ] 최소 재현 테스트 RED
+
+      - [ ] 수정 후 GREEN
+
+      - [ ] 인접 핵심 회귀 없음
+
+      - [ ] required repository CI'
+  validations:
+    required: true
+- type: textarea
+  id: evidence
+  attributes:
+    label: 검증·증거
+    description: 실행한 focused test와 실제 필요한 증거만 적습니다. 화면·device·deploy 증거는 해당 결함에 필요한 경우만 요구합니다.
+  validations:
+    required: true
+- type: checkboxes
+  id: ready
+  attributes:
+    label: 착수 전 확인
+    options:
+    - label: 같은 결함을 소유한 기존 이슈·PR·worktree가 없는지 확인했습니다.
+      required: true
+    - label: 수정 이슈에 downstream release·audit 전체를 합치지 않습니다.
+      required: true
+    - label: Focused 검증 뒤 Draft PR을 열고 full CI와 Review는 PR gate에서 수행합니다.
+      required: true
