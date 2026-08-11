@@ -1,0 +1,102 @@
+name: "Epic / Coordination"
+description: "여러 독립 이슈의 목표, 의존성, 최종 완료 결과를 조정합니다."
+title: "[Epic] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Epic은 하위 작업을 대신 구현하거나 검증하는 티켓이 아닙니다.
+        기존 이슈 번호와 issue·branch·worktree·PR owner를 유지하고, 실제 산출물 의존성만 연결합니다.
+        하위 이슈의 상세 절차와 실행 로그를 복제하지 말고 현재 목표, 순서, terminal 결과만 관리합니다.
+
+  - type: dropdown
+    id: task_type
+    attributes:
+      label: Task Type
+      options:
+        - Epic
+        - Cross-domain coordination
+        - Roadmap
+        - Release coordination
+    validations:
+      required: true
+
+  - type: input
+    id: domain
+    attributes:
+      label: Domain
+      description: 조정하는 IaC, deployment, activation, observability, DR 또는 security 영역을 적습니다.
+      placeholder: 예) Journey release activation, platform operations
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 해결할 상위 문제, 운영·시스템 영향, 목표 상태를 간결하게 적습니다.
+      placeholder: |
+        Current:
+        - ...
+
+        Target outcome:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done When
+      description: 필수 하위 이슈가 제공해야 할 terminal 결과와 Epic의 최종 handoff를 적습니다.
+      placeholder: |
+        - [ ] 필수 owner 이슈가 terminal 결과를 제공한다.
+        - [ ] 실제 dependency의 미완료 항목이 없다.
+        - [ ] 최종 consumer가 검증 가능한 deployment receipt 또는 handoff를 소비한다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: execution_contract
+    attributes:
+      label: Execution Contract
+      description: owner map, 하위 이슈, 실제 dependency, 병렬 가능 범위와 Epic의 비구현 경계를 적습니다.
+      placeholder: |
+        Accountable owner:
+        - ...
+
+        Required owner issues:
+        - [ ] repository#issue — expected terminal output
+
+        Dependency order:
+        - ...
+
+        Parallel work:
+        - ...
+
+        Epic does not implement:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification_delivery
+    attributes:
+      label: Verification & Delivery
+      description: Epic이 직접 재실행할 검증이 아니라 소비할 terminal evidence와 최종 판정 방식을 적습니다.
+      placeholder: |
+        Consumed evidence:
+        - owner issue / PR / artifact / receipt
+
+        Final verification:
+        - identity and status checks only
+
+        Not repeated at Epic level:
+        - child focused tests
+        - child full CI
+        - child code review
+
+        Final delivery / consumer:
+        - ...
+    validations:
+      required: true

@@ -1,0 +1,136 @@
+name: "결함"
+description: "재현 가능한 결함과 수정 완료 조건을 등록합니다."
+title: "[Fix] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        재현, 영향, 기대/실제 결과와 수정 경계를 중심으로 작성합니다.
+        과거 조사 로그는 댓글에 남기고 본문에는 현재 재현과 현재 수정 계약만 유지합니다.
+        첫 의미 있는 재현 테스트 또는 수정 뒤 Draft PR을 열며, full CI와 Review는 merge 전 delivery gate로 처리합니다.
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P0 — release, security, data integrity blocker
+        - P1 — deployment or production operation failure
+        - P2 — limited impact or practical workaround exists
+        - P3 — minor defect
+    validations:
+      required: true
+
+  - type: input
+    id: domain
+    attributes:
+      label: Domain
+      description: 관련 IaC, environment, deploy input, readiness, activation, rollback 또는 운영 영역을 적습니다.
+      placeholder: 예) candidate admission, production environment, traffic activation
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 결함의 현재 상태와 실제 운영·시스템 영향을 한정해서 설명합니다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps To Reproduce
+      description: 최소 재현 조건과 순서를 적습니다. deploy 결함은 target identity와 상태 전이를 포함합니다.
+      placeholder: |
+        Preconditions:
+        - ...
+
+        Steps:
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected / Actual Result
+      placeholder: |
+        Expected:
+        - ...
+
+        Actual:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: 배포, 트래픽, 보안, 데이터, 사용자 또는 운영 영향과 범위를 적습니다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done When
+      description: 수정 완료 후 관찰 가능한 결과를 체크리스트로 적습니다.
+      placeholder: |
+        - [ ] 최소 재현이 수정 전 실패하고 수정 후 통과한다.
+        - [ ] 대표 인접 회귀가 없다.
+        - [ ] 실패가 candidate, active, traffic 또는 environment 상태 변경으로 바뀌지 않는다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: execution_contract
+    attributes:
+      label: Execution Contract
+      description: 포함·제외 범위, owner, 실제 dependency와 실패 동작을 적습니다.
+      placeholder: |
+        Included:
+        - ...
+
+        Excluded:
+        - ...
+
+        Owner / active work:
+        - Accountable owner or plan:
+        - Related issue / PR:
+
+        Failure behavior:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification_delivery
+    attributes:
+      label: Verification & Delivery
+      description: 결함 위험에 필요한 최소 검증과 전달 방식을 적습니다. deploy·activation·DR rehearsal은 실제 surface를 바꿀 때만 요구합니다.
+      placeholder: |
+        Focused regression:
+        - ...
+
+        Required CI:
+        - Platform required checks
+
+        Deploy / activation / operations:
+        - Not required — reason: ...
+
+        Not run:
+        - Check:
+        - Reason:
+        - Rerun owner / condition:
+
+        Delivery:
+        - 첫 의미 있는 재현 또는 수정 뒤 Draft PR
+        - merge/closure 전 필요한 evidence:
+    validations:
+      required: true

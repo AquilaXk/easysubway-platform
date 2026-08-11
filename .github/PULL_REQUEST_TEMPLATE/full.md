@@ -1,74 +1,110 @@
-## 관련 이슈
+<!-- A등급: high-risk IaC, environment, security, deployment, activation, traffic, recovery, release, CI/CD 변경. -->
 
-<!-- 단일 완결 PR은 close #N, 스택 중간/umbrella 소속 PR은 Refs #N. 타 레포 이슈는 AquilaXk/easysubway#N 형태로 명기. -->
+## Related issue
 
-close #
+Related #
 
-## 작업 배경
+## Summary
+
+- Problem:
+- Outcome:
+
+## Changes
 
 -
 
-## 작업 내용
+## Scope
+
+### Included
 
 -
 
-## 검증
+### Excluded
 
-- 실행한 명령과 결과:
+-
 
-## 검증 증거
+### Ownership / dependencies
 
-배포, 롤백·standby promotion, 백업·복구, 관측성(alert·dashboard), 수동 운영 확인이 필요한 항목은 리뷰어와 CI가 접근할 수 있는 증거로 적습니다 — PR 첨부 파일, CI artifact, 저장소에 커밋된 파일, 또는 접근 가능한 링크. 로컬 evidence 경로는 보조 정보로만 덧붙이며 단독으로는 증거가 되지 않습니다. 증거가 필요 없는 항목은 사유를 적습니다.
+- Accountable owner or plan:
+- Required predecessor output:
+- Concurrent work overlap: None
 
-| 항목 | 대상 환경 | 확인 방법 | 증거 | 결과 |
-| --- | --- | --- | --- | --- |
-|  |  |  |  |  |
+## Contract & Compatibility
+
+- Deployment / environment / state contract:
+- Immutable release identity:
+- Backward compatibility:
+- Migration or cutover:
 
 ## Operational impact
 
 - [ ] no operational change
-- [ ] deploy path change
-- [ ] rollback / standby promotion change
-- [ ] backup·restore procedure change
-- [ ] observability (metric/log/alert/dashboard) change
-- [ ] auth·접근 제어(ingress·관측 스택 인증) 변경
-- [ ] infra provisioning (Terraform) change
-- [ ] secret·env allowlist change
-- [ ] contract pin change
-- [ ] CI/CD workflow change (.github/workflows/**)
+- [ ] deploy / rollback / standby promotion change
+- [ ] backup·restore or observability change
+- [ ] auth·접근 제어 or secret·env allowlist change
+- [ ] Terraform or CI/CD workflow change
 
 ## Contract pin gate impact
 
-- [ ] immutable Journey release tuple·release contract(`contracts/release/**`) 영향 없음
-- [ ] immutable Journey release tuple의 identity digest와 tuple SHA256 검증을 통과했다.
-- [ ] hub가 발행하지 않은 contract를 platform 쪽에서 추가하거나 변형하지 않는다.
+- [ ] immutable Journey release tuple·release contract 영향 없음
+- [ ] identity digest와 tuple SHA256 검증을 통과했습니다.
+- [ ] hub가 발행하지 않은 contract를 추가하거나 변형하지 않습니다.
 
 ## Deploy·recovery readiness impact
 
 - [ ] 배포·복구 guardrail 영향 없음
-- [ ] standby readiness 확인, fail-closed 전환, 롤백 경로를 실측으로 확인했다.
-- [ ] 백업·복구 리허설(`tools/ops/postgres-restore-rehearsal.sh` 등) 결과를 갱신했다.
+- [ ] standby readiness, fail-closed 전환, rollback 경로를 확인했습니다.
+- [ ] backup·restore rehearsal이 필요하면 결과를 갱신했습니다.
 
 ### Deployment unit decision
 
 - backend image digest:
 - staged contract bundle:
-- compose/infra revision:
-- alert·dashboard revision:
+- compose / infra revision:
+- alert / dashboard revision:
 
-## 리뷰어 메모
+## Verification
 
-- 리뷰어가 먼저 봐야 할 지점:
+| Check | Result / Evidence |
+| --- | --- |
+| Focused RED → GREEN | |
+| Affected integration | |
+| Required CI | |
+| Deploy / activation / traffic | Not required — reason: |
+| Security / DR / operations | Not applicable — reason: |
 
-## 리스크
+## Not run
+
+- Check: None
+- Reason:
+- Rerun owner / condition:
+
+## Risk
+
+- Level: High
+- Main risk:
+- Failure behavior:
+- Candidate / active / traffic / environment mutation on failure:
+- Fallback or degraded-success path introduced: No
+
+## Rollout / Recovery
+
+- Rollout or activation:
+- Monitoring / success signal:
+- Rollback or recovery:
+- State / config / deployment compatibility after rollback:
+
+## Review focus
 
 -
 
-## 체크리스트
+## Checklist
 
-- [ ] PR 본문은 이 템플릿 섹션을 삭제하지 않고 모두 채웠다.
-- [ ] CI 결과를 확인했다.
-- [ ] CodeRabbit 리뷰를 확인했다.
-- [ ] GitHub PR Review 객체가 있는지 확인했다. CodeRabbit status check만으로는 리뷰 완료로 보지 않는다.
-- [ ] CodeRabbit 실행이 불가능하거나 PR Review 객체가 없으면 폴백 리뷰를 단일 PR review로 게시했다.
-- [ ] 배포 영향이 있는 경우 CD Preflight 상태를 확인했다.
+- [ ] 이슈 범위와 실제 diff가 일치합니다.
+- [ ] 관련 없는 변경이나 다른 owner의 surface를 포함하지 않았습니다.
+- [ ] 위험에 필요한 검증과 미실행 사유를 기록했습니다.
+- [ ] 실패·호환성·activation·recovery 동작이 명확합니다.
+- [ ] current failure를 previous/alternate/orchestrator 경로의 성공으로 바꾸지 않습니다.
+- [ ] GitHub PR Review 객체가 있는지 확인했습니다. CodeRabbit status check만으로는 리뷰 완료로 보지 않습니다.
+- [ ] CodeRabbit Review 객체가 없으면 지원되는 Codex CLI 폴백 Review를 단일 GitHub PR Review로 게시했습니다.
+- [ ] 배포 영향이 있는 경우 CD Preflight 상태를 확인했습니다.

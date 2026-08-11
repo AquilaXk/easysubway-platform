@@ -1,0 +1,112 @@
+name: "작업 / 개선"
+description: "기능, 개선, 리팩터링, 자동화 작업을 등록합니다."
+title: ""
+body:
+  - type: markdown
+    attributes:
+      value: |
+        하나의 이슈는 하나의 accountable 결과를 소유합니다.
+        상위 이슈는 조정과 완료 판정만 담당하고, 하위 이슈의 구현·검증 절차를 복제하지 않습니다.
+        과거 실행 로그는 댓글이나 연결된 계획서에 남기고 본문에는 현재 계약만 유지합니다.
+        기존 issue·branch·worktree·PR 소유권은 보존하며, 첫 의미 있는 변경 뒤 Draft PR을 열어 실제 diff를 기준으로 협업합니다.
+
+  - type: dropdown
+    id: task_type
+    attributes:
+      label: Task Type
+      options:
+        - Feature
+        - Improvement
+        - Refactor
+        - Build / CI
+        - Infrastructure / security
+        - Operations
+        - Investigation
+    validations:
+      required: true
+
+  - type: input
+    id: domain
+    attributes:
+      label: Domain
+      description: 관련 IaC, environment, deploy input, readiness, activation, rollback 또는 운영 영역을 적습니다.
+      placeholder: 예) release candidate admission, traffic activation, Terraform, production environment
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 현재 문제, 실제 운영·시스템 영향, 이번 작업이 만들 결과를 간결하게 적습니다.
+      placeholder: |
+        Current:
+        - ...
+
+        Impact:
+        - ...
+
+        Outcome:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done When
+      description: 구현 과정이 아니라 완료 후 관찰 가능한 결과를 체크리스트로 적습니다.
+      placeholder: |
+        - [ ] 핵심 인프라 또는 운영 결과가 동작한다.
+        - [ ] 대표 실패 경로가 상태 변경 없이 명시적으로 실패한다.
+        - [ ] 필요한 후속 owner가 소비할 receipt 또는 handoff가 남는다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: execution_contract
+    attributes:
+      label: Execution Contract
+      description: 이번 이슈의 포함·제외 범위, owner, 실제 dependency와 실패 동작을 적습니다.
+      placeholder: |
+        Included:
+        - ...
+
+        Excluded:
+        - ...
+
+        Owner / dependency:
+        - Accountable plan or owner:
+        - Related active issue / PR:
+        - Required input or output:
+
+        Failure behavior:
+        - 실패 시 candidate, active, traffic, environment 상태를 변경하지 않는다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification_delivery
+    attributes:
+      label: Verification & Delivery
+      description: 변경 위험에 필요한 최소 검증과 전달 방식을 적습니다. deploy·activation·DR rehearsal은 실제 surface를 바꿀 때만 요구합니다.
+      placeholder: |
+        Focused verification:
+        - ...
+
+        Required CI:
+        - Platform required checks
+
+        Deploy / activation / operations:
+        - Not required — reason: ...
+
+        Not run:
+        - Check:
+        - Reason:
+        - Rerun owner / condition:
+
+        Delivery:
+        - 첫 의미 있는 변경 뒤 Draft PR
+        - merge/closure 전 필요한 evidence:
+    validations:
+      required: true
