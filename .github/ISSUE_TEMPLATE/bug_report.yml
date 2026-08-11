@@ -1,129 +1,136 @@
-name: Bug PBI
-description: 재현 가능한 결함을 한 owner의 수정·회귀 검증 단위로 등록합니다.
-title: '[Fix] '
+name: "결함"
+description: "재현 가능한 결함과 수정 완료 조건을 등록합니다."
+title: "[Fix] "
+labels:
+  - bug
 body:
-- type: markdown
-  attributes:
-    value: '버그 이슈도 하나의 PBI입니다.
+  - type: markdown
+    attributes:
+      value: |
+        재현, 영향, 기대/실제 결과와 수정 경계를 중심으로 작성합니다.
+        과거 조사 로그는 댓글에 남기고 본문에는 현재 재현과 현재 수정 계약만 유지합니다.
+        첫 의미 있는 재현 테스트 또는 수정 뒤 Draft PR을 열며, full CI와 Review는 merge 전 delivery gate로 처리합니다.
 
-      Platform은 IaC, protected environment, immutable deployment input, readiness·activation·rollback과 operations를 소유합니다.
-      Data·Backend·Mobile 제품 구현과 Hub final decision은 소유하지 않습니다.
-
-      원인 조사, 수정, 대표 회귀 검증만 소유하고 별도 release/audit 작업을 흡수하지 않습니다.
-
-      기존 작업자의 issue·branch·worktree·PR은 유지합니다.'
-- type: dropdown
-  id: priority
-  attributes:
-    label: 우선순위
-    options:
-    - P0 - 출시·데이터·보안 차단
-    - P1 - 핵심 흐름 또는 운영 저하
-    - P2 - 우회 가능·후속 개선
-    - P3 - 경미한 결함
-  validations:
-    required: true
-- type: dropdown
-  id: area
-  attributes:
-    label: 책임 영역
-    options:
-    - IaC / environment
-    - Deploy / release input
-    - Readiness / activation / rollback
-    - Observability / DR / security
-    - CI / tooling
-  validations:
-    required: true
-- type: input
-  id: parent
-  attributes:
-    label: 관련 Epic / PBI
-    description: Repository-qualified issue URL을 적습니다. 없으면 NONE.
-  validations:
-    required: true
-- type: textarea
-  id: reproduction
-  attributes:
-    label: 재현
-    description: 최소 재현 조건과 순서를 적습니다.
-    placeholder: '1. ...
-
-      2. ...
-
-      3. ...'
-  validations:
-    required: true
-- type: textarea
-  id: actual
-  attributes:
-    label: 실제 결과
-  validations:
-    required: true
-- type: textarea
-  id: expected
-  attributes:
-    label: 기대 결과
-  validations:
-    required: true
-- type: textarea
-  id: impact
-  attributes:
-    label: 영향
-    description: 사용자, 데이터, 보안, 배포 또는 운영 영향을 적습니다.
-  validations:
-    required: true
-- type: textarea
-  id: fix_scope
-  attributes:
-    label: 수정 범위
-    description: 직접 수정할 경계와 하지 않을 일을 함께 적습니다.
-    placeholder: '- 포함:
-
-      - 제외:'
-  validations:
-    required: true
-- type: textarea
-  id: ownership
-  attributes:
-    label: 작업 소유권·충돌 확인
-    placeholder: '- Accountable plan:
-
-      - Owner:
-
-      - Existing branch/worktree/PR:
-
-      - Overlap disposition:'
-  validations:
-    required: true
-- type: textarea
-  id: done
-  attributes:
-    label: 완료 조건
-    placeholder: '- [ ] 최소 재현 테스트 RED
-
-      - [ ] 수정 후 GREEN
-
-      - [ ] 인접 핵심 회귀 없음
-
-      - [ ] required repository CI'
-  validations:
-    required: true
-- type: textarea
-  id: evidence
-  attributes:
-    label: 검증·증거
-    description: 실행한 focused test와 실제 필요한 증거만 적습니다. 화면·device·deploy 증거는 해당 결함에 필요한 경우만 요구합니다.
-  validations:
-    required: true
-- type: checkboxes
-  id: ready
-  attributes:
-    label: 착수 전 확인
-    options:
-    - label: 같은 결함을 소유한 기존 이슈·PR·worktree가 없는지 확인했습니다.
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P0 — release, security, data integrity blocker
+        - P1 — deployment or production operation failure
+        - P2 — limited impact or practical workaround exists
+        - P3 — minor defect
+    validations:
       required: true
-    - label: 수정 이슈에 downstream release·audit 전체를 합치지 않습니다.
+
+  - type: input
+    id: domain
+    attributes:
+      label: Domain
+      description: 관련 IaC, environment, deploy input, readiness, activation, rollback 또는 운영 영역을 적습니다.
+      placeholder: 예) candidate admission, production environment, traffic activation
+    validations:
       required: true
-    - label: Focused 검증 뒤 Draft PR을 열고 full CI와 Review는 PR gate에서 수행합니다.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 결함의 현재 상태와 실제 운영·시스템 영향을 한정해서 설명합니다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps To Reproduce
+      description: 최소 재현 조건과 순서를 적습니다. deploy 결함은 target identity와 상태 전이를 포함합니다.
+      placeholder: |
+        Preconditions:
+        - ...
+
+        Steps:
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected / Actual Result
+      placeholder: |
+        Expected:
+        - ...
+
+        Actual:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: 배포, 트래픽, 보안, 데이터, 사용자 또는 운영 영향과 범위를 적습니다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done When
+      description: 수정 완료 후 관찰 가능한 결과를 체크리스트로 적습니다.
+      placeholder: |
+        - [ ] 최소 재현이 수정 전 실패하고 수정 후 통과한다.
+        - [ ] 대표 인접 회귀가 없다.
+        - [ ] 실패가 candidate, active, traffic 또는 environment 상태 변경으로 바뀌지 않는다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: execution_contract
+    attributes:
+      label: Execution Contract
+      description: 포함·제외 범위, owner, 실제 dependency와 실패 동작을 적습니다.
+      placeholder: |
+        Included:
+        - ...
+
+        Excluded:
+        - ...
+
+        Owner / active work:
+        - Accountable owner or plan:
+        - Related issue / PR:
+
+        Failure behavior:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification_delivery
+    attributes:
+      label: Verification & Delivery
+      description: 결함 위험에 필요한 최소 검증과 전달 방식을 적습니다. deploy·activation·DR rehearsal은 실제 surface를 바꿀 때만 요구합니다.
+      placeholder: |
+        Focused regression:
+        - ...
+
+        Required CI:
+        - Platform required checks
+
+        Deploy / activation / operations:
+        - Not required — reason: ...
+
+        Not run:
+        - Check:
+        - Reason:
+        - Rerun owner / condition:
+
+        Delivery:
+        - 첫 의미 있는 재현 또는 수정 뒤 Draft PR
+        - merge/closure 전 필요한 evidence:
+    validations:
       required: true
