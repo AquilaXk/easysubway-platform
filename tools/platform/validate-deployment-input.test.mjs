@@ -165,7 +165,7 @@ test("legacy backend presence fails closed before deployment mutation without re
   assert.doesNotMatch(deploy, /systemctl (?:enable|start) "(?:easysubway-backend\.service|\$\{unit\})"/);
 });
 
-test("legacy backend probe distinguishes absence from detector errors and JVM-option processes", () => {
+test("legacy backend probe resolves each Java -jar argument before deciding legacy ownership", () => {
   const root = new URL("../..", import.meta.url);
   const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
   const match = deploy.match(/preflight_legacy_backend_absence\(\)\s*\{[\s\S]*?\n\}\s*\npreflight_legacy_backend_absence\b/);
@@ -191,9 +191,30 @@ systemctl() {
 pgrep() {
   case "\${PGREP_MODE}" in
     error) return 2 ;;
-    options) [[ 'java -Xms512m -jar /opt/easysubway/easysubway-backend.jar' =~ $2 ]]; return ;;
-    relative) [[ 'java -jar easysubway-backend.jar' =~ $2 ]]; return ;;
-    symlink) [[ 'java -jar /srv/legacy/easysubway-backend.jar' =~ $2 ]]; return ;;
+    absent) return 1 ;;
+    *) printf '%s\\n' 101; return 0 ;;
+  esac
+}
+cat() {
+  case "\${PGREP_MODE}" in
+    unreadable-proc) return 1 ;;
+    options) printf 'java\\0-Xms512m\\0-jar\\0/opt/easysubway/easysubway-backend.jar\\0' ;;
+    relative) printf 'java\\0-jar\\0easysubway-backend.jar\\0' ;;
+    symlink) printf 'java\\0-jar\\0/srv/legacy/application.jar\\0' ;;
+    other-jar) printf 'java\\0-jar\\0/srv/other/application.jar\\0' ;;
+    no-jar) printf 'java\\0-Xms512m\\0-XX:+UseG1GC\\0' ;;
+    *) return 1 ;;
+  esac
+}
+readlink() {
+  local path="\${!#}"
+  case "\${PGREP_MODE}:\${path}" in
+    unreadable-cwd:/proc/101/cwd) return 1 ;;
+    *:/proc/101/cwd) printf '%s\\n' /opt/easysubway ;;
+    *:/opt/easysubway/easysubway-backend.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
+    relative:/opt/easysubway/easysubway-backend.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
+    symlink:/srv/legacy/application.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
+    other-jar:/srv/other/application.jar) printf '%s\\n' /srv/other/application.jar ;;
     *) return 1 ;;
   esac
 }
@@ -229,6 +250,16 @@ preflight_legacy_backend_absence
     const detected = runProbe("absent", mode);
     assert.equal(detected.status, 1, mode);
     assert.match(detected.stdout, /^blocked legacy_backend_jar_detected\n$/, mode);
+  }
+  for (const mode of ["other-jar", "no-jar"]) {
+    const allowed = runProbe("absent", mode);
+    assert.equal(allowed.status, 0, mode);
+    assert.equal(allowed.stdout, "", mode);
+  }
+  for (const mode of ["unreadable-proc", "unreadable-cwd"]) {
+    const failed = runProbe("absent", mode);
+    assert.equal(failed.status, 1, mode);
+    assert.match(failed.stdout, /^blocked legacy_backend_probe_failed\n$/, mode);
   }
 });
 

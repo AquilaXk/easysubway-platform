@@ -408,10 +408,18 @@ preflight_legacy_backend_absence() {
 	local unit="easysubway-backend.service"
 	local unit_files=""
 	local probe_status=0
-	local legacy_jar_regex=""
-	local legacy_process_pattern=""
-	local legacy_filename_process_pattern=""
-	local process_pattern=""
+	local java_process_ids=""
+	local process_id=""
+	local target_jar_path=""
+	local process_cwd=""
+	local candidate_jar_path=""
+	local process_argument=""
+	local first_process_argument=""
+	local jar_argument=""
+	local cmdline_file=""
+	local argument_count=0
+	local jar_option_detected=0
+	local jar_argument_detected=0
 	if ! command -v systemctl >/dev/null 2>&1; then
 		write_result "blocked" "legacy_backend_probe_failed"
 		exit 1
@@ -444,28 +452,99 @@ preflight_legacy_backend_absence() {
 			exit 1
 		fi
 	fi
-	if ! command -v pgrep >/dev/null 2>&1; then
+	if ! command -v pgrep >/dev/null 2>&1 ||
+		! command -v cat >/dev/null 2>&1 ||
+		! command -v readlink >/dev/null 2>&1 ||
+		! command -v mktemp >/dev/null 2>&1 ||
+		! command -v rm >/dev/null 2>&1; then
 		write_result "blocked" "legacy_backend_probe_failed"
 		exit 1
 	fi
-	if ! legacy_jar_regex="$(printf '%s' "${DEPLOY_ROOT}/easysubway-backend.jar" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"; then
+	if java_process_ids="$(pgrep -f '^([^[:space:]]*/)?java([[:space:]]|$)')"; then
+		:
+	else
+		probe_status="$?"
+		if [[ "${probe_status}" -eq 1 ]]; then
+			return 0
+		fi
 		write_result "blocked" "legacy_backend_probe_failed"
 		exit 1
 	fi
-	legacy_process_pattern="java([[:space:]]+[^[:space:]]+)*[[:space:]]+-jar[[:space:]]+${legacy_jar_regex}([[:space:]]|$)"
-	legacy_filename_process_pattern="java([[:space:]]+[^[:space:]]+)*[[:space:]]+-jar[[:space:]]+([^[:space:]]*/)?easysubway-backend[.]jar([[:space:]]|$)"
-	for process_pattern in "${legacy_process_pattern}" "${legacy_filename_process_pattern}"; do
-		if pgrep -f "${process_pattern}" >/dev/null; then
-			write_result "blocked" "legacy_backend_jar_detected"
+	if ! target_jar_path="$(readlink -f -- "${DEPLOY_ROOT}/easysubway-backend.jar")" ||
+		[[ -z "${target_jar_path}" ]]; then
+		write_result "blocked" "legacy_backend_probe_failed"
+		exit 1
+	fi
+	while IFS= read -r process_id; do
+		if [[ ! "${process_id}" =~ ^[1-9][0-9]*$ ]]; then
+			write_result "blocked" "legacy_backend_probe_failed"
 			exit 1
+		fi
+
+		process_argument=""
+		first_process_argument=""
+		jar_argument=""
+		argument_count=0
+		jar_option_detected=0
+		jar_argument_detected=0
+		if ! cmdline_file="$(mktemp "${TMPDIR:-/tmp}/easysubway-legacy-cmdline.XXXXXX")" ||
+			[[ -z "${cmdline_file}" ]]; then
+			write_result "blocked" "legacy_backend_probe_failed"
+			exit 1
+		fi
+		if ! cat "/proc/${process_id}/cmdline" >"${cmdline_file}" || [[ ! -s "${cmdline_file}" ]]; then
+			rm -f -- "${cmdline_file}" >/dev/null 2>&1 || :
+			write_result "blocked" "legacy_backend_probe_failed"
+			exit 1
+		fi
+		while IFS= read -r -d '' process_argument; do
+			((argument_count += 1))
+			if [[ "${argument_count}" -eq 1 ]]; then
+				first_process_argument="${process_argument}"
+			fi
+			if [[ "${jar_option_detected}" -eq 1 && "${jar_argument_detected}" -eq 0 ]]; then
+				jar_argument="${process_argument}"
+				jar_argument_detected=1
+			elif [[ "${process_argument}" == "-jar" && "${jar_option_detected}" -eq 0 ]]; then
+				jar_option_detected=1
+			fi
+		done <"${cmdline_file}"
+		if ! rm -f -- "${cmdline_file}"; then
+			write_result "blocked" "legacy_backend_probe_failed"
+			exit 1
+		fi
+		if [[ "${argument_count}" -eq 0 || "${first_process_argument##*/}" != "java" ||
+			( "${jar_option_detected}" -eq 1 && "${jar_argument_detected}" -eq 0 ) ]]; then
+			write_result "blocked" "legacy_backend_probe_failed"
+			exit 1
+		fi
+		if [[ "${jar_argument_detected}" -eq 0 ]]; then
+			continue
+		fi
+		if [[ -z "${jar_argument}" ]]; then
+			write_result "blocked" "legacy_backend_probe_failed"
+			exit 1
+		fi
+		if [[ "${jar_argument}" == /* ]]; then
+			candidate_jar_path="${jar_argument}"
 		else
-			probe_status="$?"
-			if [[ "${probe_status}" -ne 1 ]]; then
+			if ! process_cwd="$(readlink -f -- "/proc/${process_id}/cwd")" ||
+				[[ -z "${process_cwd}" ]]; then
 				write_result "blocked" "legacy_backend_probe_failed"
 				exit 1
 			fi
+			candidate_jar_path="${process_cwd}/${jar_argument}"
 		fi
-	done
+		if ! candidate_jar_path="$(readlink -f -- "${candidate_jar_path}")" ||
+			[[ -z "${candidate_jar_path}" ]]; then
+			write_result "blocked" "legacy_backend_probe_failed"
+			exit 1
+		fi
+		if [[ "${candidate_jar_path}" == "${target_jar_path}" ]]; then
+			write_result "blocked" "legacy_backend_jar_detected"
+			exit 1
+		fi
+	done <<<"${java_process_ids}"
 }
 
 preflight_legacy_backend_absence
