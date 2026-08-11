@@ -1,49 +1,57 @@
-<!--
-이 PR은 하나의 PBI 또는 Sub-task만 종료합니다.
-현재 작업 계획서의 issue·branch·worktree·PR 소유권을 유지하고 다른 세션의 변경을 인수하지 않습니다.
-API/schema/DB/deploy/security/artifact/release 경계 변경은 full.md를, 작은 maintenance는 short.md를 사용할 수 있습니다.
--->
+## Related issue
 
-## 관련 작업
+<!-- 이 PR로 이슈를 완전히 종료할 때만 Closes를 사용합니다. -->
+Related #
 
-- Epic:
-- PBI / Sub-task:
-- `Closes` 또는 `Refs`:
-- Tech Spec / ADR: `NONE`
+## Summary
 
-## 변경 목적
+- Problem:
+- Outcome:
+
+## Changes
 
 -
 
-## 범위
+## Scope
 
-- 포함:
-- 제외:
-- 변경 파일/컴포넌트 경계:
-
-## 변경 내용
+### Included
 
 -
 
-## 검증
-
-- Focused test:
-- Required CI:
-- Manual / device / deploy 확인: `NONE`
-
-## 영향·위험
-
-- 사용자·운영 영향:
-- 호환성·migration 영향:
-- 실패 시 동작:
-- rollback 또는 되돌리기:
-
-## 리뷰 포인트
+### Excluded
 
 -
 
-## 확인
+## Verification
 
-- [ ] 하나의 PBI/Sub-task 범위만 변경했습니다.
-- [ ] 기존 이슈 번호와 다른 작업자의 branch/worktree/PR을 변경·병합·인수하지 않았습니다.
-- [ ] 필요한 focused 검증을 실행했고 required CI·repository Review 정책은 PR gate에서 확인합니다.
+| Check | Result / Evidence |
+| --- | --- |
+| Focused test | |
+| Required CI | |
+| Deploy / activation / operations | Not required — reason: |
+
+## Not run
+
+<!-- 실행하지 않은 검증이 없으면 None. -->
+- Check: None
+- Reason:
+- Rerun owner / condition:
+
+## Risk
+
+- Level: Low / Medium / High
+- Main risk:
+- Infrastructure / traffic / environment impact: None
+- Failure behavior:
+
+## Rollback / Recovery
+
+- Rollback or recovery:
+- State / config / deployment compatibility: Not applicable
+
+## Checklist
+
+- [ ] 이슈 범위와 실제 diff가 일치합니다.
+- [ ] 관련 없는 변경을 포함하지 않았습니다.
+- [ ] 필요한 검증 결과와 미실행 사유를 기록했습니다.
+- [ ] 실패를 previous/alternate/orchestrator 경로의 성공으로 바꾸는 경로를 추가하지 않았습니다.
