@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -131,8 +131,153 @@ test("deploy adapter derives the full image from the verified digest", () => {
   const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
   const allowlist = readFileSync(new URL("tools/deploy/compose-server-env.allowlist", root), "utf8");
   assert.match(deploy, /backend_image="ghcr\.io\/aquilaxk\/easysubway-backend@\$\{DEPLOY_IMAGE_DIGEST\}"/);
+  assert.match(deploy, /\[\[ ! "\$\{DEPLOY_IMAGE_DIGEST\}" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]/);
   assert.doesNotMatch(deploy, /EASYSUBWAY_BACKEND_IMAGE_TAG/);
   assert.doesNotMatch(allowlist, /EASYSUBWAY_BACKEND_IMAGE(?:_TAG)?/);
+});
+
+test("legacy backend presence fails closed before deployment mutation without restore paths", () => {
+  const root = new URL("../..", import.meta.url);
+  const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
+  const preflight = deploy.indexOf("preflight_legacy_backend_absence() {");
+  const candidateMutation = deploy.indexOf('timeout 600 docker compose');
+  const promotion = deploy.indexOf('write_phase "promoting"');
+  const trafficMutation = deploy.indexOf("install_route_v2_host_ingress");
+
+  assert.equal(preflight >= 0, true, "legacy presence needs a dedicated fail-closed preflight");
+  assert.equal(candidateMutation >= 0, true, "candidate mutation anchor must exist");
+  assert.equal(promotion >= 0, true, "promotion anchor must exist");
+  assert.equal(trafficMutation >= 0, true, "traffic mutation anchor must exist");
+  assert.equal(deploy.indexOf("preflight_legacy_backend_absence\n") < candidateMutation, true, "legacy preflight must run before the candidate can mutate runtime state");
+  assert.equal(preflight < candidateMutation, true);
+  assert.equal(candidateMutation < promotion, true);
+  assert.equal(candidateMutation < trafficMutation, true);
+  assert.match(deploy, /local unit="easysubway-backend\.service"/);
+  assert.match(deploy, /systemctl list-unit-files "\$\{unit\}"/);
+  assert.match(deploy, /systemctl is-active --quiet "\$\{unit\}"/);
+  assert.match(deploy, /systemctl is-enabled --quiet "\$\{unit\}"/);
+  assert.match(deploy, /pgrep -f/);
+  assert.match(deploy, /write_result "blocked" "legacy_backend_(unit|jar)_detected"/);
+  assert.doesNotMatch(deploy, /LEGACY_BACKEND_(?:UNIT|JAR)/);
+  assert.doesNotMatch(deploy, /restore_legacy_backend_service|restore_legacy_on_/);
+  assert.doesNotMatch(deploy, /legacy_backend_was_(?:active|enabled)|legacy_restore_on_error/);
+  assert.doesNotMatch(deploy, /trap [^\n]*(?:legacy|restore)[^\n]*(?:ERR|INT|TERM|HUP)/i);
+  assert.doesNotMatch(deploy, /systemctl (?:enable|start) "(?:easysubway-backend\.service|\$\{unit\})"/);
+});
+
+test("legacy backend probe resolves each Java -jar argument before deciding legacy ownership", (t) => {
+  const root = new URL("../..", import.meta.url);
+  const procFixture = mkdtempSync(join(tmpdir(), "platform-legacy-proc-"));
+  const existingProcRoot = join(procFixture, "existing");
+  const missingProcRoot = join(procFixture, "missing");
+  mkdirSync(join(existingProcRoot, "101"), { recursive: true });
+  mkdirSync(missingProcRoot);
+  t.after(() => rmSync(procFixture, { recursive: true, force: true }));
+  const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
+  const match = deploy.match(/preflight_legacy_backend_absence\(\)\s*\{[\s\S]*?\n\}\s*\npreflight_legacy_backend_absence\b/);
+  assert.notEqual(match, null);
+  const functionSource = match[0].replace(/\s*\npreflight_legacy_backend_absence$/, "");
+  const harness = `
+set -euo pipefail
+DEPLOY_ROOT=/opt/easysubway
+PROC_FS_ROOT="\${PROC_FS_ROOT:?PROC_FS_ROOT is required}"
+write_result() { printf '%s %s\\n' "$1" "$2"; }
+systemctl() {
+  case "$1" in
+    list-unit-files)
+      case "\${SYSTEMCTL_MODE}" in
+        error) return 5 ;;
+        unit) printf '%s\\n' 'easysubway-backend.service enabled'; return 0 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    is-active) [[ "\${SYSTEMCTL_MODE}" == active ]] && return 0; [[ "\${SYSTEMCTL_MODE}" == active-error ]] && return 5; return 3 ;;
+    is-enabled) [[ "\${SYSTEMCTL_MODE}" == enabled ]] && return 0; [[ "\${SYSTEMCTL_MODE}" == enabled-error ]] && return 5; return 1 ;;
+  esac
+}
+pgrep() {
+  case "\${PGREP_MODE}" in
+    error) return 2 ;;
+    absent) return 1 ;;
+    *) printf '%s\\n' 101; return 0 ;;
+  esac
+}
+cat() {
+  case "\${PGREP_MODE}" in
+    unreadable-proc|exited-proc) return 1 ;;
+    options) printf 'java\\0-Xms512m\\0-jar\\0/opt/easysubway/easysubway-backend.jar\\0' ;;
+    relative|unreadable-cwd|exited-cwd) printf 'java\\0-jar\\0easysubway-backend.jar\\0' ;;
+    symlink) printf 'java\\0-jar\\0/srv/legacy/application.jar\\0' ;;
+    other-jar) printf 'java\\0-jar\\0/srv/other/application.jar\\0' ;;
+    no-jar) printf 'java\\0-Xms512m\\0-XX:+UseG1GC\\0' ;;
+    *) return 1 ;;
+  esac
+}
+readlink() {
+  local path="\${!#}"
+  case "\${PGREP_MODE}:\${path}" in
+    unreadable-cwd:\${PROC_FS_ROOT}/101/cwd|exited-cwd:\${PROC_FS_ROOT}/101/cwd) return 1 ;;
+    *:\${PROC_FS_ROOT}/101/cwd) printf '%s\\n' /opt/easysubway ;;
+    *:/opt/easysubway/easysubway-backend.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
+    relative:/opt/easysubway/easysubway-backend.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
+    symlink:/srv/legacy/application.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
+    other-jar:/srv/other/application.jar) printf '%s\\n' /srv/other/application.jar ;;
+    *) return 1 ;;
+  esac
+}
+${functionSource}
+preflight_legacy_backend_absence
+`;
+  const runProbe = (systemctlMode, pgrepMode) => spawnSync("bash", ["-c", harness], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      SYSTEMCTL_MODE: systemctlMode,
+      PGREP_MODE: pgrepMode,
+      PROC_FS_ROOT: ["exited-proc", "exited-cwd"].includes(pgrepMode) ? missingProcRoot : existingProcRoot,
+    },
+  });
+
+  const absent = runProbe("absent", "absent");
+  assert.equal(absent.status, 0, absent.stderr);
+  assert.equal(absent.stdout, "");
+  for (const mode of ["unit", "active", "enabled"]) {
+    const detected = runProbe(mode, "absent");
+    assert.equal(detected.status, 1, mode);
+    assert.match(detected.stdout, /^blocked legacy_backend_unit_detected\n$/, mode);
+  }
+  for (const mode of ["active-error", "enabled-error"]) {
+    const failed = runProbe(mode, "absent");
+    assert.equal(failed.status, 1, mode);
+    assert.match(failed.stdout, /^blocked legacy_backend_probe_failed\n$/, mode);
+  }
+  for (const result of [runProbe("error", "absent"), runProbe("absent", "error")]) {
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /^blocked legacy_backend_probe_failed\n$/);
+  }
+  const options = runProbe("absent", "options");
+  assert.equal(options.status, 1);
+  assert.match(options.stdout, /^blocked legacy_backend_jar_detected\n$/);
+  for (const mode of ["relative", "symlink"]) {
+    const detected = runProbe("absent", mode);
+    assert.equal(detected.status, 1, mode);
+    assert.match(detected.stdout, /^blocked legacy_backend_jar_detected\n$/, mode);
+  }
+  for (const mode of ["other-jar", "no-jar"]) {
+    const allowed = runProbe("absent", mode);
+    assert.equal(allowed.status, 0, mode);
+    assert.equal(allowed.stdout, "", mode);
+  }
+  for (const mode of ["exited-proc", "exited-cwd"]) {
+    const allowed = runProbe("absent", mode);
+    assert.equal(allowed.status, 0, mode);
+    assert.equal(allowed.stdout, "", mode);
+  }
+  for (const mode of ["unreadable-proc", "unreadable-cwd"]) {
+    const failed = runProbe("absent", mode);
+    assert.equal(failed.status, 1, mode);
+    assert.match(failed.stdout, /^blocked legacy_backend_probe_failed\n$/, mode);
+  }
 });
 
 function makeFixture(options = {}) {
