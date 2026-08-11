@@ -49,6 +49,7 @@ jobs:
           node tools/platform/terraform-static-analysis.mjs validate-policy
           node --test tools/platform/journey-release-contract.test.mjs
           node --test tools/platform/server-route-bundle-object-acquisition-contract.test.mjs
+          node --test tools/platform/acquire-server-route-bundle.test.mjs
           node --test tools/platform/platform-journey-release-lifecycle-contract.test.mjs
           node --test tools/platform/stage-journey-release-tuple.test.mjs
           node --test tools/platform/read-staged-journey-release-tuple.test.mjs
