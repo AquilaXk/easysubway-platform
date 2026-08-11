@@ -65,6 +65,7 @@ test("missing weak legacy or equal report secrets fail before output publication
     [{ [intentKey]: "local-dev-report-upload-intent-signing-key" }, intentKey],
     [{ [receiptKey]: undefined, [intentKey]: undefined, [legacyReceiptKey]: legacySecret }, legacyReceiptKey],
     [{ [legacyReceiptKey]: legacySecret }, legacyReceiptKey],
+    [{ [legacyReceiptKey]: "" }, legacyReceiptKey],
     [{ [receiptKey]: sharedSecret, [intentKey]: `  ${sharedSecret}  ` }, "서로 달라야"],
   ];
 
