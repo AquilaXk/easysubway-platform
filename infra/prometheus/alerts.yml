@@ -40,7 +40,7 @@ groups:
           impact_ko: "작업 큐와 DLQ 관련 알림 평가가 늦거나 멈출 수 있습니다."
           action_ko: "back-worker 컨테이너 상태와 /actuator/health/readiness 응답을 확인하세요."
 
-      # dead-man's switch(#2376): backend_app_metrics scrape가 멈추면 아래 freshness 경보가 참조하는
+      # dead-man's switch(Hub Issue #2376): backend_app_metrics scrape가 멈추면 아래 freshness 경보가 참조하는
       # easysubway_timetable_snapshot_remaining_seconds 시계열이 사라져 T-24h/T-6h 경보가 조용히 평가를
       # 멈춘다. 이 경보가 그 무음 상태 자체를 감시한다.
       - alert: AquilaBackendAppMetricsScrapeDown
@@ -56,7 +56,7 @@ groups:
           impact_ko: "운행표 snapshot 잔여시간 게이지가 사라져 만료 24/6시간 전 경보가 조용히 멈춥니다."
           action_ko: "backend 컨테이너 상태와 /actuator/prometheus 응답, docker network 내부 backend:8080 접근을 확인하세요."
 
-      # 이 시계열은 backend actuator 메트릭에서 라이브로 scrape된다(#2376): prometheus.yml의
+      # 이 시계열은 backend actuator 메트릭에서 라이브로 scrape된다(Hub Issue #2376): prometheus.yml의
       # backend_app_metrics job이 docker network 내부 backend:8080/actuator/prometheus 를 직접 수집한다.
       # actuator는 공개 노출하지 않고 nginx 공개 경로에서 /actuator/* 를 차단하되 readiness/liveness probe만
       # 예외로 둔다. .github/workflows/timetable-auto-refresh.yml의 T-24h/T-6h Slack 통지는 보완 경보로
@@ -87,7 +87,7 @@ groups:
           impact_ko: "만료 시점 이후 재시작하면 부팅 hard fail로 서비스 중단 위험이 있습니다."
           action_ko: "즉시 재산출된 snapshot을 배포하거나 break-glass override 절차를 검토하세요."
 
-      # #2434 WP4: multi-window 5xx burn-rate (SLO 99.9% → error budget 0.001).
+      # Hub Issue #2434 WP4: multi-window 5xx burn-rate (SLO 99.9% → error budget 0.001).
       # SLI = 5xx rate / total request rate. Traffic guard: long-window rate * 60 > 1 (≈ >1 req/min).
       - alert: Backend5xxBurnRateCritical
         expr: |

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: imresamu/postgis:16-3.5@sha256:92031b614897082103c00729ea26e62f118ecb59b71e27b5c3ac3a8dc13bff23
+    image: imresamu/postgis:18-3.6@sha256:b5766ee720aca09c61b9a868abefbf273348a4b90ad4cf146b4f8c9ac85d48e4
     container_name: easysubway-postgres
     environment:
       POSTGRES_DB: ${EASYSUBWAY_POSTGRES_DB:-easysubway}
@@ -39,7 +39,7 @@ services:
   # One-shot root fixup so named log volumes are writable by UID 10001
   # (empty volumes are root-owned; image chown is masked by the mount).
   backend-logs-init:
-    image: busybox:1.37.0
+    image: busybox:1.38.0
     container_name: easysubway-backend-logs-init
     restart: "no"
     command: ["sh", "-c", "mkdir -p /logs/backend /logs/standby /logs/worker && chown -R 10001:10001 /logs/backend /logs/standby /logs/worker"]
@@ -87,7 +87,7 @@ services:
 
   # Transient blue/green standby: boots the candidate image on an alternate
   # port so deploy-backend.sh can validate it before promoting it onto the
-  # canonical "backend" container above (issue #2331). Never started by a
+  # canonical "backend" container above (Hub Issue #2331). Never started by a
   # bare `up`/`up -d` (deploy-backend.sh always names services explicitly);
   # `restart: "no"` keeps it from lingering if the host reboots mid-deploy —
   # every deploy run either promotes and removes it, or removes it on
@@ -99,7 +99,7 @@ services:
   # snapshot swap commit here, against the live database, before canonical is
   # touched — "old backend untouched" is a process/Nginx-level guarantee, not
   # a data-layer one. See the migration contract comment at the top of
-  # tools/deploy/deploy-backend.sh (issue #2331 review).
+  # tools/deploy/deploy-backend.sh (Hub Issue #2331 review).
   backend-standby:
     image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
     container_name: easysubway-backend-standby
@@ -173,7 +173,7 @@ services:
         condition: service_healthy
 
   route-v2-gateway:
-    image: nginx:1.28.0-alpine-slim
+    image: nginx:1.31.3-alpine-slim
     container_name: easysubway-route-v2-gateway
     restart: unless-stopped
     user: "10001:10001"
@@ -207,14 +207,14 @@ services:
         condition: service_started
 
   public-edge-probe:
-    image: prom/blackbox-exporter:v0.27.0
+    image: prom/blackbox-exporter:v0.28.0
     container_name: easysubway-public-edge-probe
     restart: unless-stopped
     profiles:
       - observability
 
   docker-runtime-probe:
-    image: ghcr.io/google/cadvisor:v0.60.3
+    image: ghcr.io/google/cadvisor:v0.60.5
     container_name: easysubway-docker-runtime-probe
     restart: unless-stopped
     profiles:
@@ -230,7 +230,7 @@ services:
       - /dev/disk:/dev/disk:ro
 
   alertmanager:
-    image: prom/alertmanager:v0.33.0
+    image: prom/alertmanager:v0.33.1
     container_name: easysubway-alertmanager
     profiles:
       - observability
@@ -253,7 +253,7 @@ services:
       start_period: 20s
 
   prometheus:
-    image: prom/prometheus:v3.5.4
+    image: prom/prometheus:v3.13.2
     container_name: easysubway-prometheus
     profiles:
       - observability
@@ -278,7 +278,7 @@ services:
       start_period: 20s
 
   loki-volume-init:
-    image: busybox:1.37.0
+    image: busybox:1.38.0
     container_name: easysubway-loki-volume-init
     profiles:
       - observability
@@ -287,7 +287,7 @@ services:
       - loki-data:/loki
 
   loki:
-    image: grafana/loki:3.6.0
+    image: grafana/loki:3.7.6
     container_name: easysubway-loki
     profiles:
       - observability
@@ -310,7 +310,7 @@ services:
       start_period: 20s
 
   grafana:
-    image: grafana/grafana:12.2.9
+    image: grafana/grafana:13.1.2
     container_name: easysubway-grafana
     profiles:
       - observability
@@ -336,7 +336,7 @@ services:
       start_period: 30s
 
   alloy:
-    image: grafana/alloy:v1.17.1
+    image: grafana/alloy:v1.18.0
     container_name: easysubway-alloy
     restart: unless-stopped
     profiles:
@@ -354,7 +354,7 @@ services:
     depends_on:
       loki:
         condition: service_healthy
-    # grafana/alloy 이미지에 wget/curl이 없어 bash /dev/tcp로 ready를 판정한다 (#2449).
+    # grafana/alloy 이미지에 wget/curl이 없어 bash /dev/tcp로 ready를 판정한다 (Hub Issue #2449).
     healthcheck:
       test:
         [

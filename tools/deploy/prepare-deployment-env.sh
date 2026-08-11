@@ -37,6 +37,13 @@ strip_quotes() {
 	fi
 }
 
+trim_whitespace() {
+	local raw="$1"
+	raw="${raw#"${raw%%[![:space:]]*}"}"
+	raw="${raw%"${raw##*[![:space:]]}"}"
+	printf '%s' "${raw}"
+}
+
 while IFS= read -r line || [[ -n "${line}" ]]; do
 	line="${line%$'\r'}"
 	[[ -z "${line}" || "${line}" == \#* ]] && continue
@@ -249,16 +256,25 @@ if [[ "${ads_asset_origin_invalid}" -ne 0 ]]; then
 	exit 1
 fi
 
-receipt_pepper="$(value EASYSUBWAY_REPORT_RECEIPT_PEPPER)"
-legacy_pepper="$(value EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER)"
-intent_key="$(value EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY)"
-pepper="${receipt_pepper:-${legacy_pepper}}"
-if [[ ${#pepper} -lt 32 || "${pepper}" == *local* || "${pepper}" == *test* ]]; then
-	printf 'receipt pepper must be production strength\n' >&2
+if grep -q '^EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER=' "${env_values_file}"; then
+	printf 'legacy deployment env is forbidden: %s\n' EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER >&2
 	exit 1
 fi
-if [[ -n "${intent_key}" && ${#intent_key} -lt 32 ]]; then
-	printf 'upload intent signing key must be production strength\n' >&2
+require_nonempty EASYSUBWAY_REPORT_RECEIPT_PEPPER
+require_nonempty EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY
+receipt_pepper="$(trim_whitespace "$(value EASYSUBWAY_REPORT_RECEIPT_PEPPER)")"
+intent_key="$(trim_whitespace "$(value EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY)")"
+if [[ ${#receipt_pepper} -lt 32 || "${receipt_pepper}" == *local* || "${receipt_pepper}" == *test* ]]; then
+	printf 'invalid production report secret: %s\n' EASYSUBWAY_REPORT_RECEIPT_PEPPER >&2
+	exit 1
+fi
+if [[ ${#intent_key} -lt 32 || "${intent_key}" == *local* || "${intent_key}" == *test* ]]; then
+	printf 'invalid production report secret: %s\n' EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY >&2
+	exit 1
+fi
+if [[ "${receipt_pepper}" == "${intent_key}" ]]; then
+	printf 'canonical report secrets는 서로 달라야 합니다: %s, %s\n' \
+		EASYSUBWAY_REPORT_RECEIPT_PEPPER EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY >&2
 	exit 1
 fi
 
