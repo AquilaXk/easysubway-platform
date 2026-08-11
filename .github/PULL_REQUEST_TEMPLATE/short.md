@@ -1,24 +1,22 @@
-<!-- 작은 maintenance·문구·설정·bounded cleanup 전용입니다. 제품/운영 경계가 바뀌면 기본 또는 full 템플릿을 사용합니다. -->
+<!-- Low-risk mechanical, wording, configuration or bounded cleanup only. -->
 
-## 관련 작업
+## Related issue
 
-- `Refs` / `Closes` / `이슈 없음(C등급)`:
+Related #
 
-## 변경 내용
-
--
-
-## 검증
+## Change
 
 -
 
-## 영향
+## Verification
 
-- 사용자·운영 영향: `NONE`
-- 계약·artifact·deploy 영향: `NONE`
+- Check:
+- Result / evidence:
+- Not run — reason: None
 
-## 확인
+## Risk
 
-- [ ] 하나의 작은 변경만 포함했습니다.
-- [ ] 다른 작업자의 branch/worktree/PR을 건드리지 않았습니다.
-- [ ] required CI와 repository Review 정책을 확인합니다.
+- Level: Low
+- Infrastructure / traffic / environment impact: None
+- Deployment / recovery impact: None
+- Rollback: Revert this PR
