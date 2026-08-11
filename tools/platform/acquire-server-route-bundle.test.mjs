@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -22,7 +23,13 @@ import {
   acquireServerRouteBundle,
   buildObjectUrl,
   formatAcquisitionSuccess,
+  inspectAcquiredServerRouteBundleCandidate,
 } from "./acquire-server-route-bundle.mjs";
+import {
+  CandidateBindingError,
+  bindJourneyReleaseCandidate,
+  formatCandidateBindingSuccess,
+} from "./bind-journey-release-candidate.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const contractPath = join(
@@ -32,6 +39,10 @@ const contractPath = join(
 const scriptPath = join(
   repositoryRoot,
   "tools/platform/acquire-server-route-bundle.mjs",
+);
+const bindingScriptPath = join(
+  repositoryRoot,
+  "tools/platform/bind-journey-release-candidate.mjs",
 );
 const workflowPath = join(repositoryRoot, ".github/workflows/ci.yml");
 const focusedCommand =
@@ -544,6 +555,367 @@ test("rejects duplicate JSON keys and invalid CLI forms with sanitized typed out
   }
 });
 
+test("binds one exact staged tuple to one exact candidate without mutating either input", async () => {
+  const fixture = makeFixture({ largePayloadSize: 192 * 1024 });
+  const candidateRoot = await acquireFixture(fixture);
+  const tuple = stagedTuple(fixture);
+  const tuplePath = writeTuple(fixture, tuple);
+  const beforeCandidate = fingerprintCandidate(candidateRoot);
+  const beforeTuple = readFileSync(tuplePath);
+  const reads = [];
+
+  const result = await bindJourneyReleaseCandidate({
+    contractPath,
+    tuplePath,
+    candidateRoot,
+    orchestrator: "COMPOSE",
+    inspectCandidate: (input) =>
+      inspectAcquiredServerRouteBundleCandidate({
+        ...input,
+        onReadChunk: (event) => reads.push(event),
+      }),
+  });
+
+  assert.deepEqual(result, {
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    artifactKind: "journey-release-candidate-binding",
+    orchestrator: "COMPOSE",
+    tupleSha256: tuple.tupleSha256,
+    deploymentRevision: tuple.deploymentRevision,
+    environmentIdentity: tuple.environmentIdentity,
+    handoffSha256: fixture.handoff.handoffSha256,
+    serverRouteBundleDigest:
+      fixture.handoff.platformRelease.serverRouteBundleDigest,
+  });
+  assert.equal(formatCandidateBindingSuccess(result), `${JSON.stringify(result)}\n`);
+  for (const pass of [1, 2]) {
+    const topologyReads = reads.filter(
+      (event) =>
+        event.pass === pass && event.path === "payload/topology.sqlite.zst",
+    );
+    assert.equal(topologyReads.length > 1, true);
+    assert.equal(
+      topologyReads.every(
+        (event) => event.bytesRead > 0 && event.bytesRead <= 64 * 1024,
+      ),
+      true,
+    );
+    assert.equal(
+      topologyReads.reduce((sum, event) => sum + event.bytesRead, 0),
+      192 * 1024,
+    );
+  }
+  assert.deepEqual(readFileSync(tuplePath), beforeTuple);
+  assert.deepEqual(fingerprintCandidate(candidateRoot), beforeCandidate);
+});
+
+test("rejects malformed staged tuples before candidate inspection", async () => {
+  const fixture = makeFixture();
+  const tuple = stagedTuple(fixture);
+  const duplicate = canonicalTuple(tuple).replace(
+    /^\{\n/,
+    `{\n  "schemaVersion": "JOURNEY_RELEASE_TUPLE_V1",\n`,
+  );
+  const cases = [
+    JSON.stringify(tuple),
+    duplicate,
+    canonicalTuple(Object.fromEntries(Object.entries(tuple).toReversed())),
+    canonicalTuple({ ...tuple, unexpected: true }),
+    canonicalTuple({ ...tuple, tupleSha256: `sha256:${"0".repeat(64)}` }),
+  ];
+  let inspections = 0;
+
+  for (const [index, bytes] of cases.entries()) {
+    const tuplePath = writeTuple(fixture, tuple, bytes, `tuple-invalid-${index}.json`);
+    await assert.rejects(
+      bindJourneyReleaseCandidate({
+        contractPath,
+        tuplePath,
+        candidateRoot: join(fixture.outputRoot, "must-not-be-inspected"),
+        orchestrator: "COMPOSE",
+        inspectCandidate: async () => {
+          inspections += 1;
+          throw new Error("candidate inspection must not run");
+        },
+      }),
+      candidateBindingError("CANDIDATE_TUPLE_INVALID"),
+    );
+  }
+  assert.equal(inspections, 0);
+});
+
+test("rejects a tuple and acquired bundle digest mismatch", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  const tuple = stagedTuple(fixture, {
+    serverRouteBundleDigest: `sha256:${"e".repeat(64)}`,
+  });
+  const tuplePath = writeTuple(fixture, tuple);
+
+  await assert.rejects(
+    bindJourneyReleaseCandidate({
+      contractPath,
+      tuplePath,
+      candidateRoot,
+      orchestrator: "COMPOSE",
+    }),
+    candidateBindingError("CANDIDATE_IDENTITY_MISMATCH"),
+  );
+});
+
+test("rejects malformed candidate names, trees, links, special files, and handoff drift", async () => {
+  const cases = [
+    {
+      mutate: (candidateRoot, fixture) => {
+        const wrongName = join(fixture.outputRoot, "wrong-handoff-name");
+        renameSync(candidateRoot, wrongName);
+        return wrongName;
+      },
+    },
+    {
+      mutate: (candidateRoot) => {
+        writeFileSync(join(candidateRoot, "objects", "unexpected.json"), "unexpected");
+        return candidateRoot;
+      },
+    },
+    {
+      mutate: (candidateRoot) => {
+        rmSync(join(candidateRoot, "objects", objectPaths[0]));
+        return candidateRoot;
+      },
+    },
+    {
+      mutate: (candidateRoot) => {
+        const target = join(candidateRoot, "objects", objectPaths[0]);
+        rmSync(target);
+        symlinkSync("/dev/null", target);
+        return candidateRoot;
+      },
+    },
+    {
+      mutate: (candidateRoot) => {
+        const target = join(candidateRoot, "objects", objectPaths[0]);
+        rmSync(target);
+        createFifo(target);
+        return candidateRoot;
+      },
+    },
+    {
+      mutate: (candidateRoot) => {
+        writeFileSync(join(candidateRoot, "handoff.json"), "{}\n");
+        return candidateRoot;
+      },
+    },
+  ];
+
+  for (const { mutate } of cases) {
+    const fixture = makeFixture();
+    const acquiredRoot = await acquireFixture(fixture);
+    const candidateRoot = mutate(acquiredRoot, fixture);
+    const tuplePath = writeTuple(fixture, stagedTuple(fixture));
+    await assert.rejects(
+      bindJourneyReleaseCandidate({
+        contractPath,
+        tuplePath,
+        candidateRoot,
+        orchestrator: "COMPOSE",
+      }),
+      candidateBindingError("CANDIDATE_BUNDLE_INVALID"),
+    );
+  }
+});
+
+test("rejects object, handoff, and directory mutation between candidate passes", async () => {
+  const mutations = [
+    (candidateRoot) => {
+      const target = join(candidateRoot, "objects", objectPaths[0]);
+      writeFileSync(target, Buffer.alloc(readFileSync(target).length, 0x78));
+    },
+    (candidateRoot) => {
+      const target = join(candidateRoot, "handoff.json");
+      writeFileSync(target, Buffer.concat([readFileSync(target), Buffer.from(" ")]));
+    },
+    (candidateRoot) => {
+      writeFileSync(join(candidateRoot, "objects", "unexpected.json"), "unexpected");
+    },
+  ];
+
+  for (const mutate of mutations) {
+    const fixture = makeFixture();
+    const candidateRoot = await acquireFixture(fixture);
+    await assert.rejects(
+      inspectAcquiredServerRouteBundleCandidate({
+        contractPath,
+        candidateRoot,
+        beforeSecondPass: ({ candidateRoot: root }) => mutate(root),
+      }),
+      errorWithCode("OBJECT_READ_UNSTABLE"),
+    );
+  }
+});
+
+test("rejects an object mutated after its second-pass bytes were hashed", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  let mutated = false;
+
+  await assert.rejects(
+    inspectAcquiredServerRouteBundleCandidate({
+      contractPath,
+      candidateRoot,
+      onReadChunk: (event) => {
+        if (mutated || event.pass !== 2 || event.path !== objectPaths[0]) return;
+        mutated = true;
+        const target = join(candidateRoot, "objects", objectPaths[0]);
+        writeFileSync(target, Buffer.alloc(readFileSync(target).length, 0x78));
+      },
+    }),
+    errorWithCode("OBJECT_READ_UNSTABLE"),
+  );
+  assert.equal(mutated, true);
+});
+
+test("rejects an oversized candidate object before hashing its bytes", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  writeFileSync(
+    join(candidateRoot, "objects", objectPaths[0]),
+    Buffer.alloc(256 * 1024, 0x78),
+  );
+  let oversizedBytesRead = 0;
+
+  await assert.rejects(
+    inspectAcquiredServerRouteBundleCandidate({
+      contractPath,
+      candidateRoot,
+      onReadChunk: (event) => {
+        if (event.pass === 1 && event.path === objectPaths[0]) {
+          oversizedBytesRead += event.bytesRead;
+        }
+      },
+    }),
+    errorWithCode("OBJECT_IDENTITY_MISMATCH"),
+  );
+  assert.equal(oversizedBytesRead, 0);
+});
+
+test("inspects only the exact candidate and leaves sibling-shaped sources untouched", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  const siblingRoot = join(fixture.outputRoot, "older-local-hub-cache-candidate");
+  mkdirSync(siblingRoot);
+  writeFileSync(join(siblingRoot, "marker"), "must remain unread and unchanged");
+  const siblingBefore = readFileSync(join(siblingRoot, "marker"));
+  const tuplePath = writeTuple(fixture, stagedTuple(fixture));
+
+  await bindJourneyReleaseCandidate({
+    contractPath,
+    tuplePath,
+    candidateRoot,
+    orchestrator: "COMPOSE",
+  });
+
+  assert.deepEqual(readFileSync(join(siblingRoot, "marker")), siblingBefore);
+  assert.deepEqual(readdirSync(fixture.outputRoot).sort(), [
+    fixture.handoff.handoffSha256,
+    "older-local-hub-cache-candidate",
+  ].sort());
+});
+
+test("binding CLI emits exact canonical success or sanitized typed failure", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  const tuple = stagedTuple(fixture);
+  const tuplePath = writeTuple(fixture, tuple);
+  const expected = {
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    artifactKind: "journey-release-candidate-binding",
+    orchestrator: "KUBERNETES",
+    tupleSha256: tuple.tupleSha256,
+    deploymentRevision: tuple.deploymentRevision,
+    environmentIdentity: tuple.environmentIdentity,
+    handoffSha256: fixture.handoff.handoffSha256,
+    serverRouteBundleDigest:
+      fixture.handoff.platformRelease.serverRouteBundleDigest,
+  };
+  const success = spawnSync(process.execPath, [
+    bindingScriptPath,
+    "--candidate",
+    candidateRoot,
+    "--orchestrator",
+    "KUBERNETES",
+    "--contract",
+    contractPath,
+    "--tuple",
+    tuplePath,
+  ], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(success.status, 0, success.stderr);
+  assert.equal(success.stdout, `${JSON.stringify(expected)}\n`);
+  assert.equal(success.stderr, "");
+
+  const suppliedSecret = "secret-value-that-must-not-appear";
+  const failure = spawnSync(process.execPath, [
+    bindingScriptPath,
+    "--contract",
+    contractPath,
+    "--tuple",
+    tuplePath,
+    "--candidate",
+    candidateRoot,
+    "--orchestrator",
+    suppliedSecret,
+  ], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(failure.status, 2);
+  assert.equal(failure.stdout, "");
+  assert.match(failure.stderr, /^CANDIDATE_BINDING_USAGE [^\n]+\n$/);
+  assert.equal(failure.stderr.includes(suppliedSecret), false);
+  assert.equal(failure.stderr.includes(repositoryRoot), false);
+});
+
+test("binding CLI executes through a symlinked entrypoint", async () => {
+  const fixture = makeFixture();
+  const candidateRoot = await acquireFixture(fixture);
+  const tuple = stagedTuple(fixture);
+  const tuplePath = writeTuple(fixture, tuple);
+  const linkedTools = join(fixture.root, "linked-tools");
+  mkdirSync(linkedTools);
+  const linkedScript = join(linkedTools, "bind-journey-release-candidate.mjs");
+  symlinkSync(bindingScriptPath, linkedScript);
+  symlinkSync(
+    join(repositoryRoot, "tools/platform/acquire-server-route-bundle.mjs"),
+    join(linkedTools, "acquire-server-route-bundle.mjs"),
+  );
+  const expected = {
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    artifactKind: "journey-release-candidate-binding",
+    orchestrator: "COMPOSE",
+    tupleSha256: tuple.tupleSha256,
+    deploymentRevision: tuple.deploymentRevision,
+    environmentIdentity: tuple.environmentIdentity,
+    handoffSha256: fixture.handoff.handoffSha256,
+    serverRouteBundleDigest:
+      fixture.handoff.platformRelease.serverRouteBundleDigest,
+  };
+
+  for (const nodeOptions of [[], ["--preserve-symlinks-main"]]) {
+    const result = spawnSync(process.execPath, [
+      ...nodeOptions,
+      linkedScript,
+      "--contract",
+      contractPath,
+      "--tuple",
+      tuplePath,
+      "--candidate",
+      candidateRoot,
+      "--orchestrator",
+      "COMPOSE",
+    ], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${JSON.stringify(expected)}\n`);
+    assert.equal(result.stderr, "");
+  }
+});
+
 test("Platform CI runs the exact acquisition test once in jobs.platform", () => {
   const workflow = readFileSync(workflowPath, "utf8");
   assert.equal(workflow.split(focusedCommand).length - 1, 1);
@@ -730,6 +1102,68 @@ function successfulTransport(objects, calls = []) {
   };
 }
 
+async function acquireFixture(fixture) {
+  await acquireServerRouteBundle({
+    contractPath,
+    handoffPath: fixture.handoffPath,
+    outputRoot: fixture.outputRoot,
+    fetchObject: successfulTransport(fixture.objects),
+  });
+  return join(fixture.outputRoot, fixture.handoff.handoffSha256);
+}
+
+function stagedTuple(fixture, overrides = {}) {
+  const identity = {
+    backendImageDigest: `sha256:${"a".repeat(64)}`,
+    backendConfigDigest: `sha256:${"b".repeat(64)}`,
+    journeyContractDigest: `sha256:${"c".repeat(64)}`,
+    serverRouteBundleDigest:
+      fixture.handoff.platformRelease.serverRouteBundleDigest,
+    deploymentRevision: "d".repeat(40),
+    environmentIdentity: "production",
+    ...overrides,
+  };
+  const identityBytes = `${[
+    identity.backendImageDigest,
+    identity.backendConfigDigest,
+    identity.journeyContractDigest,
+    identity.serverRouteBundleDigest,
+    identity.deploymentRevision,
+    identity.environmentIdentity,
+  ].join("\n")}\n`;
+  return {
+    schemaVersion: "JOURNEY_RELEASE_TUPLE_V1",
+    artifactKind: "journey-release-tuple",
+    ...identity,
+    tupleSha256: `sha256:${sha(identityBytes)}`,
+  };
+}
+
+function canonicalTuple(tuple) {
+  return `${JSON.stringify(tuple, null, 2)}\n`;
+}
+
+function writeTuple(fixture, tuple, bytes = canonicalTuple(tuple), name = "tuple.json") {
+  const path = join(fixture.root, name);
+  writeFileSync(path, bytes);
+  return path;
+}
+
+function fingerprintCandidate(candidateRoot) {
+  return {
+    root: readdirSync(candidateRoot).sort(),
+    objects: readdirSync(join(candidateRoot, "objects")).sort(),
+    payload: readdirSync(join(candidateRoot, "objects", "payload")).sort(),
+    handoff: readFileSync(join(candidateRoot, "handoff.json")).toString("base64"),
+    files: Object.fromEntries(
+      objectPaths.map((relativePath) => [
+        relativePath,
+        readFileSync(join(candidateRoot, "objects", relativePath)).toString("base64"),
+      ]),
+    ),
+  };
+}
+
 function response(statusCode, headers, body) {
   return { statusCode, headers, body };
 }
@@ -760,6 +1194,19 @@ function errorWithCode(code) {
     assert.equal(error.code, code);
     return true;
   };
+}
+
+function candidateBindingError(code) {
+  return (error) => {
+    assert.equal(error instanceof CandidateBindingError, true);
+    assert.equal(error.code, code);
+    return true;
+  };
+}
+
+function createFifo(path) {
+  const result = spawnSync("mkfifo", [path], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(result.status, 0, result.stderr);
 }
 
 function canonicalJson(value) {

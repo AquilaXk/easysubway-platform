@@ -13,7 +13,7 @@ import {
   rm,
 } from "node:fs/promises";
 import https from "node:https";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OBJECT_PATHS = Object.freeze([
@@ -229,6 +229,100 @@ export async function acquireServerRouteBundle({
   }
 }
 
+export async function inspectAcquiredServerRouteBundleCandidate({
+  contractPath,
+  candidateRoot,
+  beforeSecondPass,
+  onReadChunk,
+}) {
+  validateInspectionHooks({ beforeSecondPass, onReadChunk });
+  const contractBytes = await readRegularFile(
+    contractPath,
+    "OUTPUT_POLICY_VIOLATION",
+  );
+  const contract = parseJson(contractBytes, "OUTPUT_POLICY_VIOLATION");
+  validateContract(contract);
+
+  const candidate = await inspectCandidateDirectory(candidateRoot);
+  const firstTree = await inspectCandidateTree(candidate, "OUTPUT_POLICY_VIOLATION");
+  const handoffSnapshot = await readRegularFileSnapshot(
+    join(candidate.absoluteRoot, "handoff.json"),
+    "HANDOFF_SHAPE_INVALID",
+  );
+  const handoffBytes = handoffSnapshot.bytes;
+  const handoff = parseJson(handoffBytes, "HANDOFF_SHAPE_INVALID");
+  validateHandoff(handoff, handoffBytes, contract);
+  if (basename(candidate.absoluteRoot) !== handoff.handoffSha256) {
+    throw failure("HANDOFF_SHAPE_INVALID", 2);
+  }
+
+  await verifyObjectPass(
+    candidate.objectRoot,
+    handoff.publicationReceipt.objects,
+    1,
+    onReadChunk,
+    "OBJECT_IDENTITY_MISMATCH",
+  );
+  if (beforeSecondPass !== undefined) {
+    await beforeSecondPass({
+      candidateRoot: candidate.absoluteRoot,
+      entries: handoff.publicationReceipt.objects.map((entry) => ({ ...entry })),
+    });
+  }
+  const secondPassIdentities = await verifyObjectPass(
+    candidate.objectRoot,
+    handoff.publicationReceipt.objects,
+    2,
+    onReadChunk,
+    "OBJECT_READ_UNSTABLE",
+  );
+
+  const handoffSecondSnapshot = await readRegularFileSnapshot(
+    join(candidate.absoluteRoot, "handoff.json"),
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (
+    !handoffBytes.equals(handoffSecondSnapshot.bytes) ||
+    !sameFileIdentity(handoffSnapshot.identity, handoffSecondSnapshot.identity)
+  ) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+  const secondTree = await inspectCandidateTree(
+    candidate,
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (
+    firstTree.inventory !== secondTree.inventory ||
+    !sameDirectoryIdentity(firstTree.candidateIdentity, secondTree.candidateIdentity) ||
+    !sameDirectoryIdentity(firstTree.objectIdentity, secondTree.objectIdentity) ||
+    !sameDirectoryIdentity(firstTree.payloadIdentity, secondTree.payloadIdentity)
+  ) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+  await verifyFinalFileIdentities({
+    candidate,
+    handoffIdentity: handoffSecondSnapshot.identity,
+    objectIdentities: secondPassIdentities,
+  });
+  const finalTree = await inspectCandidateTree(
+    candidate,
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (
+    secondTree.inventory !== finalTree.inventory ||
+    !sameDirectoryIdentity(secondTree.candidateIdentity, finalTree.candidateIdentity) ||
+    !sameDirectoryIdentity(secondTree.objectIdentity, finalTree.objectIdentity) ||
+    !sameDirectoryIdentity(secondTree.payloadIdentity, finalTree.payloadIdentity)
+  ) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+
+  return {
+    handoffSha256: handoff.handoffSha256,
+    serverRouteBundleDigest: handoff.platformRelease.serverRouteBundleDigest,
+  };
+}
+
 async function acquireOneObject({
   fetchObject,
   url,
@@ -329,11 +423,35 @@ async function verifySecondRead(objectRoot, entries, onSecondReadChunk) {
       join(objectRoot, entry.path),
       "OBJECT_READ_UNSTABLE",
       (bytesRead) => onSecondReadChunk?.({ path: entry.path, bytesRead }),
+      entry.sizeBytes,
     );
     if (identity.size !== entry.sizeBytes || identity.sha256 !== entry.sha256) {
       throw failure("OBJECT_READ_UNSTABLE");
     }
   }
+}
+
+async function verifyObjectPass(
+  objectRoot,
+  entries,
+  pass,
+  onReadChunk,
+  code,
+) {
+  const identities = new Map();
+  for (const entry of entries) {
+    const identity = await hashRegularFile(
+      join(objectRoot, entry.path),
+      code,
+      (bytesRead) => onReadChunk?.({ pass, path: entry.path, bytesRead }),
+      entry.sizeBytes,
+    );
+    if (identity.size !== entry.sizeBytes || identity.sha256 !== entry.sha256) {
+      throw failure(code);
+    }
+    identities.set(entry.path, identity.fileIdentity);
+  }
+  return identities;
 }
 
 async function writeNewFile(path, bytes, openOutputFile) {
@@ -372,13 +490,25 @@ async function writeAll(handle, bytes) {
 }
 
 async function readRegularFile(path, code) {
+  return (await readRegularFileSnapshot(path, code)).bytes;
+}
+
+async function readRegularFileSnapshot(path, code) {
   if (typeof path !== "string" || path.length === 0) throw failure(code, 2);
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw failure(code, 2);
-    return await handle.readFile();
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const initialStat = await handle.stat({ bigint: true });
+    if (!initialStat.isFile()) throw failure(code, 2);
+    const bytes = await handle.readFile();
+    const finalStat = await handle.stat({ bigint: true });
+    const initialIdentity = fileIdentity(initialStat);
+    const finalIdentity = fileIdentity(finalStat);
+    if (!sameFileIdentity(initialIdentity, finalIdentity)) throw failure(code);
+    return { bytes, identity: finalIdentity };
   } catch (error) {
     if (error instanceof AcquisitionError) throw error;
     throw failure(code, 2);
@@ -387,12 +517,21 @@ async function readRegularFile(path, code) {
   }
 }
 
-async function hashRegularFile(path, code, onChunk) {
+async function hashRegularFile(path, code, onChunk, expectedSize) {
   let handle;
+  let initialIdentity;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = await handle.stat();
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = await handle.stat({ bigint: true });
     if (!stat.isFile()) throw failure(code, 2);
+    initialIdentity = fileIdentity(stat);
+    if (
+      expectedSize !== undefined &&
+      initialIdentity.size !== BigInt(expectedSize)
+    ) throw failure(code);
   } catch (error) {
     await handle?.close().catch(() => {});
     if (error instanceof AcquisitionError) throw error;
@@ -408,19 +547,25 @@ async function hashRegularFile(path, code, onChunk) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       size += bytesRead;
+      if (expectedSize !== undefined && size > expectedSize) {
+        throw failure(code);
+      }
       digest.update(buffer.subarray(0, bytesRead));
       onChunk?.(bytesRead);
     }
   } catch {
     readError = failure(code);
   }
+  let finalIdentity;
   try {
+    finalIdentity = fileIdentity(await handle.stat({ bigint: true }));
     await handle.close();
   } catch {
     readError ??= failure(code);
   }
   if (readError !== undefined) throw readError;
-  return { size, sha256: digest.digest("hex") };
+  if (!sameFileIdentity(initialIdentity, finalIdentity)) throw failure(code);
+  return { size, sha256: digest.digest("hex"), fileIdentity: finalIdentity };
 }
 
 function validateRuntimeHooks({ beforeSecondRead, openOutputFile, onSecondReadChunk }) {
@@ -429,6 +574,167 @@ function validateRuntimeHooks({ beforeSecondRead, openOutputFile, onSecondReadCh
     typeof openOutputFile !== "function" ||
     (onSecondReadChunk !== undefined && typeof onSecondReadChunk !== "function")
   ) throw failure("OUTPUT_POLICY_VIOLATION", 2);
+}
+
+function validateInspectionHooks({ beforeSecondPass, onReadChunk }) {
+  if (
+    (beforeSecondPass !== undefined && typeof beforeSecondPass !== "function") ||
+    (onReadChunk !== undefined && typeof onReadChunk !== "function")
+  ) throw failure("OUTPUT_POLICY_VIOLATION", 2);
+}
+
+async function inspectCandidateDirectory(candidateRoot) {
+  if (typeof candidateRoot !== "string" || candidateRoot.length === 0) {
+    throw failure("OUTPUT_POLICY_VIOLATION", 2);
+  }
+  const absoluteRoot = resolve(candidateRoot);
+  const physicalRoot = await realpath(absoluteRoot).catch(() => {
+    throw failure("OUTPUT_POLICY_VIOLATION", 2);
+  });
+  if (physicalRoot !== absoluteRoot) {
+    throw failure("OUTPUT_POLICY_VIOLATION", 2);
+  }
+  for (let current = absoluteRoot; ; current = dirname(current)) {
+    await readDirectoryIdentity(current, "OUTPUT_POLICY_VIOLATION");
+    if (dirname(current) === current) break;
+  }
+  return {
+    absoluteRoot,
+    objectRoot: join(absoluteRoot, "objects"),
+    payloadRoot: join(absoluteRoot, "objects", "payload"),
+  };
+}
+
+async function inspectCandidateTree(candidate, code) {
+  const candidateIdentity = await readDirectoryIdentity(
+    candidate.absoluteRoot,
+    code,
+  );
+  const objectIdentity = await readDirectoryIdentity(candidate.objectRoot, code);
+  const payloadIdentity = await readDirectoryIdentity(candidate.payloadRoot, code);
+  const candidateChildren = await readExactChildren(candidate.absoluteRoot, code);
+  const objectChildren = await readExactChildren(candidate.objectRoot, code);
+  const payloadChildren = await readExactChildren(candidate.payloadRoot, code);
+  if (
+    !sameArray(candidateChildren, ["handoff.json", "objects"]) ||
+    !sameArray(objectChildren, [
+      "compatibility.json",
+      "manifest.json",
+      "manifest.signing-input.json",
+      "payload",
+      "provenance.json",
+    ]) ||
+    !sameArray(payloadChildren, [
+      "accessibility.sqlite.zst",
+      "fare.sqlite.zst",
+      "timetable.sqlite.zst",
+      "topology.sqlite.zst",
+    ])
+  ) {
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+  for (const relativePath of ["handoff.json", ...OBJECT_PATHS.map((path) => join("objects", path))]) {
+    await requireRegularNonSymlink(join(candidate.absoluteRoot, relativePath), code);
+  }
+  return {
+    candidateIdentity,
+    objectIdentity,
+    payloadIdentity,
+    inventory: JSON.stringify({ candidateChildren, objectChildren, payloadChildren }),
+  };
+}
+
+async function readDirectoryIdentity(path, code) {
+  try {
+    const stat = await lstat(path, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw failure(code, 2);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+}
+
+async function readExactChildren(path, code) {
+  try {
+    return (await readdir(path)).sort(compareCodePoint);
+  } catch {
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+}
+
+async function requireRegularNonSymlink(path, code) {
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw failure(code, 2);
+  } catch (error) {
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+}
+
+async function verifyFinalFileIdentities({
+  candidate,
+  handoffIdentity,
+  objectIdentities,
+}) {
+  const reversedObjects = [...objectIdentities.entries()].toReversed();
+  for (const [relativePath, expectedIdentity] of reversedObjects) {
+    const currentIdentity = await readRegularFileIdentity(
+      join(candidate.objectRoot, relativePath),
+      "OBJECT_READ_UNSTABLE",
+    );
+    if (!sameFileIdentity(expectedIdentity, currentIdentity)) {
+      throw failure("OBJECT_READ_UNSTABLE");
+    }
+  }
+  const currentHandoffIdentity = await readRegularFileIdentity(
+    join(candidate.absoluteRoot, "handoff.json"),
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (!sameFileIdentity(handoffIdentity, currentHandoffIdentity)) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+}
+
+async function readRegularFileIdentity(path, code) {
+  let handle;
+  try {
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = await handle.stat({ bigint: true });
+    if (!stat.isFile()) throw failure(code);
+    return fileIdentity(stat);
+  } catch (error) {
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code);
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function fileIdentity(stat) {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+  };
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+}
+
+function sameDirectoryIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 async function validateEmptyOutputRoot(outputRoot) {
