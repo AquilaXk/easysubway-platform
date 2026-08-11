@@ -66,7 +66,7 @@ export async function bindJourneyReleaseCandidate({
     inspectCandidate,
   });
   const tupleBytes = await readRegularTuple(tuplePath, "CANDIDATE_TUPLE_INVALID");
-  const tuple = validateTuple(tupleBytes);
+  const tuple = validateJourneyReleaseTupleBytes(tupleBytes);
 
   let candidate;
   try {
@@ -155,7 +155,7 @@ async function readRegularTuple(path, code) {
   }
 }
 
-function validateTuple(bytes) {
+export function validateJourneyReleaseTupleBytes(bytes) {
   let tuple;
   try {
     tuple = JSON.parse(bytes.toString("utf8"));
