@@ -22,6 +22,7 @@ set -Eeuo pipefail
 # is mechanically enforced by tools/ci/check-migration-ddl-compat.mjs in both PR
 # CI and this deploy job's pre-checks (issue #2365), not by this script.
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
+PROC_FS_ROOT="/proc"
 DEPLOY_REPO_URL="${DEPLOY_REPO_URL:-https://github.com/AquilaXk/easysubway.git}"
 DEPLOY_COMPOSE_PROJECT="${DEPLOY_COMPOSE_PROJECT:?DEPLOY_COMPOSE_PROJECT is required}"
 DEPLOY_SHA="${DEPLOY_SHA:?DEPLOY_SHA is required}"
@@ -492,8 +493,11 @@ preflight_legacy_backend_absence() {
 			write_result "blocked" "legacy_backend_probe_failed"
 			exit 1
 		fi
-		if ! cat "/proc/${process_id}/cmdline" >"${cmdline_file}" || [[ ! -s "${cmdline_file}" ]]; then
+		if ! cat "${PROC_FS_ROOT}/${process_id}/cmdline" >"${cmdline_file}" || [[ ! -s "${cmdline_file}" ]]; then
 			rm -f -- "${cmdline_file}" >/dev/null 2>&1 || :
+			if [[ ! -e "${PROC_FS_ROOT}/${process_id}" ]]; then
+				continue
+			fi
 			write_result "blocked" "legacy_backend_probe_failed"
 			exit 1
 		fi
@@ -528,8 +532,11 @@ preflight_legacy_backend_absence() {
 		if [[ "${jar_argument}" == /* ]]; then
 			candidate_jar_path="${jar_argument}"
 		else
-			if ! process_cwd="$(readlink -f -- "/proc/${process_id}/cwd")" ||
+			if ! process_cwd="$(readlink -f -- "${PROC_FS_ROOT}/${process_id}/cwd")" ||
 				[[ -z "${process_cwd}" ]]; then
+				if [[ ! -e "${PROC_FS_ROOT}/${process_id}" ]]; then
+					continue
+				fi
 				write_result "blocked" "legacy_backend_probe_failed"
 				exit 1
 			fi

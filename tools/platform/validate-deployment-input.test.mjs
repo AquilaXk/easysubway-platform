@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -165,8 +165,14 @@ test("legacy backend presence fails closed before deployment mutation without re
   assert.doesNotMatch(deploy, /systemctl (?:enable|start) "(?:easysubway-backend\.service|\$\{unit\})"/);
 });
 
-test("legacy backend probe resolves each Java -jar argument before deciding legacy ownership", () => {
+test("legacy backend probe resolves each Java -jar argument before deciding legacy ownership", (t) => {
   const root = new URL("../..", import.meta.url);
+  const procFixture = mkdtempSync(join(tmpdir(), "platform-legacy-proc-"));
+  const existingProcRoot = join(procFixture, "existing");
+  const missingProcRoot = join(procFixture, "missing");
+  mkdirSync(join(existingProcRoot, "101"), { recursive: true });
+  mkdirSync(missingProcRoot);
+  t.after(() => rmSync(procFixture, { recursive: true, force: true }));
   const deploy = readFileSync(new URL("tools/deploy/deploy-backend.sh", root), "utf8");
   const match = deploy.match(/preflight_legacy_backend_absence\(\)\s*\{[\s\S]*?\n\}\s*\npreflight_legacy_backend_absence\b/);
   assert.notEqual(match, null);
@@ -174,6 +180,7 @@ test("legacy backend probe resolves each Java -jar argument before deciding lega
   const harness = `
 set -euo pipefail
 DEPLOY_ROOT=/opt/easysubway
+PROC_FS_ROOT="\${PROC_FS_ROOT:?PROC_FS_ROOT is required}"
 write_result() { printf '%s %s\\n' "$1" "$2"; }
 systemctl() {
   case "$1" in
@@ -197,9 +204,9 @@ pgrep() {
 }
 cat() {
   case "\${PGREP_MODE}" in
-    unreadable-proc) return 1 ;;
+    unreadable-proc|exited-proc) return 1 ;;
     options) printf 'java\\0-Xms512m\\0-jar\\0/opt/easysubway/easysubway-backend.jar\\0' ;;
-    relative) printf 'java\\0-jar\\0easysubway-backend.jar\\0' ;;
+    relative|unreadable-cwd|exited-cwd) printf 'java\\0-jar\\0easysubway-backend.jar\\0' ;;
     symlink) printf 'java\\0-jar\\0/srv/legacy/application.jar\\0' ;;
     other-jar) printf 'java\\0-jar\\0/srv/other/application.jar\\0' ;;
     no-jar) printf 'java\\0-Xms512m\\0-XX:+UseG1GC\\0' ;;
@@ -209,8 +216,8 @@ cat() {
 readlink() {
   local path="\${!#}"
   case "\${PGREP_MODE}:\${path}" in
-    unreadable-cwd:/proc/101/cwd) return 1 ;;
-    *:/proc/101/cwd) printf '%s\\n' /opt/easysubway ;;
+    unreadable-cwd:\${PROC_FS_ROOT}/101/cwd|exited-cwd:\${PROC_FS_ROOT}/101/cwd) return 1 ;;
+    *:\${PROC_FS_ROOT}/101/cwd) printf '%s\\n' /opt/easysubway ;;
     *:/opt/easysubway/easysubway-backend.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
     relative:/opt/easysubway/easysubway-backend.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
     symlink:/srv/legacy/application.jar) printf '%s\\n' /opt/easysubway/easysubway-backend.jar ;;
@@ -223,7 +230,12 @@ preflight_legacy_backend_absence
 `;
   const runProbe = (systemctlMode, pgrepMode) => spawnSync("bash", ["-c", harness], {
     encoding: "utf8",
-    env: { ...process.env, SYSTEMCTL_MODE: systemctlMode, PGREP_MODE: pgrepMode },
+    env: {
+      ...process.env,
+      SYSTEMCTL_MODE: systemctlMode,
+      PGREP_MODE: pgrepMode,
+      PROC_FS_ROOT: ["exited-proc", "exited-cwd"].includes(pgrepMode) ? missingProcRoot : existingProcRoot,
+    },
   });
 
   const absent = runProbe("absent", "absent");
@@ -252,6 +264,11 @@ preflight_legacy_backend_absence
     assert.match(detected.stdout, /^blocked legacy_backend_jar_detected\n$/, mode);
   }
   for (const mode of ["other-jar", "no-jar"]) {
+    const allowed = runProbe("absent", mode);
+    assert.equal(allowed.status, 0, mode);
+    assert.equal(allowed.stdout, "", mode);
+  }
+  for (const mode of ["exited-proc", "exited-cwd"]) {
     const allowed = runProbe("absent", mode);
     assert.equal(allowed.status, 0, mode);
     assert.equal(allowed.stdout, "", mode);
