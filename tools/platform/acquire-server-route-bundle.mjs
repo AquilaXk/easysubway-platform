@@ -13,7 +13,7 @@ import {
   rm,
 } from "node:fs/promises";
 import https from "node:https";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OBJECT_PATHS = Object.freeze([
@@ -229,6 +229,79 @@ export async function acquireServerRouteBundle({
   }
 }
 
+export async function inspectAcquiredServerRouteBundleCandidate({
+  contractPath,
+  candidateRoot,
+  beforeSecondPass,
+  onReadChunk,
+}) {
+  validateInspectionHooks({ beforeSecondPass, onReadChunk });
+  const contractBytes = await readRegularFile(
+    contractPath,
+    "OUTPUT_POLICY_VIOLATION",
+  );
+  const contract = parseJson(contractBytes, "OUTPUT_POLICY_VIOLATION");
+  validateContract(contract);
+
+  const candidate = await inspectCandidateDirectory(candidateRoot);
+  const firstTree = await inspectCandidateTree(candidate, "OUTPUT_POLICY_VIOLATION");
+  const handoffBytes = await readRegularFile(
+    join(candidate.absoluteRoot, "handoff.json"),
+    "HANDOFF_SHAPE_INVALID",
+  );
+  const handoff = parseJson(handoffBytes, "HANDOFF_SHAPE_INVALID");
+  validateHandoff(handoff, handoffBytes, contract);
+  if (basename(candidate.absoluteRoot) !== handoff.handoffSha256) {
+    throw failure("HANDOFF_SHAPE_INVALID", 2);
+  }
+
+  await verifyObjectPass(
+    candidate.objectRoot,
+    handoff.publicationReceipt.objects,
+    1,
+    onReadChunk,
+    "OBJECT_IDENTITY_MISMATCH",
+  );
+  if (beforeSecondPass !== undefined) {
+    await beforeSecondPass({
+      candidateRoot: candidate.absoluteRoot,
+      entries: handoff.publicationReceipt.objects.map((entry) => ({ ...entry })),
+    });
+  }
+  await verifyObjectPass(
+    candidate.objectRoot,
+    handoff.publicationReceipt.objects,
+    2,
+    onReadChunk,
+    "OBJECT_READ_UNSTABLE",
+  );
+
+  const handoffSecondRead = await readRegularFile(
+    join(candidate.absoluteRoot, "handoff.json"),
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (!handoffBytes.equals(handoffSecondRead)) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+  const secondTree = await inspectCandidateTree(
+    candidate,
+    "OBJECT_READ_UNSTABLE",
+  );
+  if (
+    firstTree.inventory !== secondTree.inventory ||
+    !sameDirectoryIdentity(firstTree.candidateIdentity, secondTree.candidateIdentity) ||
+    !sameDirectoryIdentity(firstTree.objectIdentity, secondTree.objectIdentity) ||
+    !sameDirectoryIdentity(firstTree.payloadIdentity, secondTree.payloadIdentity)
+  ) {
+    throw failure("OBJECT_READ_UNSTABLE");
+  }
+
+  return {
+    handoffSha256: handoff.handoffSha256,
+    serverRouteBundleDigest: handoff.platformRelease.serverRouteBundleDigest,
+  };
+}
+
 async function acquireOneObject({
   fetchObject,
   url,
@@ -336,6 +409,25 @@ async function verifySecondRead(objectRoot, entries, onSecondReadChunk) {
   }
 }
 
+async function verifyObjectPass(
+  objectRoot,
+  entries,
+  pass,
+  onReadChunk,
+  code,
+) {
+  for (const entry of entries) {
+    const identity = await hashRegularFile(
+      join(objectRoot, entry.path),
+      code,
+      (bytesRead) => onReadChunk?.({ pass, path: entry.path, bytesRead }),
+    );
+    if (identity.size !== entry.sizeBytes || identity.sha256 !== entry.sha256) {
+      throw failure(code);
+    }
+  }
+}
+
 async function writeNewFile(path, bytes, openOutputFile) {
   const handle = await openOutputFile(
     path,
@@ -375,7 +467,10 @@ async function readRegularFile(path, code) {
   if (typeof path !== "string" || path.length === 0) throw failure(code, 2);
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     const stat = await handle.stat();
     if (!stat.isFile()) throw failure(code, 2);
     return await handle.readFile();
@@ -390,7 +485,10 @@ async function readRegularFile(path, code) {
 async function hashRegularFile(path, code, onChunk) {
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     const stat = await handle.stat();
     if (!stat.isFile()) throw failure(code, 2);
   } catch (error) {
@@ -429,6 +527,107 @@ function validateRuntimeHooks({ beforeSecondRead, openOutputFile, onSecondReadCh
     typeof openOutputFile !== "function" ||
     (onSecondReadChunk !== undefined && typeof onSecondReadChunk !== "function")
   ) throw failure("OUTPUT_POLICY_VIOLATION", 2);
+}
+
+function validateInspectionHooks({ beforeSecondPass, onReadChunk }) {
+  if (
+    (beforeSecondPass !== undefined && typeof beforeSecondPass !== "function") ||
+    (onReadChunk !== undefined && typeof onReadChunk !== "function")
+  ) throw failure("OUTPUT_POLICY_VIOLATION", 2);
+}
+
+async function inspectCandidateDirectory(candidateRoot) {
+  if (typeof candidateRoot !== "string" || candidateRoot.length === 0) {
+    throw failure("OUTPUT_POLICY_VIOLATION", 2);
+  }
+  const absoluteRoot = resolve(candidateRoot);
+  const physicalRoot = await realpath(absoluteRoot).catch(() => {
+    throw failure("OUTPUT_POLICY_VIOLATION", 2);
+  });
+  if (physicalRoot !== absoluteRoot) {
+    throw failure("OUTPUT_POLICY_VIOLATION", 2);
+  }
+  for (let current = absoluteRoot; ; current = dirname(current)) {
+    await readDirectoryIdentity(current, "OUTPUT_POLICY_VIOLATION");
+    if (dirname(current) === current) break;
+  }
+  return {
+    absoluteRoot,
+    objectRoot: join(absoluteRoot, "objects"),
+    payloadRoot: join(absoluteRoot, "objects", "payload"),
+  };
+}
+
+async function inspectCandidateTree(candidate, code) {
+  const candidateIdentity = await readDirectoryIdentity(
+    candidate.absoluteRoot,
+    code,
+  );
+  const objectIdentity = await readDirectoryIdentity(candidate.objectRoot, code);
+  const payloadIdentity = await readDirectoryIdentity(candidate.payloadRoot, code);
+  const candidateChildren = await readExactChildren(candidate.absoluteRoot, code);
+  const objectChildren = await readExactChildren(candidate.objectRoot, code);
+  const payloadChildren = await readExactChildren(candidate.payloadRoot, code);
+  if (
+    !sameArray(candidateChildren, ["handoff.json", "objects"]) ||
+    !sameArray(objectChildren, [
+      "compatibility.json",
+      "manifest.json",
+      "manifest.signing-input.json",
+      "payload",
+      "provenance.json",
+    ]) ||
+    !sameArray(payloadChildren, [
+      "accessibility.sqlite.zst",
+      "fare.sqlite.zst",
+      "timetable.sqlite.zst",
+      "topology.sqlite.zst",
+    ])
+  ) {
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+  for (const relativePath of ["handoff.json", ...OBJECT_PATHS.map((path) => join("objects", path))]) {
+    await requireRegularNonSymlink(join(candidate.absoluteRoot, relativePath), code);
+  }
+  return {
+    candidateIdentity,
+    objectIdentity,
+    payloadIdentity,
+    inventory: JSON.stringify({ candidateChildren, objectChildren, payloadChildren }),
+  };
+}
+
+async function readDirectoryIdentity(path, code) {
+  try {
+    const stat = await lstat(path, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw failure(code, 2);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+}
+
+async function readExactChildren(path, code) {
+  try {
+    return (await readdir(path)).sort(compareCodePoint);
+  } catch {
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+}
+
+async function requireRegularNonSymlink(path, code) {
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw failure(code, 2);
+  } catch (error) {
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code, code === "OUTPUT_POLICY_VIOLATION" ? 2 : 1);
+  }
+}
+
+function sameDirectoryIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 async function validateEmptyOutputRoot(outputRoot) {
