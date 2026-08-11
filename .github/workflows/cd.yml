@@ -14,6 +14,8 @@ permissions:
 jobs:
   preflight:
     name: Digest-only deployment preflight
+    if: github.ref == 'refs/heads/main'
+    environment: production-deploy
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
