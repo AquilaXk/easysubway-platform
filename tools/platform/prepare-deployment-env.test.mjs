@@ -53,6 +53,47 @@ test("two distinct canonical report secrets are preserved without the legacy ali
   }
 });
 
+test("break-glass credentials and reason are excluded from backend deployment env", () => {
+  const breakGlassValues = {
+    EASYSUBWAY_ADMIN_BREAK_GLASS_USERNAME: "synthetic-break-glass-username",
+    EASYSUBWAY_ADMIN_BREAK_GLASS_PASSWORD: "synthetic-break-glass-password",
+    EASYSUBWAY_ADMIN_BREAK_GLASS_REASON: "synthetic-break-glass-reason",
+  };
+  const bootstrapKey = "EASYSUBWAY_ADMIN_PLATFORM_FLAGS_BREAK_GLASS_BOOTSTRAP";
+  const bootstrapValue = "synthetic-break-glass-bootstrap";
+  const cases = [
+    { EASYSUBWAY_ADMIN_BREAK_GLASS_USERNAME: breakGlassValues.EASYSUBWAY_ADMIN_BREAK_GLASS_USERNAME },
+    { EASYSUBWAY_ADMIN_BREAK_GLASS_PASSWORD: breakGlassValues.EASYSUBWAY_ADMIN_BREAK_GLASS_PASSWORD },
+    { EASYSUBWAY_ADMIN_BREAK_GLASS_REASON: breakGlassValues.EASYSUBWAY_ADMIN_BREAK_GLASS_REASON },
+    breakGlassValues,
+  ];
+
+  for (const breakGlassCase of cases) {
+    const fixture = makeFixture({ [bootstrapKey]: bootstrapValue, ...breakGlassCase });
+    try {
+      const result = run(fixture);
+      assert.equal(result.status, 0, result.stderr);
+
+      const backendEnv = readFileSync(join(fixture.outputDirectory, "backend.env"), "utf8");
+      for (const [key, value] of Object.entries(breakGlassCase)) {
+        assert.doesNotMatch(backendEnv, new RegExp(`^${key}=`, "m"));
+        assert.equal(backendEnv.includes(value), false);
+      }
+      assert.match(backendEnv, /^EASYSUBWAY_ADMIN_USERNAME=admin$/m);
+      assert.match(backendEnv, /^EASYSUBWAY_ADMIN_PASSWORD=synthetic-admin-password$/m);
+      assert.match(backendEnv, new RegExp(`^${bootstrapKey}=${bootstrapValue}$`, "m"));
+    } finally {
+      fixture.cleanup();
+    }
+  }
+
+  const allowlist = readFileSync(backendAllowlist, "utf8").split("\n").filter(Boolean);
+  for (const key of Object.keys(breakGlassValues)) {
+    assert.equal(allowlist.includes(key), false);
+  }
+  assert.equal(allowlist.includes(bootstrapKey), true);
+});
+
 test("missing weak legacy or equal report secrets fail before output publication", () => {
   const cases = [
     [{ [receiptKey]: undefined }, receiptKey],
