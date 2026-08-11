@@ -53,6 +53,34 @@ test("two distinct canonical report secrets are preserved without the legacy ali
   }
 });
 
+test("break-glass credentials and reason are excluded from backend deployment env", () => {
+  const breakGlassValues = {
+    EASYSUBWAY_ADMIN_BREAK_GLASS_USERNAME: "synthetic-break-glass-username",
+    EASYSUBWAY_ADMIN_BREAK_GLASS_PASSWORD: "synthetic-break-glass-password",
+    EASYSUBWAY_ADMIN_BREAK_GLASS_REASON: "synthetic-break-glass-reason",
+  };
+  const fixture = makeFixture(breakGlassValues);
+  try {
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+
+    const backendEnv = readFileSync(join(fixture.outputDirectory, "backend.env"), "utf8");
+    for (const [key, value] of Object.entries(breakGlassValues)) {
+      assert.doesNotMatch(backendEnv, new RegExp(`^${key}=`, "m"));
+      assert.equal(backendEnv.includes(value), false);
+    }
+    assert.match(backendEnv, /^EASYSUBWAY_ADMIN_USERNAME=admin$/m);
+    assert.match(backendEnv, /^EASYSUBWAY_ADMIN_PASSWORD=synthetic-admin-password$/m);
+
+    const allowlist = readFileSync(backendAllowlist, "utf8").split("\n").filter(Boolean);
+    for (const key of Object.keys(breakGlassValues)) {
+      assert.equal(allowlist.includes(key), false);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("missing weak legacy or equal report secrets fail before output publication", () => {
   const cases = [
     [{ [receiptKey]: undefined }, receiptKey],
