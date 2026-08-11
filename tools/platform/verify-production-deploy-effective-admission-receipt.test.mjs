@@ -87,6 +87,8 @@ test("rejects malformed provider data and context mismatches without leaking pro
 test("never-settling requests and response JSON abort with a typed sanitized failure", async () => {
   await assert.rejects(verifyEffectiveAdmissionReceipt(context, () => new Promise(() => {}), 1), { code: "E_PD_EAR_TIMEOUT" });
   await assert.rejects(verifyEffectiveAdmissionReceipt(context, stubFetch({ jsonNeverSettles: true }), 1), { code: "E_PD_EAR_TIMEOUT" });
+  await assert.rejects(verifyEffectiveAdmissionReceipt(context, (_, options) => abortOnSignal(options.signal), 1), { code: "E_PD_EAR_TIMEOUT" });
+  await assert.rejects(verifyEffectiveAdmissionReceipt(context, (_, options) => Promise.resolve({ ok: true, status: 200, json: () => abortOnSignal(options.signal) }), 1), { code: "E_PD_EAR_TIMEOUT" });
 });
 
 test("CLI failures are typed, silent on stdout, and redact supplied secrets", () => {
@@ -153,4 +155,8 @@ function stubFetch(overrides = {}, requests = []) {
     },
   };
   };
+}
+
+function abortOnSignal(signal) {
+  return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true }));
 }

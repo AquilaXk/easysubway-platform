@@ -72,11 +72,13 @@ function parseArguments(arguments_) {
 async function getJson(request, url, timeoutMs) {
   const controller = new AbortController();
   let timeout;
+  let timedOut = false;
   let response;
   let stage = "request";
   try {
     const requestTimeout = new Promise((_, reject) => {
       timeout = setTimeout(() => {
+        timedOut = true;
         controller.abort();
         reject(new ReceiptError("E_PD_EAR_TIMEOUT"));
       }, timeoutMs);
@@ -86,6 +88,7 @@ async function getJson(request, url, timeoutMs) {
     stage = "json";
     return await Promise.race([response.json(), requestTimeout]);
   } catch (error) {
+    if (timedOut) fail("E_PD_EAR_TIMEOUT");
     if (error instanceof ReceiptError) throw error;
     fail(stage === "json" ? "E_PD_EAR_JSON" : "E_PD_EAR_HTTP");
   } finally {
