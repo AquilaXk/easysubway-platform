@@ -82,7 +82,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const SHA256_REFERENCE = /^sha256:[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const KST_INSTANT =
-  /^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}\+09:00$/;
+  /^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}\+09:00$/;
 const PUBLIC_BASE_URL =
   /^https:\/\/objectstorage\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.oraclecloud\.com\/n\/[A-Za-z0-9_~-](?:[A-Za-z0-9._~-]*[A-Za-z0-9_~-])?\/b\/[A-Za-z0-9_~-](?:[A-Za-z0-9._~-]*[A-Za-z0-9_~-])?\/o$/;
 const OBJECT_PREFIX = /^server-route-bundles\/v1\/[a-f0-9]{64}\/$/;
@@ -217,13 +217,28 @@ export async function acquireServerRouteBundle({
 }
 
 async function acquireOneObject({ fetchObject, url, entry, target }) {
-  let response;
+  const response = await requestCurrentObject(fetchObject, url, entry);
+  validateObjectResponse(response, entry);
+  const { size, sha256: actualSha256 } = await streamObjectToFile(
+    response.body,
+    target,
+    entry.sizeBytes,
+  );
+  if (size === 0 || size !== entry.sizeBytes || actualSha256 !== entry.sha256) {
+    throw failure("OBJECT_IDENTITY_MISMATCH");
+  }
+}
+
+async function requestCurrentObject(fetchObject, url, entry) {
   try {
-    response = await fetchObject(url, entry);
+    return await fetchObject(url, entry);
   } catch {
     throw failure("CURRENT_OBJECT_UNAVAILABLE");
   }
-  if (!response || response.statusCode !== 200) {
+}
+
+function validateObjectResponse(response, entry) {
+  if (response?.statusCode !== 200) {
     destroyBody(response?.body);
     throw failure("CURRENT_OBJECT_UNAVAILABLE");
   }
@@ -237,12 +252,14 @@ async function acquireOneObject({ fetchObject, url, entry, target }) {
   }
   if (headers["content-length"] !== undefined) {
     const length = headers["content-length"];
-    if (!/^(?:0|[1-9][0-9]*)$/.test(length) || Number(length) !== entry.sizeBytes) {
+    if (!/^(?:0|[1-9]\d*)$/.test(length) || Number(length) !== entry.sizeBytes) {
       destroyBody(response.body);
       throw failure("CURRENT_OBJECT_UNAVAILABLE");
     }
   }
+}
 
+async function streamObjectToFile(body, target, expectedSize) {
   const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
     .catch(() => {
       throw failure("OUTPUT_POLICY_VIOLATION");
@@ -250,10 +267,10 @@ async function acquireOneObject({ fetchObject, url, entry, target }) {
   let size = 0;
   const digest = createHash("sha256");
   try {
-    for await (const rawChunk of bodyChunks(response.body)) {
+    for await (const rawChunk of bodyChunks(body)) {
       const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
       size += chunk.length;
-      if (size > entry.sizeBytes) throw failure("OBJECT_IDENTITY_MISMATCH");
+      if (size > expectedSize) throw failure("OBJECT_IDENTITY_MISMATCH");
       digest.update(chunk);
       await writeAll(handle, chunk);
     }
@@ -263,9 +280,7 @@ async function acquireOneObject({ fetchObject, url, entry, target }) {
   } finally {
     await handle.close().catch(() => {});
   }
-  if (size === 0 || size !== entry.sizeBytes || digest.digest("hex") !== entry.sha256) {
-    throw failure("OBJECT_IDENTITY_MISMATCH");
-  }
+  return { size, sha256: digest.digest("hex") };
 }
 
 async function verifySecondRead(objectRoot, entries) {
@@ -340,7 +355,7 @@ async function validateEmptyOutputRoot(outputRoot) {
     ancestors.push(current);
     if (dirname(current) === current) break;
   }
-  for (const current of ancestors.reverse()) {
+  for (const current of ancestors.toReversed()) {
     let stat;
     try {
       stat = await lstat(current);
@@ -521,9 +536,7 @@ function validateHandoff(handoff, rawBytes, contract) {
         sha256: entry.sha256,
       };
     })
-    .sort((left, right) =>
-      left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
-    );
+    .sort((left, right) => compareCodePoint(left.path, right.path));
   const componentInventorySha256 = sha256(
     Buffer.from(canonicalJson(payloadInventory)),
   );
@@ -702,10 +715,39 @@ function parseJsonWithoutDuplicateKeys(text) {
     if (text[index] === "{") return parseObject();
     if (text[index] === "[") return parseArray();
     if (text[index] === '"') return parseString();
-    const match = text.slice(index).match(/^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/);
-    if (!match) throw new SyntaxError("invalid JSON");
-    index += match[0].length;
-    return JSON.parse(match[0]);
+    for (const literal of ["true", "false", "null"]) {
+      if (text.startsWith(literal, index)) {
+        index += literal.length;
+        return JSON.parse(literal);
+      }
+    }
+    return parseNumber();
+  };
+  const parseNumber = () => {
+    const start = index;
+    if (text[index] === "-") index += 1;
+    if (text[index] === "0") {
+      index += 1;
+    } else {
+      requireDigit(/[1-9]/);
+      while (/\d/.test(text[index])) index += 1;
+    }
+    if (text[index] === ".") {
+      index += 1;
+      requireDigit(/\d/);
+      while (/\d/.test(text[index])) index += 1;
+    }
+    if (text[index] === "e" || text[index] === "E") {
+      index += 1;
+      if (text[index] === "+" || text[index] === "-") index += 1;
+      requireDigit(/\d/);
+      while (/\d/.test(text[index])) index += 1;
+    }
+    return JSON.parse(text.slice(start, index));
+  };
+  const requireDigit = (pattern) => {
+    if (!pattern.test(text[index])) throw new SyntaxError("invalid JSON number");
+    index += 1;
   };
   const parseString = () => {
     const start = index;
@@ -719,7 +761,7 @@ function parseJsonWithoutDuplicateKeys(text) {
         index += 1;
         return JSON.parse(text.slice(start, index));
       }
-      if (text.charCodeAt(index) < 0x20) throw new SyntaxError("invalid JSON string");
+      if (text.codePointAt(index) < 0x20) throw new SyntaxError("invalid JSON string");
       index += 1;
     }
     throw new SyntaxError("unterminated JSON string");
@@ -783,17 +825,17 @@ function canonicalJson(value) {
   if (typeof value === "string") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   return `{${Object.keys(value)
-    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+    .sort(compareCodePoint)
     .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
     .join(",")}}`;
 }
 
 function normalizeHeaders(headers = {}) {
   return Object.fromEntries(
-    Object.entries(headers).map(([key, value]) => [
-      key.toLowerCase(),
-      Array.isArray(value) ? value.join(",") : String(value),
-    ]),
+    Object.entries(headers).map(([key, value]) => {
+      const normalizedValue = Array.isArray(value) ? value.join(",") : String(value);
+      return [key.toLowerCase(), normalizedValue];
+    }),
   );
 }
 
@@ -825,7 +867,9 @@ function fetchHttpsObject(url) {
 
 function isExactObject(value, expectedKeys) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  return sameArray(Object.keys(value).sort(), [...expectedKeys].sort());
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === expectedKeys.length &&
+    expectedKeys.every((key) => Object.hasOwn(value, key));
 }
 
 function sameArray(left, right) {
@@ -841,6 +885,12 @@ function isRawString(value) {
 
 function isSafeInteger(value) {
   return Number.isSafeInteger(value) && value >= 1;
+}
+
+function compareCodePoint(left, right) {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function isKstInstant(value) {
