@@ -194,7 +194,22 @@
         ["NOT_READY", "DRAINING"],
         ["DRAINING", "DRAINED"]
       ],
-      "drainFailureTarget": "FAILED_POSTCOMMIT"
+      "drainFailureTarget": "FAILED_POSTCOMMIT",
+      "failedPostCommitRecovery": {
+        "operationKind": "RECOVERY_DEPLOYMENT",
+        "requiresOperatorApprovalReceipt": true,
+        "requiredStartingState": "FAILED_POSTCOMMIT",
+        "requiredPointerIdentity": "EXACT_CURRENT_POINTER_TUPLE_AND_GENERATION",
+        "successTransitions": [
+          ["FAILED_POSTCOMMIT", "NOT_READY"],
+          ["NOT_READY", "DRAINING"],
+          ["DRAINING", "DRAINED"]
+        ],
+        "journeyTrafficDuringCleanup": 0,
+        "automaticStartCount": 0,
+        "implicitPreviousSelectionCount": 0,
+        "cleanupReceiptRequired": true
+      }
     }
   },
   "recoveryDeployment": {

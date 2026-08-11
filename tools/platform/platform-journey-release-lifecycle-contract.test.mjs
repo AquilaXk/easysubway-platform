@@ -85,6 +85,7 @@ test("closed schema accepts only the exact lifecycle contract", () => {
     (value) => { value.activation.genericRollingMixedExposureCount = 1; },
     (value) => { value.activation.priorActivePool.identity = "NEW_ACTIVE_POOL"; },
     (value) => { value.activation.modes.FIRST_ACTIVATION.drainRequired = true; },
+    (value) => { value.activation.priorActivePool.failedPostCommitRecovery.automaticStartCount = 1; },
     (value) => { value.recoveryDeployment.implicitPreviousSelectionCount = 1; },
     (value) => { value.recoveryDeployment.approvalReceipt = "OPTIONAL"; },
     (value) => { value.failure.preCommitVisibleStateMutation.active = 1; },
@@ -227,6 +228,21 @@ test("candidate state machine and active commit keep mixed traffic at zero", () 
         ["DRAINING", "DRAINED"],
       ],
       drainFailureTarget: "FAILED_POSTCOMMIT",
+      failedPostCommitRecovery: {
+        operationKind: "RECOVERY_DEPLOYMENT",
+        requiresOperatorApprovalReceipt: true,
+        requiredStartingState: "FAILED_POSTCOMMIT",
+        requiredPointerIdentity: "EXACT_CURRENT_POINTER_TUPLE_AND_GENERATION",
+        successTransitions: [
+          ["FAILED_POSTCOMMIT", "NOT_READY"],
+          ["NOT_READY", "DRAINING"],
+          ["DRAINING", "DRAINED"],
+        ],
+        journeyTrafficDuringCleanup: 0,
+        automaticStartCount: 0,
+        implicitPreviousSelectionCount: 0,
+        cleanupReceiptRequired: true,
+      },
     },
   });
 });
