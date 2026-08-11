@@ -44,6 +44,7 @@ jobs:
           node --test tools/platform/no-mutable-contract-source.test.mjs
           node --test tools/platform/prepare-deployment-env.test.mjs
           node --test tools/platform/validate-deployment-input.test.mjs
+          node --test tools/platform/verify-production-deploy-effective-admission-receipt.test.mjs
           node --test tools/platform/validate-terraform-root-inventory.test.mjs
           node --test tools/platform/terraform-static-analysis.test.mjs
           node tools/platform/terraform-static-analysis.mjs validate-policy

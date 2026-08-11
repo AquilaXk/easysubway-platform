@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Production deploy effective admission receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "artifactKind", "repository", "environment", "ref", "workflowSha", "runUrl", "observedAt", "approval", "branchPolicy"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1" },
+    "artifactKind": { "type": "string", "const": "production-deploy-effective-admission-receipt-v1" },
+    "repository": { "type": "string", "const": "AquilaXk/easysubway-platform" },
+    "environment": { "type": "string", "const": "production-deploy" },
+    "ref": { "type": "string", "const": "refs/heads/main" },
+    "workflowSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "runUrl": { "type": "string", "pattern": "^https://github\\.com/AquilaXk/easysubway-platform/actions/runs/[1-9][0-9]*$" },
+    "observedAt": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$" },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canAdminsBypass", "preventSelfReview", "requiredReviewers"],
+      "properties": {
+        "canAdminsBypass": { "type": "boolean", "const": false },
+        "preventSelfReview": { "type": "boolean", "const": false },
+        "requiredReviewers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "login"],
+            "properties": { "type": { "type": "string", "const": "User" }, "login": { "type": "string", "const": "AquilaXk" } }
+          }
+        }
+      }
+    },
+    "branchPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protectedBranches", "customBranchPolicies", "allowedRefs"],
+      "properties": {
+        "protectedBranches": { "type": "boolean", "const": false },
+        "customBranchPolicies": { "type": "boolean", "const": true },
+        "allowedRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "name"],
+            "properties": { "type": { "type": "string", "const": "branch" }, "name": { "type": "string", "const": "main" } }
+          }
+        }
+      }
+    }
+  }
+}
