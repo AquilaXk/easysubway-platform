@@ -11,6 +11,37 @@ const gitSha = "a".repeat(40);
 const digest = `sha256:${"b".repeat(64)}`;
 const runtimeInventory = new URL("../../contracts/release/platform-deployment-runtime-input-inventory.json", import.meta.url);
 
+test("CD preflight is main-only and bound to the protected production environment", () => {
+  const root = new URL("../..", import.meta.url);
+  const workflow = readFileSync(new URL(".github/workflows/cd.yml", root), "utf8");
+  const workflowDispatch = workflow.match(/^  workflow_dispatch:\n(?<body>(?: {4}.*\n)+)/m);
+  const preflight = workflow.match(/^  preflight:\n(?<body>(?:(?: {4,}[^\n]*)?\n)*)(?=^  \S|(?![\s\S]))/m);
+  const topLevelPermissions = workflow.match(/^permissions:\n(?<body>(?: {2}[^\n]*\n)*)/m);
+
+  assert.notEqual(workflowDispatch, null, "CD must retain manual dispatch");
+  assert.equal(workflowDispatch.groups.body, [
+    "    inputs:\n",
+    "      backend_image:\n",
+    "        description: \"ghcr.io/aquilaxk/easysubway-backend@sha256:<digest>\"\n",
+    "        required: true\n",
+    "        type: string\n",
+  ].join(""), "manual dispatch must expose only the required immutable backend image input");
+  assert.notEqual(topLevelPermissions, null, "CD must declare top-level permissions");
+  assert.equal(topLevelPermissions.groups.body, "  contents: read\n", "top-level permissions must be exactly read-only contents access");
+  assert.doesNotMatch(workflow, /^ {2,}permissions\s*:/m, "jobs and nested mappings must not introduce permissions");
+  assert.notEqual(preflight, null, "CD must retain its preflight job");
+  assert.match(preflight.groups.body, /^    if: github\.ref == 'refs\/heads\/main'$/m);
+  assert.deepEqual([...preflight.groups.body.matchAll(/^    environment: (.+)$/gm)].map((match) => match[1]), ["production-deploy"]);
+  assert.equal((workflow.match(/inputs\.backend_image/g) ?? []).length, 1, "preflight may use only the declared backend image input");
+  assert.deepEqual([...preflight.groups.body.matchAll(/^          EASYSUBWAY_BACKEND_IMAGE: \$\{\{ inputs\.backend_image \}\}$/gm)].map((match) => match[0]), ["          EASYSUBWAY_BACKEND_IMAGE: ${{ inputs.backend_image }}"]);
+  assert.match(preflight.groups.body, /^          EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET: preflight-only$/m, "preflight retains its non-GitHub placeholder credential");
+  assert.doesNotMatch(workflow, /\bsecrets\s*(?:\.\s*[A-Za-z_][A-Za-z0-9_]*|\[\s*[^\]\n]+\s*\])/i);
+  assert.doesNotMatch(workflow, /^\s*secrets\s*:/mi);
+  assert.doesNotMatch(workflow, /\bgithub\s*(?:\.\s*token|\[\s*["']token["']\s*\])/i);
+  assert.doesNotMatch(workflow, /^\s*token\s*:/mi);
+  assert.doesNotMatch(workflow, /^\s*[A-Za-z_][A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*\s*:/mi);
+});
+
 test("deployment runtime input inventory is closed and source-literal backed", () => {
   const bytes = readFileSync(runtimeInventory, "utf8");
   assert.equal(bytes.includes("\r"), false);
