@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Server route bundle object acquisition contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "issueRef",
+    "producer",
+    "consumedJsonPointers",
+    "acquisition",
+    "candidateOutput",
+    "retention",
+    "failure"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "artifactKind": { "type": "string", "const": "server-route-bundle-object-acquisition-contract-v1" },
+    "issueRef": { "type": "string", "const": "AquilaXk/easysubway-platform#60" },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "gitSha", "schemas"],
+      "properties": {
+        "repository": { "type": "string", "const": "AquilaXk/easysubway-data" },
+        "gitSha": { "type": "string", "const": "2b1390c1c764fde10b9da8ca8015a9252e5342fb" },
+        "schemas": {
+          "type": "array",
+          "const": [
+            {
+              "role": "consumer-handoff",
+              "path": "contracts/datapack/server-route-bundle-consumer-handoff.schema.json",
+              "gitBlob": "b88c86f353310cd119ebb3fb0d76a4cc27251cb7",
+              "rawSha256": "9a6e691a8e029c21075a93f7da2b409ae5a0cde2d7bb8e02ff9c393157657d36"
+            },
+            {
+              "role": "publication-receipt",
+              "path": "contracts/datapack/server-route-bundle-publication-receipt.schema.json",
+              "gitBlob": "98395dc2928dc818b8b409b65c1ed1e19af9b9da",
+              "rawSha256": "79c2396c383461dc45b6503ccd3b85bdbf3fc64183e31042f09c92c84db44d3e"
+            },
+            {
+              "role": "component-manifest",
+              "path": "contracts/datapack/artifact-component-manifest.schema.json",
+              "gitBlob": "7ff2141895446876aeeaccd85d3bd7b2634f9c42",
+              "rawSha256": "64995e377b45aa86ff7dbd9635dd8248315bc74134040da6ff42ae82ed05c20b"
+            }
+          ]
+        }
+      }
+    },
+    "consumedJsonPointers": {
+      "type": "array",
+      "const": [
+        "/publicationReceipt/repository/gitSha",
+        "/publicationReceipt/candidate",
+        "/publicationReceipt/locator",
+        "/publicationReceipt/objects",
+        "/release",
+        "/platformRelease/serverRouteBundleDigest",
+        "/handoffSha256"
+      ]
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventoryPointer", "objectCount", "objectIdentityFields", "transport", "rejectConditions"],
+      "properties": {
+        "inventoryPointer": { "type": "string", "const": "/publicationReceipt/objects" },
+        "objectCount": { "type": "integer", "const": 8 },
+        "objectIdentityFields": { "type": "array", "const": ["objectKey", "sizeBytes", "sha256"] },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scheme", "redirectsAllowed", "locatorPointer", "objectPrefixPolicy"],
+          "properties": {
+            "scheme": { "type": "string", "const": "HTTPS" },
+            "redirectsAllowed": { "type": "boolean", "const": false },
+            "locatorPointer": { "type": "string", "const": "/publicationReceipt/locator" },
+            "objectPrefixPolicy": { "type": "string", "const": "EXACT_RECEIPT_PREFIX_AND_KEY" }
+          }
+        },
+        "rejectConditions": {
+          "type": "array",
+          "const": [
+            "MISSING_OR_UNKNOWN_FIELD",
+            "DUPLICATE_OR_REORDERED_OBJECT",
+            "OBJECT_KEY_OR_PREFIX_MISMATCH",
+            "EMPTY_PARTIAL_OR_OVERSIZED_OBJECT",
+            "SIZE_OR_SHA256_MISMATCH",
+            "TRANSPORT_INTERRUPTED",
+            "CHANGED_SECOND_READ",
+            "PATH_TRAVERSAL",
+            "SYMLINK_OUTPUT"
+          ]
+        }
+      }
+    },
+    "candidateOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownership", "overwriteAllowed", "visibility", "partialOutputOnFailure"],
+      "properties": {
+        "ownership": { "type": "string", "const": "TASK_OWNED" },
+        "overwriteAllowed": { "type": "boolean", "const": false },
+        "visibility": { "type": "string", "const": "AFTER_ALL_OBJECTS_AND_HANDOFF_IDENTITIES_VALIDATE" },
+        "partialOutputOnFailure": { "type": "integer", "const": 0 }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protectedTargets", "currentObjectUnavailableAction", "forbiddenAlternateSources", "alternateSelectionCount"],
+      "properties": {
+        "protectedTargets": { "type": "array", "const": ["ACTIVE", "EXPLICIT_VALIDATED_ROLLBACK"] },
+        "currentObjectUnavailableAction": { "type": "string", "const": "TYPED_NONZERO_FAILURE" },
+        "forbiddenAlternateSources": { "type": "array", "const": ["OLDER_OBJECT", "LOCAL_CACHE", "HUB_SOURCE", "PREVIOUS_ARTIFACT"] },
+        "alternateSelectionCount": { "type": "integer", "const": 0 }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "codes", "stateMutationOnFailure", "alternateInvocationCount"],
+      "properties": {
+        "result": { "type": "string", "const": "TYPED_NONZERO" },
+        "codes": {
+          "type": "array",
+          "const": [
+            "HANDOFF_SHAPE_INVALID",
+            "PRODUCER_IDENTITY_MISMATCH",
+            "INVENTORY_INVALID",
+            "LOCATOR_POLICY_VIOLATION",
+            "OBJECT_IDENTITY_MISMATCH",
+            "OBJECT_READ_UNSTABLE",
+            "OUTPUT_POLICY_VIOLATION",
+            "RETENTION_TARGET_PROTECTED",
+            "CURRENT_OBJECT_UNAVAILABLE"
+          ]
+        },
+        "stateMutationOnFailure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate", "active", "traffic"],
+          "properties": {
+            "candidate": { "type": "integer", "const": 0 },
+            "active": { "type": "integer", "const": 0 },
+            "traffic": { "type": "integer", "const": 0 }
+          }
+        },
+        "alternateInvocationCount": { "type": "integer", "const": 0 }
+      }
+    }
+  }
+}
