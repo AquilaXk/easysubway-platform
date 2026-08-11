@@ -1,0 +1,37 @@
+name: Production Deploy Effective Admission Receipt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  receipt:
+    if: github.ref == 'refs/heads/main'
+    environment: production-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Verify effective admission and write receipt
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          receipt_path="${RUNNER_TEMP}/production-deploy-effective-admission-receipt.json"
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs --repository "${{ github.repository }}" --ref "${{ github.ref }}" --workflow-sha "${{ github.sha }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "${receipt_path}"
+          receipt_sha256="$(sha256sum "${receipt_path}" | cut -d ' ' -f 1)"
+          cat "${receipt_path}" >> "${GITHUB_STEP_SUMMARY}"
+          printf 'sha256: %s\n' "${receipt_sha256}" >> "${GITHUB_STEP_SUMMARY}"
