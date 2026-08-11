@@ -86,6 +86,8 @@ const KST_INSTANT =
 const PUBLIC_BASE_URL =
   /^https:\/\/objectstorage\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.oraclecloud\.com\/n\/[A-Za-z0-9_~-](?:[A-Za-z0-9._~-]*[A-Za-z0-9_~-])?\/b\/[A-Za-z0-9_~-](?:[A-Za-z0-9._~-]*[A-Za-z0-9_~-])?\/o$/;
 const OBJECT_PREFIX = /^server-route-bundles\/v1\/[a-f0-9]{64}\/$/;
+const SIGNATURE_VALUE = /^[A-Za-z0-9_-]+$/;
+const SECOND_READ_CHUNK_BYTES = 64 * 1024;
 const ERROR_MESSAGES = Object.freeze({
   HANDOFF_SHAPE_INVALID: "handoff validation failed",
   PRODUCER_IDENTITY_MISMATCH: "producer identity validation failed",
@@ -125,8 +127,8 @@ export function formatAcquisitionSuccess(result) {
   if (
     result === null ||
     typeof result !== "object" ||
-    !SHA256.test(result.handoffSha256) ||
-    !SHA256_REFERENCE.test(result.serverRouteBundleDigest)
+    !isSha256(result.handoffSha256) ||
+    !isSha256Reference(result.serverRouteBundleDigest)
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
   return `ACQUIRED ${result.handoffSha256} ${result.serverRouteBundleDigest}\n`;
 }
@@ -137,6 +139,8 @@ export async function acquireServerRouteBundle({
   outputRoot,
   fetchObject = fetchHttpsObject,
   beforeSecondRead,
+  openOutputFile = open,
+  onSecondReadChunk,
 }) {
   let stageRoot;
   try {
@@ -151,6 +155,7 @@ export async function acquireServerRouteBundle({
     const contract = parseJson(contractBytes, "OUTPUT_POLICY_VIOLATION");
     const handoff = parseJson(handoffBytes, "HANDOFF_SHAPE_INVALID");
 
+    validateRuntimeHooks({ beforeSecondRead, openOutputFile, onSecondReadChunk });
     validateContract(contract);
     validateHandoff(handoff, handoffBytes, contract);
     const safeOutputRoot = await validateEmptyOutputRoot(outputRoot);
@@ -174,7 +179,7 @@ export async function acquireServerRouteBundle({
       await mkdir(dirname(target), { recursive: true, mode: 0o700 }).catch(() => {
         throw failure("OUTPUT_POLICY_VIOLATION");
       });
-      await acquireOneObject({ fetchObject, url, entry, target });
+      await acquireOneObject({ fetchObject, url, entry, target, openOutputFile });
     }
 
     if (beforeSecondRead !== undefined) {
@@ -187,7 +192,11 @@ export async function acquireServerRouteBundle({
       });
     }
 
-    await verifySecondRead(objectRoot, handoff.publicationReceipt.objects);
+    await verifySecondRead(
+      objectRoot,
+      handoff.publicationReceipt.objects,
+      onSecondReadChunk,
+    );
     const handoffSecondRead = await readRegularFile(
       handoffPath,
       "OBJECT_READ_UNSTABLE",
@@ -196,7 +205,11 @@ export async function acquireServerRouteBundle({
       throw failure("OBJECT_READ_UNSTABLE");
     }
 
-    await writeNewFile(join(stageRoot, "handoff.json"), handoffBytes);
+    await writeNewFile(
+      join(stageRoot, "handoff.json"),
+      handoffBytes,
+      openOutputFile,
+    );
     const candidateRoot = join(safeOutputRoot, handoff.handoffSha256);
     await rename(stageRoot, candidateRoot).catch(() => {
       throw failure("OUTPUT_POLICY_VIOLATION");
@@ -216,13 +229,20 @@ export async function acquireServerRouteBundle({
   }
 }
 
-async function acquireOneObject({ fetchObject, url, entry, target }) {
+async function acquireOneObject({
+  fetchObject,
+  url,
+  entry,
+  target,
+  openOutputFile,
+}) {
   const response = await requestCurrentObject(fetchObject, url, entry);
   validateObjectResponse(response, entry);
   const { size, sha256: actualSha256 } = await streamObjectToFile(
     response.body,
     target,
     entry.sizeBytes,
+    openOutputFile,
   );
   if (size === 0 || size !== entry.sizeBytes || actualSha256 !== entry.sha256) {
     throw failure("OBJECT_IDENTITY_MISMATCH");
@@ -259,55 +279,83 @@ function validateObjectResponse(response, entry) {
   }
 }
 
-async function streamObjectToFile(body, target, expectedSize) {
-  const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
-    .catch(() => {
-      throw failure("OUTPUT_POLICY_VIOLATION");
-    });
+async function streamObjectToFile(body, target, expectedSize, openOutputFile) {
+  let handle;
+  try {
+    handle = await openOutputFile(
+      target,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600,
+    );
+  } catch {
+    destroyBody(body);
+    throw failure("OUTPUT_POLICY_VIOLATION");
+  }
   let size = 0;
   const digest = createHash("sha256");
+  let streamError;
   try {
     for await (const rawChunk of bodyChunks(body)) {
       const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
       size += chunk.length;
       if (size > expectedSize) throw failure("OBJECT_IDENTITY_MISMATCH");
       digest.update(chunk);
-      await writeAll(handle, chunk);
+      try {
+        await writeAll(handle, chunk);
+      } catch {
+        throw failure("OUTPUT_POLICY_VIOLATION");
+      }
     }
   } catch (error) {
-    if (error instanceof AcquisitionError) throw error;
-    throw failure("CURRENT_OBJECT_UNAVAILABLE");
-  } finally {
-    await handle.close().catch(() => {});
+    streamError = error instanceof AcquisitionError
+      ? error
+      : failure("CURRENT_OBJECT_UNAVAILABLE");
+  }
+  try {
+    await handle.close();
+  } catch {
+    streamError ??= failure("OUTPUT_POLICY_VIOLATION");
+  }
+  if (streamError !== undefined) {
+    destroyBody(body);
+    throw streamError;
   }
   return { size, sha256: digest.digest("hex") };
 }
 
-async function verifySecondRead(objectRoot, entries) {
+async function verifySecondRead(objectRoot, entries, onSecondReadChunk) {
   for (const entry of entries) {
-    const bytes = await readRegularFile(
+    const identity = await hashRegularFile(
       join(objectRoot, entry.path),
       "OBJECT_READ_UNSTABLE",
+      (bytesRead) => onSecondReadChunk?.({ path: entry.path, bytesRead }),
     );
-    if (bytes.length !== entry.sizeBytes || sha256(bytes) !== entry.sha256) {
+    if (identity.size !== entry.sizeBytes || identity.sha256 !== entry.sha256) {
       throw failure("OBJECT_READ_UNSTABLE");
     }
   }
 }
 
-async function writeNewFile(path, bytes) {
-  const handle = await open(
+async function writeNewFile(path, bytes, openOutputFile) {
+  const handle = await openOutputFile(
     path,
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
     0o600,
   ).catch(() => {
     throw failure("OUTPUT_POLICY_VIOLATION");
   });
+  let writeError;
   try {
     await handle.writeFile(bytes);
-  } finally {
-    await handle.close().catch(() => {});
+  } catch {
+    writeError = failure("OUTPUT_POLICY_VIOLATION");
   }
+  try {
+    await handle.close();
+  } catch {
+    writeError ??= failure("OUTPUT_POLICY_VIOLATION");
+  }
+  if (writeError !== undefined) throw writeError;
 }
 
 async function writeAll(handle, bytes) {
@@ -337,6 +385,50 @@ async function readRegularFile(path, code) {
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+async function hashRegularFile(path, code, onChunk) {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw failure(code, 2);
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error instanceof AcquisitionError) throw error;
+    throw failure(code, 2);
+  }
+
+  const digest = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(SECOND_READ_CHUNK_BYTES);
+  let size = 0;
+  let readError;
+  try {
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      digest.update(buffer.subarray(0, bytesRead));
+      onChunk?.(bytesRead);
+    }
+  } catch {
+    readError = failure(code);
+  }
+  try {
+    await handle.close();
+  } catch {
+    readError ??= failure(code);
+  }
+  if (readError !== undefined) throw readError;
+  return { size, sha256: digest.digest("hex") };
+}
+
+function validateRuntimeHooks({ beforeSecondRead, openOutputFile, onSecondReadChunk }) {
+  if (
+    (beforeSecondRead !== undefined && typeof beforeSecondRead !== "function") ||
+    typeof openOutputFile !== "function" ||
+    (onSecondReadChunk !== undefined && typeof onSecondReadChunk !== "function")
+  ) throw failure("OUTPUT_POLICY_VIOLATION", 2);
 }
 
 async function validateEmptyOutputRoot(outputRoot) {
@@ -483,8 +575,8 @@ function validateHandoff(handoff, rawBytes, contract) {
   if (
     handoff.schemaVersion !== 1 ||
     handoff.artifactKind !== "server-route-bundle-consumer-handoff" ||
-    !SHA256.test(handoff.sourceSnapshotSetHash) ||
-    !SHA256.test(handoff.handoffSha256) ||
+    !isSha256(handoff.sourceSnapshotSetHash) ||
+    !isSha256(handoff.handoffSha256) ||
     canonicalJson(handoff) !== rawBytes.toString("utf8")
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 
@@ -500,7 +592,7 @@ function validateHandoff(handoff, rawBytes, contract) {
   validateAdmission(handoff.backendAdmission);
   if (
     !isExactObject(handoff.platformRelease, ["serverRouteBundleDigest"]) ||
-    !SHA256_REFERENCE.test(handoff.platformRelease.serverRouteBundleDigest)
+    !isSha256Reference(handoff.platformRelease.serverRouteBundleDigest)
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 
   const receipt = handoff.publicationReceipt;
@@ -595,7 +687,7 @@ function validateManifest(value) {
     !isSafeInteger(value.releaseSequence) ||
     !["stationSetSha256", "payloadSha256", "topologySha256", "timetableSha256",
       "accessibilitySha256", "fareSha256", "provenanceSha256",
-      "compatibilitySha256"].every((key) => SHA256.test(value[key])) ||
+      "compatibilitySha256"].every((key) => isSha256(value[key])) ||
     value.serviceTimezone !== "Asia/Seoul" ||
     !isKstInstant(value.activeFrom) ||
     !isKstInstant(value.freshUntil) ||
@@ -605,7 +697,7 @@ function validateManifest(value) {
     !isRawString(value.keyId) ||
     !isExactObject(value.signature, ["algorithm", "value"]) ||
     value.signature.algorithm !== "rsa-sha256-server-route-bundle-v1" ||
-    !/^[A-Za-z0-9_-]+$/.test(value.signature.value)
+    !matchesString(value.signature.value, SIGNATURE_VALUE)
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 }
 
@@ -619,13 +711,13 @@ function validateReceipt(value) {
     value.artifactKind !== "server-route-bundle-publication-receipt" ||
     !isExactObject(value.repository, ["name", "gitSha"]) ||
     value.repository.name !== "AquilaXk/easysubway-data" ||
-    !GIT_SHA.test(value.repository.gitSha) ||
-    !SHA256.test(value.receiptSha256) ||
+    !matchesString(value.repository.gitSha, GIT_SHA) ||
+    !isSha256(value.receiptSha256) ||
     !isExactObject(value.locator, ["publicBaseUrl", "objectPrefix"])
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
   if (
-    !PUBLIC_BASE_URL.test(value.locator.publicBaseUrl) ||
-    !OBJECT_PREFIX.test(value.locator.objectPrefix)
+    !matchesString(value.locator.publicBaseUrl, PUBLIC_BASE_URL) ||
+    !matchesString(value.locator.objectPrefix, OBJECT_PREFIX)
   ) throw failure("LOCATOR_POLICY_VIOLATION", 2);
   validateCandidate(value.candidate);
 }
@@ -644,9 +736,9 @@ function validateCandidate(value) {
     ]) ||
     !isRawString(value.bundleId) ||
     !isSafeInteger(value.releaseSequence) ||
-    !shaKeys.every((key) => SHA256.test(value[key])) ||
+    !shaKeys.every((key) => isSha256(value[key])) ||
     !isExactObject(value.componentDigests, digestKeys) ||
-    !digestKeys.every((key) => SHA256.test(value.componentDigests[key])) ||
+    !digestKeys.every((key) => isSha256(value.componentDigests[key])) ||
     !isKstInstant(value.activeFrom) ||
     !isKstInstant(value.freshUntil) ||
     !isRawString(value.keyId)
@@ -661,7 +753,7 @@ function validateRelease(value) {
   if (
     !isExactObject(value, ["result", ...shaKeys]) ||
     value.result !== "GO" ||
-    !shaKeys.every((key) => SHA256.test(value[key]))
+    !shaKeys.every((key) => isSha256(value[key]))
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 }
 
@@ -671,10 +763,10 @@ function validateAdmission(value) {
       "manifestSha256", "finalEvidenceReference", "promotionEvidenceReference",
       "immutablePublicationReceiptIdentity",
     ]) ||
-    !SHA256.test(value.manifestSha256) ||
+    !isSha256(value.manifestSha256) ||
     !["finalEvidenceReference", "promotionEvidenceReference",
       "immutablePublicationReceiptIdentity"].every((key) =>
-      SHA256_REFERENCE.test(value[key]))
+      isSha256Reference(value[key]))
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 }
 
@@ -690,7 +782,7 @@ function validateInventory(receipt) {
       entry.path !== expectedPath ||
       entry.objectKey !== `${receipt.locator.objectPrefix}${expectedPath}` ||
       !isSafeInteger(entry.sizeBytes) ||
-      !SHA256.test(entry.sha256)
+      !isSha256(entry.sha256)
     ) throw failure("INVENTORY_INVALID", 2);
   }
 }
@@ -846,7 +938,13 @@ function bodyChunks(body) {
 }
 
 function destroyBody(body) {
-  if (body && typeof body.destroy === "function") body.destroy();
+  if (body && typeof body.destroy === "function") {
+    try {
+      body.destroy();
+    } catch {
+      // The typed acquisition error remains authoritative.
+    }
+  }
 }
 
 function fetchHttpsObject(url) {
@@ -885,6 +983,18 @@ function isRawString(value) {
 
 function isSafeInteger(value) {
   return Number.isSafeInteger(value) && value >= 1;
+}
+
+function matchesString(value, pattern) {
+  return typeof value === "string" && pattern.test(value);
+}
+
+function isSha256(value) {
+  return matchesString(value, SHA256);
+}
+
+function isSha256Reference(value) {
+  return matchesString(value, SHA256_REFERENCE);
 }
 
 function compareCodePoint(left, right) {

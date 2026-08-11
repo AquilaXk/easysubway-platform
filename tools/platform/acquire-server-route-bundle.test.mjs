@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { open as openFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import test, { afterEach } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -120,6 +121,19 @@ test("rejects handoff and producer identity drift before every network boundary"
       },
     },
     {
+      code: "HANDOFF_SHAPE_INVALID",
+      mutate: (value) => {
+        value.release.finalSha256 = [value.release.finalSha256];
+      },
+    },
+    {
+      code: "HANDOFF_SHAPE_INVALID",
+      mutate: (value) => {
+        value.manifest.signature.value = 123;
+      },
+      rebind: "manifest",
+    },
+    {
       code: "OBJECT_IDENTITY_MISMATCH",
       mutate: (value) => {
         value.publicationReceipt.objects[2].sha256 = "f".repeat(64);
@@ -137,7 +151,11 @@ test("rejects handoff and producer identity drift before every network boundary"
   for (const item of cases) {
     const fixture = makeFixture();
     item.mutate(fixture.handoff);
-    if (item.rebind !== false) rebindHandoff(fixture.handoff);
+    if (item.rebind === "manifest") {
+      rebindManifestHandoff(fixture.handoff);
+    } else if (item.rebind !== false) {
+      rebindHandoff(fixture.handoff);
+    }
     writeFileSync(fixture.handoffPath, canonicalJson(fixture.handoff));
     let calls = 0;
 
@@ -338,6 +356,105 @@ test("rejects a changed local second read and removes only its hidden stage", as
   assert.deepEqual(readdirSync(fixture.outputRoot), []);
 });
 
+test("streams second-read verification in bounded chunks", async () => {
+  const fixture = makeFixture({ largePayloadSize: 192 * 1024 });
+  const reads = [];
+
+  await acquireServerRouteBundle({
+    contractPath,
+    handoffPath: fixture.handoffPath,
+    outputRoot: fixture.outputRoot,
+    fetchObject: successfulTransport(fixture.objects),
+    onSecondReadChunk: (event) => reads.push(event),
+  });
+
+  const topologyReads = reads.filter(
+    (event) => event.path === "payload/topology.sqlite.zst",
+  );
+  assert.equal(topologyReads.length > 1, true);
+  assert.equal(
+    topologyReads.every((event) => event.bytesRead > 0 && event.bytesRead <= 64 * 1024),
+    true,
+  );
+  assert.equal(
+    topologyReads.reduce((sum, event) => sum + event.bytesRead, 0),
+    192 * 1024,
+  );
+});
+
+test("classifies local write failures as output errors", async () => {
+  const fixture = makeFixture();
+
+  await assert.rejects(
+    acquireServerRouteBundle({
+      contractPath,
+      handoffPath: fixture.handoffPath,
+      outputRoot: fixture.outputRoot,
+      fetchObject: successfulTransport(fixture.objects),
+      openOutputFile: async (...args) => {
+        const handle = await openFile(...args);
+        return {
+          write: async () => {
+            throw new Error("simulated local write failure");
+          },
+          close: () => handle.close(),
+        };
+      },
+    }),
+    errorWithCode("OUTPUT_POLICY_VIOLATION"),
+  );
+  assert.deepEqual(readdirSync(fixture.outputRoot), []);
+});
+
+test("classifies candidate handoff write failures as output errors", async () => {
+  const fixture = makeFixture();
+  let handoffWriteAttempts = 0;
+
+  await assert.rejects(
+    acquireServerRouteBundle({
+      contractPath,
+      handoffPath: fixture.handoffPath,
+      outputRoot: fixture.outputRoot,
+      fetchObject: successfulTransport(fixture.objects),
+      openOutputFile: async (...args) => {
+        const handle = await openFile(...args);
+        if (!args[0].endsWith("/handoff.json")) return handle;
+        return {
+          writeFile: async () => {
+            handoffWriteAttempts += 1;
+            throw new Error("simulated handoff write failure");
+          },
+          close: () => handle.close(),
+        };
+      },
+    }),
+    errorWithCode("OUTPUT_POLICY_VIOLATION"),
+  );
+  assert.equal(handoffWriteAttempts, 1);
+  assert.deepEqual(readdirSync(fixture.outputRoot), []);
+});
+
+test("destroys the response body when target creation fails", async () => {
+  const fixture = makeFixture();
+  const first = fixture.handoff.publicationReceipt.objects[0];
+  const tracked = trackedBody(fixture.objects.get(first.path));
+
+  await assert.rejects(
+    acquireServerRouteBundle({
+      contractPath,
+      handoffPath: fixture.handoffPath,
+      outputRoot: fixture.outputRoot,
+      fetchObject: async () => response(200, {}, tracked.body),
+      openOutputFile: async () => {
+        throw new Error("simulated target open failure");
+      },
+    }),
+    errorWithCode("OUTPUT_POLICY_VIOLATION"),
+  );
+  assert.equal(tracked.destroyCalls(), 1);
+  assert.deepEqual(readdirSync(fixture.outputRoot), []);
+});
+
 test("rejects nonempty, symlink, and existing candidate outputs before network", async () => {
   const fixture = makeFixture();
   const older = join(fixture.outputRoot, "older-local-cache");
@@ -438,7 +555,7 @@ test("Platform CI runs the exact acquisition test once in jobs.platform", () => 
   assert.match(platformJob.groups.block, new RegExp(`^          ${focusedCommand}$`, "m"));
 });
 
-function makeFixture() {
+function makeFixture({ largePayloadSize = 0 } = {}) {
   const root = makeTemporaryRoot();
   const outputRoot = join(root, "output");
   mkdirSync(outputRoot);
@@ -449,7 +566,12 @@ function makeFixture() {
     ["payload/accessibility.sqlite.zst", Buffer.from("accessibility")],
     ["payload/fare.sqlite.zst", Buffer.from("fare")],
     ["payload/timetable.sqlite.zst", Buffer.from("timetable")],
-    ["payload/topology.sqlite.zst", Buffer.from("topology")],
+    [
+      "payload/topology.sqlite.zst",
+      largePayloadSize > 0
+        ? Buffer.alloc(largePayloadSize, 0x74)
+        : Buffer.from("topology"),
+    ],
     ["provenance.json", Buffer.from(canonicalJson({ sourceSnapshotSetHash }))],
   ]);
   const componentDigests = {
@@ -586,6 +708,20 @@ function rebindHandoff(handoff) {
   handoff.handoffSha256 = sha(Buffer.from(canonicalJson(payload)));
 }
 
+function rebindManifestHandoff(handoff) {
+  const manifestBytes = Buffer.from(canonicalJson(handoff.manifest));
+  const manifestSha256 = sha(manifestBytes);
+  const manifestEntry = handoff.publicationReceipt.objects.find(
+    (entry) => entry.path === "manifest.json",
+  );
+  manifestEntry.sizeBytes = manifestBytes.length;
+  manifestEntry.sha256 = manifestSha256;
+  handoff.publicationReceipt.candidate.signedManifestRawSha256 = manifestSha256;
+  handoff.backendAdmission.manifestSha256 = manifestSha256;
+  handoff.platformRelease.serverRouteBundleDigest = `sha256:${manifestSha256}`;
+  rebindHandoff(handoff);
+}
+
 function successfulTransport(objects, calls = []) {
   return async (url, entry) => {
     calls.push(url);
@@ -601,6 +737,21 @@ function response(statusCode, headers, body) {
 async function* interruptedBody() {
   yield Buffer.from("partial");
   throw new Error("transport interrupted with sensitive details");
+}
+
+function trackedBody(bytes) {
+  let calls = 0;
+  return {
+    body: {
+      destroy: () => {
+        calls += 1;
+      },
+      async *[Symbol.asyncIterator]() {
+        yield bytes;
+      },
+    },
+    destroyCalls: () => calls,
+  };
 }
 
 function errorWithCode(code) {
