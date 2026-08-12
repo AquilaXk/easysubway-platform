@@ -130,6 +130,15 @@ test("runtime, canary and secret validation fail before network", async () => {
         })),
       },
     }, "CANDIDATE_OBSERVATION_RUNTIME"],
+    ["external HTTPS host", {
+      runtime: {
+        ...fixture.runtime,
+        instances: fixture.runtime.instances.map((instance, index) => ({
+          ...instance,
+          baseUrl: index === 0 ? "https://readiness.example.test" : instance.baseUrl,
+        })),
+      },
+    }, "CANDIDATE_OBSERVATION_RUNTIME"],
     ["nonzero fallback", {
       canary: { ...fixture.canary, legacyGraphSuccessCount: 1 },
     }, "CANDIDATE_OBSERVATION_CANARY"],

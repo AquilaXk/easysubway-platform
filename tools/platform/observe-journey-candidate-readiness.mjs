@@ -15,6 +15,7 @@ const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 5000;
 const CANDIDATE_PATH = "/internal/v1/journey/readiness/candidate";
+const LOOPBACK_HOSTS = Object.freeze(["127.0.0.1", "localhost", "[::1]"]);
 const SHA256 = /^[a-f0-9]{64}$/;
 const SHA256_REFERENCE = /^sha256:[a-f0-9]{64}$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9._:-]{1,255}$/;
@@ -268,9 +269,8 @@ function validBaseUrl(value) {
     const url = new URL(value);
     if (url.username || url.password || url.search || url.hash) return false;
     if (url.pathname !== "" && url.pathname !== "/") return false;
-    if (url.protocol === "https:") return true;
-    return url.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    return ["http:", "https:"].includes(url.protocol) &&
+      LOOPBACK_HOSTS.includes(url.hostname);
   } catch {
     return false;
   }
