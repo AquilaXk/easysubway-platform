@@ -33,11 +33,15 @@ const ERROR_MESSAGES = Object.freeze({
   DESCRIPTOR_TUPLE_INVALID: "staged release tuple validation failed",
   DESCRIPTOR_TUPLE_IDENTITY_MISMATCH: "descriptor and release tuple identities differ",
   DESCRIPTOR_INPUT_UNSTABLE: "descriptor binding input changed during verification",
+  DESCRIPTOR_BINDING_INTERNAL: "descriptor binding failed unexpectedly",
 });
 
 export class DescriptorBindingError extends Error {
-  constructor(code, exitCode = 1) {
-    super(ERROR_MESSAGES[code] ?? "publication descriptor binding failed");
+  constructor(code, exitCode = 1, cause) {
+    super(
+      ERROR_MESSAGES[code] ?? "publication descriptor binding failed",
+      cause === undefined ? undefined : { cause },
+    );
     this.name = "DescriptorBindingError";
     this.code = code;
     this.exitCode = exitCode;
@@ -123,18 +127,22 @@ async function readRegularInput(path, code) {
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   ).catch(() => {
-    throw bindingFailure(code, code === "DESCRIPTOR_INPUT_UNSTABLE" ? 1 : 2);
+    throw bindingFailure(code, inputFailureExitCode(code));
   });
   try {
     const stat = await handle.stat();
-    if (!stat.isFile()) throw bindingFailure(code, 2);
+    if (!stat.isFile()) throw bindingFailure(code, inputFailureExitCode(code));
     return await handle.readFile();
   } catch (error) {
     if (error instanceof DescriptorBindingError) throw error;
-    throw bindingFailure(code, code === "DESCRIPTOR_INPUT_UNSTABLE" ? 1 : 2);
+    throw bindingFailure(code, inputFailureExitCode(code));
   } finally {
     await handle.close().catch(() => {});
   }
+}
+
+function inputFailureExitCode(code) {
+  return code === "DESCRIPTOR_INPUT_UNSTABLE" ? 1 : 2;
 }
 
 function parseCliArguments(args) {
@@ -167,8 +175,14 @@ function sameArray(left, right) {
     left.every((value, index) => value === right[index]);
 }
 
-function bindingFailure(code, exitCode = 1) {
-  return new DescriptorBindingError(code, exitCode);
+function bindingFailure(code, exitCode = 1, cause) {
+  return new DescriptorBindingError(code, exitCode, cause);
+}
+
+export function normalizeDescriptorBindingCliFailure(error) {
+  return error instanceof DescriptorBindingError
+    ? error
+    : bindingFailure("DESCRIPTOR_BINDING_INTERNAL", 1, error);
 }
 
 async function main() {
@@ -179,9 +193,7 @@ async function main() {
 
 if (samePhysicalFile(fileURLToPath(import.meta.url), process.argv[1])) {
   main().catch((error) => {
-    const failure = error instanceof DescriptorBindingError
-      ? error
-      : bindingFailure("DESCRIPTOR_INPUT_UNSTABLE");
+    const failure = normalizeDescriptorBindingCliFailure(error);
     process.stderr.write(`${failure.code} ${failure.message}\n`);
     process.exitCode = failure.exitCode;
   });

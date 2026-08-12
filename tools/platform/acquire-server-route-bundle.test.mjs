@@ -35,6 +35,7 @@ import {
   DescriptorBindingError,
   bindServerRouteBundlePublicationDescriptor,
   formatDescriptorBindingSuccess,
+  normalizeDescriptorBindingCliFailure,
 } from "./bind-server-route-bundle-publication-descriptor.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -167,6 +168,14 @@ test("rejects handoff and producer identity drift before every network boundary"
           `sha256:${"f".repeat(64)}`;
       },
     },
+    {
+      code: "HANDOFF_SHAPE_INVALID",
+      exitCode: 2,
+      mutate: (value) => {
+        value.backendAdmission = {};
+        value.publicationReceipt.repository.gitSha = "f".repeat(40);
+      },
+    },
   ];
 
   for (const item of cases) {
@@ -190,7 +199,7 @@ test("rejects handoff and producer identity drift before every network boundary"
           throw new Error("network must not run");
         },
       }),
-      errorWithCode(item.code),
+      errorWithCode(item.code, item.exitCode),
       item.code,
     );
     assert.equal(calls, 0, item.code);
@@ -990,7 +999,7 @@ test("descriptor v2 rejects consumer authority and identity drift without fallba
     writeFileSync(fixture.descriptorPath, canonicalJson(fixture.descriptor));
     assert.throws(
       () => inspectServerRouteBundlePublicationDescriptor(readFileSync(fixture.descriptorPath)),
-      descriptorBindingError(code),
+      descriptorBindingError(code, AcquisitionError),
     );
   }
 
@@ -999,7 +1008,7 @@ test("descriptor v2 rejects consumer authority and identity drift without fallba
     () => inspectServerRouteBundlePublicationDescriptor(
       Buffer.from(`${canonicalJson(noncanonical.descriptor)}\n`),
     ),
-    descriptorBindingError("DESCRIPTOR_SHAPE_INVALID"),
+    descriptorBindingError("DESCRIPTOR_SHAPE_INVALID", AcquisitionError),
   );
 
   const mismatch = makeDescriptorFixture();
@@ -1013,6 +1022,23 @@ test("descriptor v2 rejects consumer authority and identity drift without fallba
     }),
     descriptorBindingError("DESCRIPTOR_TUPLE_IDENTITY_MISMATCH"),
   );
+
+  const invalidBinding = makeDescriptorFixture();
+  invalidBinding.descriptor.platformRelease = {
+    serverRouteBundleDigest: `sha256:${"a".repeat(64)}`,
+  };
+  rebindDescriptor(invalidBinding.descriptor);
+  writeFileSync(
+    invalidBinding.descriptorPath,
+    canonicalJson(invalidBinding.descriptor),
+  );
+  await assert.rejects(
+    bindServerRouteBundlePublicationDescriptor({
+      descriptorPath: invalidBinding.descriptorPath,
+      tuplePath: writeTuple(invalidBinding, stagedTuple(invalidBinding)),
+    }),
+    descriptorBindingError("DESCRIPTOR_SHAPE_INVALID"),
+  );
 });
 
 test("descriptor binding rejects changed inputs and CLI emits only canonical or sanitized output", async () => {
@@ -1024,8 +1050,29 @@ test("descriptor binding rejects changed inputs and CLI emits only canonical or 
       tuplePath: writeTuple(unstable, tuple),
       beforeSecondRead: () => writeFileSync(unstable.descriptorPath, "{}"),
     }),
-    descriptorBindingError("DESCRIPTOR_INPUT_UNSTABLE"),
+    descriptorBindingError("DESCRIPTOR_INPUT_UNSTABLE", DescriptorBindingError, 1),
   );
+
+  const replaced = makeDescriptorFixture();
+  await assert.rejects(
+    bindServerRouteBundlePublicationDescriptor({
+      descriptorPath: replaced.descriptorPath,
+      tuplePath: writeTuple(replaced, stagedTuple(replaced)),
+      beforeSecondRead: () => {
+        renameSync(replaced.descriptorPath, `${replaced.descriptorPath}.original`);
+        mkdirSync(replaced.descriptorPath);
+      },
+    }),
+    descriptorBindingError("DESCRIPTOR_INPUT_UNSTABLE", DescriptorBindingError, 1),
+  );
+
+  const unexpected = new Error("unexpected internal context");
+  const internalFailure = normalizeDescriptorBindingCliFailure(unexpected);
+  assert.equal(internalFailure instanceof DescriptorBindingError, true);
+  assert.equal(internalFailure.code, "DESCRIPTOR_BINDING_INTERNAL");
+  assert.equal(internalFailure.exitCode, 1);
+  assert.equal(internalFailure.cause, unexpected);
+  assert.equal(internalFailure.message, "descriptor binding failed unexpectedly");
 
   const fixture = makeDescriptorFixture();
   const stableTuple = stagedTuple(fixture);
@@ -1351,10 +1398,13 @@ function trackedBody(bytes) {
   };
 }
 
-function errorWithCode(code) {
+function errorWithCode(code, expectedExitCode) {
   return (error) => {
     assert.equal(error instanceof AcquisitionError, true);
     assert.equal(error.code, code);
+    if (expectedExitCode !== undefined) {
+      assert.equal(error.exitCode, expectedExitCode);
+    }
     return true;
   };
 }
@@ -1367,13 +1417,17 @@ function candidateBindingError(code) {
   };
 }
 
-function descriptorBindingError(code) {
+function descriptorBindingError(
+  code,
+  expectedClass = DescriptorBindingError,
+  expectedExitCode,
+) {
   return (error) => {
-    assert.equal(
-      error instanceof DescriptorBindingError || error instanceof AcquisitionError,
-      true,
-    );
+    assert.equal(error instanceof expectedClass, true);
     assert.equal(error.code, code);
+    if (expectedExitCode !== undefined) {
+      assert.equal(error.exitCode, expectedExitCode);
+    }
     return true;
   };
 }

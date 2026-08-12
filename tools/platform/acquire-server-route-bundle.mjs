@@ -950,16 +950,17 @@ function validateHandoff(handoff, rawBytes, contract) {
     throw failure("HANDOFF_SHAPE_INVALID", 2);
   }
 
-  const facts = validatePublicationFacts(
-    handoff,
-    contract.producer.gitSha,
-    "PRODUCER_IDENTITY_MISMATCH",
-  );
   validateAdmission(handoff.backendAdmission);
   if (
     !isExactObject(handoff.platformRelease, ["serverRouteBundleDigest"]) ||
     !isSha256Reference(handoff.platformRelease.serverRouteBundleDigest)
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
+
+  const facts = validatePublicationFacts(
+    handoff,
+    contract.producer.gitSha,
+    "PRODUCER_IDENTITY_MISMATCH",
+  );
 
   if (
     handoff.backendAdmission.immutablePublicationReceiptIdentity !==
