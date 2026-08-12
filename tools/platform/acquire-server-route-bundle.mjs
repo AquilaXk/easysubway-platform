@@ -97,6 +97,9 @@ const ERROR_MESSAGES = Object.freeze({
   OBJECT_READ_UNSTABLE: "object changed during local verification",
   OUTPUT_POLICY_VIOLATION: "output policy validation failed",
   CURRENT_OBJECT_UNAVAILABLE: "current object acquisition failed",
+  DESCRIPTOR_SHAPE_INVALID: "publication descriptor validation failed",
+  DESCRIPTOR_PRODUCER_IDENTITY_MISMATCH: "descriptor producer identity validation failed",
+  DESCRIPTOR_IDENTITY_MISMATCH: "descriptor publication identity validation failed",
 });
 
 export class AcquisitionError extends Error {
@@ -106,6 +109,61 @@ export class AcquisitionError extends Error {
     this.code = code;
     this.exitCode = exitCode;
   }
+}
+
+export function inspectServerRouteBundlePublicationDescriptor(rawBytes) {
+  const descriptor = parseJson(rawBytes, "DESCRIPTOR_SHAPE_INVALID");
+  if (
+    !isExactObject(descriptor, [
+      "schemaVersion",
+      "artifactKind",
+      "producer",
+      "manifest",
+      "sourceSnapshotSetHash",
+      "publicationReceipt",
+      "release",
+      "descriptorSha256",
+    ]) ||
+    descriptor.schemaVersion !== 2 ||
+    descriptor.artifactKind !== "server-route-bundle-publication-descriptor" ||
+    !isExactObject(descriptor.producer, ["repository", "gitSha"]) ||
+    descriptor.producer.repository !== "AquilaXk/easysubway-data" ||
+    !matchesString(descriptor.producer.gitSha, GIT_SHA) ||
+    !isSha256(descriptor.sourceSnapshotSetHash) ||
+    !isSha256(descriptor.descriptorSha256) ||
+    canonicalJson(descriptor) !== rawBytes.toString("utf8")
+  ) throw failure("DESCRIPTOR_SHAPE_INVALID", 2);
+
+  const payload = { ...descriptor };
+  delete payload.descriptorSha256;
+  if (sha256(Buffer.from(canonicalJson(payload))) !== descriptor.descriptorSha256) {
+    throw failure("DESCRIPTOR_SHAPE_INVALID", 2);
+  }
+
+  let facts;
+  try {
+    facts = validatePublicationFacts(
+      descriptor,
+      descriptor.producer.gitSha,
+      "PRODUCER_IDENTITY_MISMATCH",
+    );
+  } catch (error) {
+    if (!(error instanceof AcquisitionError)) throw error;
+    if (error.code === "PRODUCER_IDENTITY_MISMATCH") {
+      throw failure("DESCRIPTOR_PRODUCER_IDENTITY_MISMATCH", error.exitCode);
+    }
+    if (["HANDOFF_SHAPE_INVALID", "INVENTORY_INVALID", "LOCATOR_POLICY_VIOLATION"]
+      .includes(error.code)) {
+      throw failure("DESCRIPTOR_SHAPE_INVALID", error.exitCode);
+    }
+    throw failure("DESCRIPTOR_IDENTITY_MISMATCH", error.exitCode);
+  }
+
+  return {
+    descriptorSha256: descriptor.descriptorSha256,
+    producerGitSha: descriptor.producer.gitSha,
+    serverRouteBundleDigest: `sha256:${facts.manifestSha256}`,
+  };
 }
 
 export function buildObjectUrl(publicBaseUrl, objectKey) {
@@ -892,20 +950,40 @@ function validateHandoff(handoff, rawBytes, contract) {
     throw failure("HANDOFF_SHAPE_INVALID", 2);
   }
 
-  validateManifest(handoff.manifest);
-  validateReceipt(handoff.publicationReceipt);
-  validateRelease(handoff.release);
+  const facts = validatePublicationFacts(
+    handoff,
+    contract.producer.gitSha,
+    "PRODUCER_IDENTITY_MISMATCH",
+  );
   validateAdmission(handoff.backendAdmission);
   if (
     !isExactObject(handoff.platformRelease, ["serverRouteBundleDigest"]) ||
     !isSha256Reference(handoff.platformRelease.serverRouteBundleDigest)
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 
-  const receipt = handoff.publicationReceipt;
   if (
-    receipt.repository.name !== contract.producer.repository ||
-    receipt.repository.gitSha !== contract.producer.gitSha
-  ) throw failure("PRODUCER_IDENTITY_MISMATCH");
+    handoff.backendAdmission.immutablePublicationReceiptIdentity !==
+      `sha256:${facts.receiptRawSha256}`
+  ) throw failure("HANDOFF_SHAPE_INVALID", 2);
+  if (
+    handoff.backendAdmission.manifestSha256 !== facts.manifestSha256 ||
+    handoff.platformRelease.serverRouteBundleDigest !== `sha256:${facts.manifestSha256}` ||
+    handoff.backendAdmission.finalEvidenceReference !==
+      `sha256:${handoff.release.finalRawSha256}` ||
+    handoff.backendAdmission.promotionEvidenceReference !==
+      `sha256:${handoff.release.promotionEvidenceSha256}`
+  ) throw failure("OBJECT_IDENTITY_MISMATCH");
+}
+
+function validatePublicationFacts(value, expectedProducerGitSha, producerFailureCode) {
+  validateManifest(value.manifest);
+  validateReceipt(value.publicationReceipt);
+  validateRelease(value.release);
+  const receipt = value.publicationReceipt;
+  if (
+    receipt.repository.name !== "AquilaXk/easysubway-data" ||
+    receipt.repository.gitSha !== expectedProducerGitSha
+  ) throw failure(producerFailureCode);
 
   validateInventory(receipt);
   const receiptPayload = { ...receipt };
@@ -913,16 +991,14 @@ function validateHandoff(handoff, rawBytes, contract) {
   const receiptRawSha256 = sha256(Buffer.from(canonicalJson(receipt)));
   if (
     sha256(Buffer.from(canonicalJson(receiptPayload))) !== receipt.receiptSha256 ||
-    handoff.release.publicationReceiptSha256 !== receipt.receiptSha256 ||
-    handoff.release.publicationReceiptRawSha256 !== receiptRawSha256 ||
-    handoff.backendAdmission.immutablePublicationReceiptIdentity !==
-      `sha256:${receiptRawSha256}`
+    value.release.publicationReceiptSha256 !== receipt.receiptSha256 ||
+    value.release.publicationReceiptRawSha256 !== receiptRawSha256
   ) throw failure("HANDOFF_SHAPE_INVALID", 2);
 
-  const manifestBytes = Buffer.from(canonicalJson(handoff.manifest));
+  const manifestBytes = Buffer.from(canonicalJson(value.manifest));
   const manifestSha256 = sha256(manifestBytes);
   const candidate = receipt.candidate;
-  const manifest = handoff.manifest;
+  const manifest = value.manifest;
   const components = candidate.componentDigests;
   const objectByPath = new Map(receipt.objects.map((entry) => [entry.path, entry]));
   const payloadInventory = ["accessibility", "fare", "timetable", "topology"]
@@ -939,7 +1015,7 @@ function validateHandoff(handoff, rawBytes, contract) {
     Buffer.from(canonicalJson(payloadInventory)),
   );
   if (
-    handoff.sourceSnapshotSetHash !== candidate.sourceSnapshotSetHash ||
+    value.sourceSnapshotSetHash !== candidate.sourceSnapshotSetHash ||
     manifest.bundleId !== candidate.bundleId ||
     manifest.releaseSequence !== candidate.releaseSequence ||
     manifest.stationSetSha256 !== candidate.stationSetSha256 ||
@@ -956,25 +1032,15 @@ function validateHandoff(handoff, rawBytes, contract) {
     candidate.signedManifestRawSha256 !== manifestSha256 ||
     objectByPath.get("manifest.json").sha256 !== manifestSha256 ||
     objectByPath.get("manifest.json").sizeBytes !== manifestBytes.length ||
-    objectByPath.get("manifest.signing-input.json").sha256 !==
-      candidate.signingInputSha256 ||
-    objectByPath.get("payload/accessibility.sqlite.zst").sha256 !==
-      components.accessibility ||
+    objectByPath.get("manifest.signing-input.json").sha256 !== candidate.signingInputSha256 ||
+    objectByPath.get("payload/accessibility.sqlite.zst").sha256 !== components.accessibility ||
     objectByPath.get("payload/fare.sqlite.zst").sha256 !== components.fare ||
-    objectByPath.get("payload/timetable.sqlite.zst").sha256 !==
-      components.timetable ||
-    objectByPath.get("payload/topology.sqlite.zst").sha256 !==
-      components.topology ||
+    objectByPath.get("payload/timetable.sqlite.zst").sha256 !== components.timetable ||
+    objectByPath.get("payload/topology.sqlite.zst").sha256 !== components.topology ||
     objectByPath.get("provenance.json").sha256 !== manifest.provenanceSha256 ||
-    objectByPath.get("compatibility.json").sha256 !==
-      manifest.compatibilitySha256 ||
-    handoff.backendAdmission.manifestSha256 !== manifestSha256 ||
-    handoff.platformRelease.serverRouteBundleDigest !== `sha256:${manifestSha256}` ||
-    handoff.backendAdmission.finalEvidenceReference !==
-      `sha256:${handoff.release.finalRawSha256}` ||
-    handoff.backendAdmission.promotionEvidenceReference !==
-      `sha256:${handoff.release.promotionEvidenceSha256}`
+    objectByPath.get("compatibility.json").sha256 !== manifest.compatibilitySha256
   ) throw failure("OBJECT_IDENTITY_MISMATCH");
+  return { manifestSha256, receiptRawSha256 };
 }
 
 function validateManifest(value) {
