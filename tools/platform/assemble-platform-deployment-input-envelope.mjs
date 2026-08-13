@@ -14,7 +14,6 @@ const BACKEND_REPOSITORY = "AquilaXk/easysubway-backend";
 const DATA_REPOSITORY = "AquilaXk/easysubway-data";
 const PLATFORM_ENVIRONMENT = "production-deploy";
 const DEPLOYMENT_ENVIRONMENT_IDENTITY = "production";
-const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RAW_DIGEST = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const ERROR_MESSAGES = Object.freeze({
@@ -50,10 +49,16 @@ export class DeploymentEnvelopeError extends Error {
 
 export async function assemblePlatformDeploymentInputEnvelope(input) {
   validateInvocation(input);
+  const platformRevision = input.platformRevision;
 
   const snapshots = new Map();
   for (const [field] of INPUTS) {
-    snapshots.set(field, await readInputSnapshot(input[field], false));
+    snapshots.set(field, await readInputSnapshot(
+      input[field],
+      false,
+      field,
+      input.beforeInputContentRead,
+    ));
   }
 
   const receipt = parseCanonical(snapshots.get("admissionReceiptPath"), "compact");
@@ -68,14 +73,19 @@ export async function assemblePlatformDeploymentInputEnvelope(input) {
   const runtimeInventory = parseCanonical(snapshots.get("runtimeInputInventoryPath"), "json");
 
   validateCredentialInventory(credentialInventory);
-  validatePlatformReceipt(receipt, input.platformRevision);
+  validatePlatformReceipt(receipt, platformRevision);
   validateBackendComponent(component, tuple);
   validateReleaseBindings(candidate, descriptor, tuple);
   validatePolicies(acquisition, lifecycle, activationSchema, runtimeInventory);
 
   await input.beforeInputVerification?.();
   for (const [field] of INPUTS) {
-    const second = await readInputSnapshot(input[field], true);
+    const second = await readInputSnapshot(
+      input[field],
+      true,
+      field,
+      input.beforeInputContentRead,
+    );
     if (!sameSnapshot(snapshots.get(field), second)) {
       throw failure("DEPLOYMENT_ENVELOPE_INPUT_UNSTABLE");
     }
@@ -87,7 +97,7 @@ export async function assemblePlatformDeploymentInputEnvelope(input) {
     orchestrator: "COMPOSE",
     platform: {
       repository: PLATFORM_REPOSITORY,
-      gitSha: input.platformRevision,
+      gitSha: platformRevision,
       environment: PLATFORM_ENVIRONMENT,
       deploymentEnvironmentIdentity: DEPLOYMENT_ENVIRONMENT_IDENTITY,
       admissionReceiptSha256: digest(snapshots.get("admissionReceiptPath").bytes),
@@ -133,16 +143,18 @@ export function formatPlatformDeploymentInputEnvelope(envelope) {
 function validateInvocation(input) {
   if (
     !isObject(input) ||
-    !REVISION.test(input.platformRevision ?? "") ||
+    !matchesString(input.platformRevision, REVISION) ||
     INPUTS.some(([field]) => !isPath(input[field])) ||
     (input.beforeInputVerification !== undefined &&
-      typeof input.beforeInputVerification !== "function")
+      typeof input.beforeInputVerification !== "function") ||
+    (input.beforeInputContentRead !== undefined &&
+      typeof input.beforeInputContentRead !== "function")
   ) {
     throw failure("DEPLOYMENT_ENVELOPE_USAGE", 2);
   }
 }
 
-async function readInputSnapshot(path, secondRead) {
+async function readInputSnapshot(path, secondRead, field, beforeInputContentRead) {
   let handle;
   const invalidCode = secondRead
     ? "DEPLOYMENT_ENVELOPE_INPUT_UNSTABLE"
@@ -156,7 +168,11 @@ async function readInputSnapshot(path, secondRead) {
     if (!before.isFile() || before.size < 1n || before.size > BigInt(MAX_INPUT_BYTES)) {
       throw failure(invalidCode, secondRead ? 1 : 2);
     }
-    const bytes = await handle.readFile();
+    await beforeInputContentRead?.(field);
+    const bytes = await readBounded(handle);
+    if (bytes.length > MAX_INPUT_BYTES) {
+      throw failure("DEPLOYMENT_ENVELOPE_INPUT_UNSTABLE");
+    }
     const after = await handle.stat({ bigint: true });
     if (!sameFileStat(before, after) || BigInt(bytes.length) !== after.size) {
       throw failure("DEPLOYMENT_ENVELOPE_INPUT_UNSTABLE");
@@ -168,6 +184,20 @@ async function readInputSnapshot(path, secondRead) {
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+async function readBounded(handle) {
+  const chunks = [];
+  let length = 0;
+  while (length <= MAX_INPUT_BYTES) {
+    const remaining = MAX_INPUT_BYTES + 1 - length;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    length += bytesRead;
+  }
+  return Buffer.concat(chunks, length);
 }
 
 function parseTuple(snapshot) {
@@ -275,7 +305,7 @@ function validateBackendComponent(component, tuple) {
     typeof component.contractVersion !== "string" ||
     component.contractVersion.length === 0 ||
     component.artifactIdentity.apiContractVersion !== component.contractVersion ||
-    !RAW_DIGEST.test(component.evidenceSha256 ?? "") ||
+    !matchesString(component.evidenceSha256, RAW_DIGEST) ||
     !Array.isArray(component.issueRefs) ||
     component.issueRefs.length < 1 ||
     component.issueRefs.some((reference) =>
@@ -298,7 +328,7 @@ function validateReleaseBindings(candidate, descriptor, tuple) {
     candidate.tupleSha256 !== tuple.tupleSha256 ||
     candidate.deploymentRevision !== tuple.deploymentRevision ||
     candidate.environmentIdentity !== tuple.environmentIdentity ||
-    !RAW_DIGEST.test(candidate.handoffSha256 ?? "") ||
+    !matchesString(candidate.handoffSha256, RAW_DIGEST) ||
     candidate.serverRouteBundleDigest !== tuple.serverRouteBundleDigest ||
     !sameKeys(descriptor, [
       "schemaVersion", "artifactKind", "descriptorSha256", "producerGitSha",
@@ -306,8 +336,8 @@ function validateReleaseBindings(candidate, descriptor, tuple) {
     ]) ||
     descriptor.schemaVersion !== "PLATFORM_SERVER_ROUTE_BUNDLE_DESCRIPTOR_BINDING_V1" ||
     descriptor.artifactKind !== "platform-server-route-bundle-descriptor-binding" ||
-    !RAW_DIGEST.test(descriptor.descriptorSha256 ?? "") ||
-    !REVISION.test(descriptor.producerGitSha ?? "") ||
+    !matchesString(descriptor.descriptorSha256, RAW_DIGEST) ||
+    !matchesString(descriptor.producerGitSha, REVISION) ||
     descriptor.tupleSha256 !== tuple.tupleSha256 ||
     descriptor.serverRouteBundleDigest !== tuple.serverRouteBundleDigest
   ) {
@@ -321,7 +351,7 @@ function validatePolicies(acquisition, lifecycle, activationSchema, runtimeInven
     acquisition.artifactKind !== "server-route-bundle-object-acquisition-contract-v1" ||
     !isObject(acquisition.producer) ||
     acquisition.producer.repository !== DATA_REPOSITORY ||
-    !REVISION.test(acquisition.producer.gitSha ?? "") ||
+    !matchesString(acquisition.producer.gitSha, REVISION) ||
     lifecycle.schemaVersion !== "PLATFORM_JOURNEY_RELEASE_LIFECYCLE_CONTRACT_V1" ||
     lifecycle.artifactKind !== "platform-journey-release-lifecycle-contract" ||
     activationSchema.properties?.schemaVersion?.const !== "PLATFORM_ACTIVATION_RECEIPT_V1" ||
@@ -380,6 +410,10 @@ function isObject(value) {
 
 function isPath(value) {
   return (typeof value === "string" && value.length > 0) || value instanceof URL;
+}
+
+function matchesString(value, pattern) {
+  return typeof value === "string" && pattern.test(value);
 }
 
 function isDateTime(value) {

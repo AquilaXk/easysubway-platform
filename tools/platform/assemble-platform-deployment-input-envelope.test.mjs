@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -140,6 +140,62 @@ test("candidate and descriptor bindings must match one COMPOSE tuple", async (t)
       );
     });
   }
+});
+
+test("binding digest and revision fields reject coercible non-string values", async (t) => {
+  const cases = [
+    ["candidate handoff digest", "candidateBindingPath", (value) => {
+      value.handoffSha256 = [value.handoffSha256];
+    }],
+    ["descriptor digest", "descriptorBindingPath", (value) => {
+      value.descriptorSha256 = [value.descriptorSha256];
+    }],
+    ["producer revision", "descriptorBindingPath", (value) => {
+      value.producerGitSha = [value.producerGitSha];
+    }],
+  ];
+  for (const [name, pathField, mutate] of cases) {
+    await t.test(name, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const value = JSON.parse(await readFile(fixture.input[pathField], "utf8"));
+      mutate(value);
+      await writeCompact(fixture.input[pathField], value);
+      await assert.rejects(
+        assemblePlatformDeploymentInputEnvelope(fixture.input),
+        matchesError("DEPLOYMENT_ENVELOPE_RELEASE_MISMATCH", 2),
+      );
+    });
+  }
+});
+
+test("approved Platform revision is immutable during assembly", async (t) => {
+  const fixture = await createFixture(t);
+  const input = { ...fixture.input };
+  input.beforeInputVerification = async () => {
+    input.platformRevision = "f".repeat(40);
+  };
+
+  const envelope = await assemblePlatformDeploymentInputEnvelope(input);
+
+  assert.equal(envelope.platform.gitSha, PLATFORM_REVISION);
+});
+
+test("input growth after initial stat is rejected within the byte budget", async (t) => {
+  const fixture = await createFixture(t);
+  let expanded = false;
+  await assert.rejects(
+    assemblePlatformDeploymentInputEnvelope({
+      ...fixture.input,
+      beforeInputContentRead: async (field) => {
+        if (field === "admissionReceiptPath" && !expanded) {
+          expanded = true;
+          await appendFile(fixture.input.admissionReceiptPath, Buffer.alloc(1024 * 1024, 0x20));
+        }
+      },
+    }),
+    matchesError("DEPLOYMENT_ENVELOPE_INPUT_UNSTABLE", 1),
+  );
+  assert.equal(expanded, true);
 });
 
 test("noncanonical or changed input fails closed", async (t) => {
