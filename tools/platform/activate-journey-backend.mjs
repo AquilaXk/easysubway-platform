@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { constants, realpathSync } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MAX_INPUT_BYTES = 1024 * 1024;
+import {
+  openStableCandidateAdmissionInput,
+} from "./admit-journey-release-candidate.mjs";
+
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 5000;
 const ACTIVATION_PATH = "/internal/v1/journey/activation";
@@ -74,7 +76,7 @@ export async function activateJourneyBackend({
     fetchImpl,
     now,
   });
-  const input = await openStableInput(admissionPath);
+  const input = await openActivationInput(admissionPath);
   try {
     const admission = validateAdmission(input.bytes);
     const observedAt = now();
@@ -166,55 +168,25 @@ function validActivationIdentity(value) {
     });
 }
 
-async function openStableInput(path) {
-  const absolutePath = resolve(path);
-  let handle;
+async function openActivationInput(path) {
+  let input;
   try {
-    handle = await open(
-      absolutePath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const identity = await handle.stat({ bigint: true });
-    if (!identity.isFile() || identity.size < 1n || identity.size > BigInt(MAX_INPUT_BYTES)) {
-      throw failure("JOURNEY_ACTIVATION_INPUT", 2);
-    }
-    const bytes = await handle.readFile();
-    if (BigInt(bytes.length) !== identity.size) {
-      throw failure("JOURNEY_ACTIVATION_INPUT_UNSTABLE");
-    }
-    await requireStableInput(handle, absolutePath, identity);
+    input = await openStableCandidateAdmissionInput(path);
     return {
-      bytes,
-      verify: () => requireStableInput(handle, absolutePath, identity),
-      close: () => handle.close().catch(() => {}),
+      bytes: input.bytes,
+      verify: async () => {
+        try {
+          await input.verify();
+        } catch {
+          throw failure("JOURNEY_ACTIVATION_INPUT_UNSTABLE");
+        }
+      },
+      close: input.close,
     };
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    if (error instanceof JourneyBackendActivationError) throw error;
+  } catch {
+    await input?.close().catch(() => {});
     throw failure("JOURNEY_ACTIVATION_INPUT", 2);
   }
-}
-
-async function requireStableInput(handle, path, expected) {
-  let descriptor;
-  let entry;
-  try {
-    descriptor = await handle.stat({ bigint: true });
-    entry = await lstat(path, { bigint: true });
-  } catch {
-    throw failure("JOURNEY_ACTIVATION_INPUT_UNSTABLE");
-  }
-  if (
-    !descriptor.isFile() || !entry.isFile() || entry.isSymbolicLink() ||
-    !sameIdentity(expected, descriptor) || !sameIdentity(expected, entry)
-  ) {
-    throw failure("JOURNEY_ACTIVATION_INPUT_UNSTABLE");
-  }
-}
-
-function sameIdentity(left, right) {
-  return ["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"]
-    .every((field) => left[field] === right[field]);
 }
 
 function validateAdmission(bytes) {
@@ -294,25 +266,20 @@ async function requestActivation({
 }
 
 async function readBoundedResponse(response) {
-  if (typeof response.body?.getReader !== "function") {
-    return Buffer.from(await response.arrayBuffer());
+  if (typeof response.body?.[Symbol.asyncIterator] !== "function") {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > MAX_RESPONSE_BYTES) throw failure("JOURNEY_ACTIVATION_RESPONSE");
+    return bytes;
   }
-  const reader = response.body.getReader();
   const chunks = [];
   let length = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > MAX_RESPONSE_BYTES) {
-        await reader.cancel().catch(() => {});
-        throw failure("JOURNEY_ACTIVATION_RESPONSE");
-      }
-      chunks.push(Buffer.from(value));
+  for await (const value of response.body) {
+    length += value.byteLength;
+    if (length > MAX_RESPONSE_BYTES) {
+      await response.body.cancel().catch(() => {});
+      throw failure("JOURNEY_ACTIVATION_RESPONSE");
     }
-  } finally {
-    reader.releaseLock();
+    chunks.push(Buffer.from(value));
   }
   return Buffer.concat(chunks, length);
 }
@@ -362,24 +329,7 @@ function validateActiveReadiness(value, admission, instanceIdentity, command, ob
 }
 
 function activeEvidenceSha256(value) {
-  const values = [
-    "schemaVersion", value.schemaVersion,
-    "artifactKind", value.artifactKind,
-    "instanceId", value.instanceId,
-    "releaseTupleSha256", value.releaseTupleSha256,
-    "backendImageDigest", value.backendImageDigest,
-    "backendConfigSha256", value.backendConfigSha256,
-    "journeyContractSha256", value.journeyContractSha256,
-    "routeBundleManifestSha256", value.routeBundleManifestSha256,
-    "bundleId", value.bundleId,
-    "bundleReleaseSequence", value.bundleReleaseSequence,
-    "generation", value.generation,
-    "trafficGeneration", value.trafficGeneration,
-    "servingReady", value.servingReady,
-    "draining", value.draining,
-    "freshUntil", value.freshUntil,
-    "activatedAt", value.activatedAt,
-  ];
+  const values = ACTIVE_FIELDS.slice(0, -1).flatMap((field) => [field, value[field]]);
   const canonical = values.map((entry) => {
     const text = String(entry);
     return `${Buffer.byteLength(text, "utf8")}:${text}`;

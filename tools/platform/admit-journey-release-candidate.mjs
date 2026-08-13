@@ -103,11 +103,11 @@ export async function admitJourneyReleaseCandidate({
   });
   const inputs = [];
   try {
-    const bindingInput = await openStableInput(bindingPath);
+    const bindingInput = await openStableCandidateAdmissionInput(bindingPath);
     inputs.push(bindingInput);
-    const tupleInput = await openStableInput(tuplePath);
+    const tupleInput = await openStableCandidateAdmissionInput(tuplePath);
     inputs.push(tupleInput);
-    const observationsInput = await openStableInput(observationsPath);
+    const observationsInput = await openStableCandidateAdmissionInput(observationsPath);
     inputs.push(observationsInput);
 
     const binding = validateBinding(bindingInput.bytes);
@@ -153,7 +153,7 @@ function validateInvocation({
   }
 }
 
-async function openStableInput(path) {
+export async function openStableCandidateAdmissionInput(path) {
   const absolutePath = resolve(path);
   let handle;
   try {
