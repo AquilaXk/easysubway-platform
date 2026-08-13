@@ -40,7 +40,17 @@ const ERROR_MESSAGES = Object.freeze({
   CANDIDATE_BUNDLE_INVALID: "acquired bundle validation failed",
   CANDIDATE_IDENTITY_MISMATCH: "release tuple and acquired bundle identities differ",
   CANDIDATE_INPUT_UNSTABLE: "candidate binding input changed during verification",
+  CANDIDATE_DESCRIPTOR_INVALID: "descriptor binding validation failed",
 });
+
+const DESCRIPTOR_BINDING_FIELDS = Object.freeze([
+  "schemaVersion",
+  "artifactKind",
+  "descriptorSha256",
+  "producerGitSha",
+  "tupleSha256",
+  "serverRouteBundleDigest",
+]);
 
 export class CandidateBindingError extends Error {
   constructor(code, exitCode = 1) {
@@ -113,6 +123,76 @@ export async function bindJourneyReleaseCandidate({
     handoffSha256: candidate.handoffSha256,
     serverRouteBundleDigest: candidate.serverRouteBundleDigest,
   };
+}
+
+export async function bindJourneyReleaseDescriptorCandidate({
+  tuplePath,
+  descriptorBindingPath,
+  orchestrator,
+}) {
+  if (
+    !isNonemptyString(tuplePath) ||
+    !isNonemptyString(descriptorBindingPath) ||
+    !ORCHESTRATORS.has(orchestrator)
+  ) throw bindingFailure("CANDIDATE_BINDING_USAGE", 2);
+
+  const tupleBytes = await readRegularTuple(tuplePath, "CANDIDATE_TUPLE_INVALID");
+  const descriptorBytes = await readRegularTuple(
+    descriptorBindingPath,
+    "CANDIDATE_DESCRIPTOR_INVALID",
+  );
+  const tuple = validateJourneyReleaseTupleBytes(tupleBytes);
+  const descriptor = validateDescriptorBindingBytes(descriptorBytes);
+  if (
+    descriptor.tupleSha256 !== tuple.tupleSha256 ||
+    descriptor.serverRouteBundleDigest !== tuple.serverRouteBundleDigest
+  ) throw bindingFailure("CANDIDATE_IDENTITY_MISMATCH", 2);
+
+  const [tupleSecondRead, descriptorSecondRead] = await Promise.all([
+    readRegularTuple(tuplePath, "CANDIDATE_INPUT_UNSTABLE"),
+    readRegularTuple(descriptorBindingPath, "CANDIDATE_INPUT_UNSTABLE"),
+  ]);
+  if (!tupleBytes.equals(tupleSecondRead) || !descriptorBytes.equals(descriptorSecondRead)) {
+    throw bindingFailure("CANDIDATE_INPUT_UNSTABLE");
+  }
+
+  return {
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V2",
+    artifactKind: "journey-release-candidate-binding",
+    orchestrator,
+    tupleSha256: tuple.tupleSha256,
+    deploymentRevision: tuple.deploymentRevision,
+    environmentIdentity: tuple.environmentIdentity,
+    descriptorSha256: descriptor.descriptorSha256,
+    serverRouteBundleDigest: tuple.serverRouteBundleDigest,
+  };
+}
+
+function validateDescriptorBindingBytes(bytes) {
+  let descriptor;
+  try {
+    descriptor = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw bindingFailure("CANDIDATE_DESCRIPTOR_INVALID", 2);
+  }
+  if (
+    descriptor === null ||
+    Array.isArray(descriptor) ||
+    typeof descriptor !== "object" ||
+    !sameArray(Object.keys(descriptor), DESCRIPTOR_BINDING_FIELDS) ||
+    descriptor.schemaVersion !== "PLATFORM_SERVER_ROUTE_BUNDLE_DESCRIPTOR_BINDING_V1" ||
+    descriptor.artifactKind !== "platform-server-route-bundle-descriptor-binding" ||
+    typeof descriptor.descriptorSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(descriptor.descriptorSha256) ||
+    typeof descriptor.producerGitSha !== "string" ||
+    !REVISION.test(descriptor.producerGitSha) ||
+    typeof descriptor.tupleSha256 !== "string" ||
+    !DIGEST.test(descriptor.tupleSha256) ||
+    typeof descriptor.serverRouteBundleDigest !== "string" ||
+    !DIGEST.test(descriptor.serverRouteBundleDigest) ||
+    !bytes.equals(Buffer.from(`${JSON.stringify(descriptor)}\n`))
+  ) throw bindingFailure("CANDIDATE_DESCRIPTOR_INVALID", 2);
+  return descriptor;
 }
 
 export function formatCandidateBindingSuccess(binding) {

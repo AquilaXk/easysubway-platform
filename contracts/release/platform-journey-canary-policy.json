@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "PLATFORM_JOURNEY_CANARY_POLICY_V1",
+  "artifactKind": "platform-journey-canary-policy",
+  "canaryRequestIdentity": "source-free-single-host-cutover-v1",
+  "requestId": "01K2H7Q5B7E3T19N8J4M6P0R2V",
+  "originStationId": "station-sangnoksu",
+  "destinationStationId": "station-sadang",
+  "mobilityProfile": "STANDARD",
+  "constraintMode": "NONE",
+  "maxTransfers": 3,
+  "alternativeCount": 3
+}

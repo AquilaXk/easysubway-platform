@@ -274,7 +274,7 @@ async function createFixture() {
     environmentIdentity: "production",
     bindingSha256: digest("7"),
     observationsSha256: digest("8"),
-    handoffSha256: "9".repeat(64),
+    descriptorSha256: "9".repeat(64),
     instanceCount: 1,
     failureDomainCount: 1,
     canaryEvidenceDigest: digest("a"),

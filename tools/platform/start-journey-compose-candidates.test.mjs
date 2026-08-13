@@ -25,6 +25,7 @@ const PUBLIC_KEY_PEM = publicKey.export({ type: "spki", format: "pem" });
 test("exact immutable inputs start only the existing inactive standby and emit one-host runtime", async () => {
   const fixture = await createFixture();
   const calls = [];
+  let lifecycleEnvironment;
   const runtime = await startJourneyComposeCandidates({
     ...fixture.input,
     serviceToken: TOKEN,
@@ -35,6 +36,9 @@ test("exact immutable inputs start only the existing inactive standby and emit o
       DOCKER_CONTEXT: "verified-test-context",
       DEPLOY_ROOT: fixture.root,
       EASYSUBWAY_POSTGRES_DB: "ambient-must-not-win",
+    },
+    candidateEnvironmentConsumer: (environment) => {
+      lifecycleEnvironment = environment;
     },
     composeRunner: async (request) => {
       const envFile = request.args[request.args.indexOf("--env-file") + 1];
@@ -63,9 +67,17 @@ test("exact immutable inputs start only the existing inactive standby and emit o
     "backend-standby",
   ]);
   assert.deepEqual(calls[1].args.slice(-7), [
-    "up", "--detach", "--no-deps", "--no-build", "--pull", "never",
+    "up", "--detach", "--no-deps", "--no-build", "--pull", "always",
     "backend-standby",
   ]);
+  assert.equal(
+    lifecycleEnvironment.EASYSUBWAY_BACKEND_IMAGE,
+    `ghcr.io/aquilaxk/easysubway-backend@${fixture.tuple.backendImageDigest}`,
+  );
+  assert.equal(
+    lifecycleEnvironment.EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN,
+    TOKEN,
+  );
   for (const call of calls) {
     assert.equal(call.command, "docker");
     assert.equal(call.args.includes("--profile"), true);
@@ -353,16 +365,18 @@ test("candidate overlay reuses only base standby and keeps active traffic and se
   const baseCompose = await readFile(BASE_COMPOSE, "utf8");
   const deployScript = await readFile(DEPLOY_SCRIPT, "utf8");
   assert.match(overlay, /^x-journey-candidate-environment: &journey-candidate-environment/);
-  assert.match(overlay, /\nservices:\n  backend-standby:/);
-  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 1);
+  assert.match(overlay, /\nservices:\n  backend:/);
+  assert.match(overlay, /\n  backend-standby:/);
+  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 2);
   assert.equal((overlay.match(/profiles:\n      - journey-candidate/g) ?? []).length, 1);
+  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend\n/);
   assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby/);
   assert.match(baseCompose, /\n  backend-standby:/);
   assert.match(baseCompose, /EASYSUBWAY_BACKEND_STANDBY_PORT:-8082}:8080/);
   assert.match(deployScript, /LOCK_FILE="\$\{DEPLOY_ROOT\}\/deploy\.lock"/);
   for (const forbidden of [
     "backend-journey-candidate-a", "backend-journey-candidate-b", "18081", "18082",
-    "route-v2-gateway", "nginx", "KUBERNETES", "\n  backend:",
+    "route-v2-gateway", "nginx", "KUBERNETES",
   ]) {
     assert.equal(overlay.includes(forbidden), false, forbidden);
   }
@@ -392,16 +406,6 @@ async function createFixture() {
     backendConfigDigest: `sha256:${sha256(backendEnvText)}`,
   });
   const tupleBody = `${JSON.stringify(tuple, null, 2)}\n`;
-  const binding = {
-    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
-    artifactKind: "journey-release-candidate-binding",
-    orchestrator: "COMPOSE",
-    tupleSha256: tuple.tupleSha256,
-    deploymentRevision: tuple.deploymentRevision,
-    environmentIdentity: tuple.environmentIdentity,
-    handoffSha256: "f".repeat(64),
-    serverRouteBundleDigest: tuple.serverRouteBundleDigest,
-  };
   const keyId = "production-v1";
   const publicBaseUrl =
     "https://objectstorage.ap-seoul-1.oraclecloud.com/n/namespace/b/bucket/o";
@@ -415,6 +419,16 @@ async function createFixture() {
   const descriptor = {
     ...descriptorPayload,
     descriptorSha256: sha256(Buffer.from(canonicalJson(descriptorPayload))),
+  };
+  const binding = {
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V2",
+    artifactKind: "journey-release-candidate-binding",
+    orchestrator: "COMPOSE",
+    tupleSha256: tuple.tupleSha256,
+    deploymentRevision: tuple.deploymentRevision,
+    environmentIdentity: tuple.environmentIdentity,
+    descriptorSha256: descriptor.descriptorSha256,
+    serverRouteBundleDigest: tuple.serverRouteBundleDigest,
   };
   const descriptorBytes = Buffer.from(canonicalJson(descriptor));
   const descriptorBinding = {

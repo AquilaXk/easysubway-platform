@@ -19,7 +19,7 @@ const BINDING_FIELDS = Object.freeze([
   "tupleSha256",
   "deploymentRevision",
   "environmentIdentity",
-  "handoffSha256",
+  "descriptorSha256",
   "serverRouteBundleDigest",
 ]);
 const OBSERVATION_FIELDS = Object.freeze([
@@ -246,13 +246,13 @@ function validateBinding(bytes) {
   const binding = parseJson(bytes);
   if (
     !isExactObject(binding, BINDING_FIELDS) ||
-    binding.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V1" ||
+    binding.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V2" ||
     binding.artifactKind !== "journey-release-candidate-binding" ||
     !ORCHESTRATORS.has(binding.orchestrator) ||
     !matches(binding.tupleSha256, DIGEST) ||
     !matches(binding.deploymentRevision, REVISION) ||
     !matches(binding.environmentIdentity, ENVIRONMENT) ||
-    !matches(binding.handoffSha256, RAW_SHA256) ||
+    !matches(binding.descriptorSha256, RAW_SHA256) ||
     !matches(binding.serverRouteBundleDigest, DIGEST) ||
     !bytes.equals(Buffer.from(`${JSON.stringify(binding)}\n`))
   ) {
@@ -364,7 +364,7 @@ function admit({
     environmentIdentity: tuple.environmentIdentity,
     bindingSha256: sha256(bindingBytes),
     observationsSha256: sha256(observationsBytes),
-    handoffSha256: binding.handoffSha256,
+    descriptorSha256: binding.descriptorSha256,
     instanceCount: observations.instances.length,
     failureDomainCount: failureDomains.size,
     canaryEvidenceDigest: observations.canary.evidenceDigest,

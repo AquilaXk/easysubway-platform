@@ -16,6 +16,11 @@ x-journey-candidate-environment: &journey-candidate-environment
   EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: ${EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION:?set traffic generation}
 
 services:
+  backend:
+    environment:
+      <<: *journey-candidate-environment
+      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend
+
   backend-standby:
     profiles:
       - journey-candidate

@@ -47,12 +47,11 @@
     "data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "producerGitSha", "descriptorSha256", "handoffSha256", "serverRouteBundleDigest"],
+      "required": ["repository", "producerGitSha", "descriptorSha256", "serverRouteBundleDigest"],
       "properties": {
         "repository": { "type": "string", "const": "AquilaXk/easysubway-data" },
         "producerGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}(?![\\s\\S])" },
         "descriptorSha256": { "$ref": "#/$defs/rawDigest" },
-        "handoffSha256": { "$ref": "#/$defs/rawDigest" },
         "serverRouteBundleDigest": { "$ref": "#/$defs/prefixedDigest" }
       }
     },
@@ -69,9 +68,8 @@
     "policies": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bundleAcquisitionContractSha256", "lifecycleContractSha256", "activationReceiptSchemaSha256", "runtimeInputInventorySha256"],
+      "required": ["lifecycleContractSha256", "activationReceiptSchemaSha256", "runtimeInputInventorySha256"],
       "properties": {
-        "bundleAcquisitionContractSha256": { "$ref": "#/$defs/prefixedDigest" },
         "lifecycleContractSha256": { "$ref": "#/$defs/prefixedDigest" },
         "activationReceiptSchemaSha256": { "$ref": "#/$defs/prefixedDigest" },
         "runtimeInputInventorySha256": { "$ref": "#/$defs/prefixedDigest" }
