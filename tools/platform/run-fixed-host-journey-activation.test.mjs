@@ -52,7 +52,11 @@ function effects(events, failAt) {
     close: async () => events.push("lock.close"),
   };
   return {
-    acquireDeployLock: step("lock.acquire", lock),
+    acquireDeployLock: async () => {
+      events.push("lock.acquire");
+      if (failAt === "lock.acquire") throw new Error("injected lock acquisition");
+      return lock;
+    },
     verifyInputs: step("inputs.verify", undefined),
     startStandby: step("standby.start", {
       schemaVersion: "PLATFORM_JOURNEY_COMPOSE_CANDIDATE_RUNTIME_V1",
