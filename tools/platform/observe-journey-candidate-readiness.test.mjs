@@ -17,7 +17,7 @@ const NOW = new Date("2026-08-13T00:00:00.000Z");
 const SCRIPT = new URL("./observe-journey-candidate-readiness.mjs", import.meta.url);
 const TOKEN = "candidate-readiness-token-0123456789abcdef";
 
-test("one authenticated inactive candidate response normalizes into the admission contract", async () => {
+test("two authenticated inactive candidate responses normalize into the admission contract", async () => {
   const fixture = await createFixture();
   const calls = [];
   const responses = new Map(fixture.runtime.instances.map((instance, index) => [
@@ -37,6 +37,7 @@ test("one authenticated inactive candidate response normalizes into the admissio
 
   assert.deepEqual(calls.map(({ url }) => url), [
     "http://127.0.0.1:18081/internal/v1/journey/readiness/candidate",
+    "http://127.0.0.1:18082/internal/v1/journey/readiness/candidate",
   ]);
   for (const call of calls) {
     assert.equal(call.options.method, "GET");
@@ -53,6 +54,8 @@ test("one authenticated inactive candidate response normalizes into the admissio
   ]), [
     ["candidate-01", "oci-host-easysubway-a1", fixture.tuple.tupleSha256,
       `sha256:${candidateResponse(fixture.tuple, "candidate-01", 1).evidenceSha256}`],
+    ["candidate-02", "oci-host-easysubway-a2", fixture.tuple.tupleSha256,
+      `sha256:${candidateResponse(fixture.tuple, "candidate-02", 2).evidenceSha256}`],
   ]);
   assert.deepEqual(observations.canary, {
     passed: true,
@@ -70,8 +73,8 @@ test("one authenticated inactive candidate response normalizes into the admissio
     tuplePath: fixture.paths.tuplePath,
     observationsPath,
   });
-  assert.equal(admission.instanceCount, 1);
-  assert.equal(admission.failureDomainCount, 1);
+  assert.equal(admission.instanceCount, 2);
+  assert.equal(admission.failureDomainCount, 2);
   assert.equal(admission.tupleSha256, fixture.tuple.tupleSha256);
 });
 
@@ -110,7 +113,7 @@ test("HTTP, schema, identity, freshness and evidence failures are closed and bou
       (error) => error instanceof CandidateObservationError && error.code === code,
       name,
     );
-    assert.equal(attempts, 1, `${name} must make one bounded attempt for the inactive candidate`);
+    assert.equal(attempts, 2, `${name} must make one bounded attempt per inactive candidate`);
   }
 });
 
@@ -121,7 +124,42 @@ test("runtime, canary and secret validation fail before network", async () => {
     ["missing candidate", {
       runtime: {
         ...fixture.runtime,
-        instances: [],
+        instances: fixture.runtime.instances.slice(0, 1),
+      },
+    }, "CANDIDATE_OBSERVATION_RUNTIME"],
+    ["additional candidate", {
+      runtime: {
+        ...fixture.runtime,
+        instances: [
+          ...fixture.runtime.instances,
+          { ...fixture.runtime.instances[1], instanceIdentity: "candidate-03" },
+        ],
+      },
+    }, "CANDIDATE_OBSERVATION_RUNTIME"],
+    ["duplicate instance", {
+      runtime: {
+        ...fixture.runtime,
+        instances: fixture.runtime.instances.map((instance, index) => ({
+          ...instance,
+          instanceIdentity: index === 1 ? "candidate-01" : instance.instanceIdentity,
+        })),
+      },
+    }, "CANDIDATE_OBSERVATION_RUNTIME"],
+    ["duplicate failure domain", {
+      runtime: {
+        ...fixture.runtime,
+        instances: fixture.runtime.instances.map((instance, index) => ({
+          ...instance,
+          failureDomainIdentity: index === 1
+            ? "oci-host-easysubway-a1"
+            : instance.failureDomainIdentity,
+        })),
+      },
+    }, "CANDIDATE_OBSERVATION_RUNTIME"],
+    ["reordered candidates", {
+      runtime: {
+        ...fixture.runtime,
+        instances: fixture.runtime.instances.toReversed(),
       },
     }, "CANDIDATE_OBSERVATION_RUNTIME"],
     ["external HTTPS host", {
@@ -203,6 +241,7 @@ async function createFixture() {
     orchestrator: "COMPOSE",
     instances: [
       { instanceIdentity: "candidate-01", failureDomainIdentity: "oci-host-easysubway-a1", baseUrl: "http://127.0.0.1:18081" },
+      { instanceIdentity: "candidate-02", failureDomainIdentity: "oci-host-easysubway-a2", baseUrl: "http://127.0.0.1:18082" },
     ],
   };
   const canary = {
