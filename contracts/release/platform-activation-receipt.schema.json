@@ -14,6 +14,7 @@
     "activation",
     "termination",
     "cleanup",
+    "outcome",
     "fallbackZero",
     "evidence"
   ],
@@ -258,6 +259,10 @@
         "orphanedStandbyCount": { "type": "integer", "const": 0 },
         "evidenceDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" }
       }
+    },
+    "outcome": {
+      "type": "string",
+      "const": "ACTIVE_SERVING"
     },
     "fallbackZero": {
       "type": "object",

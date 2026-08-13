@@ -108,7 +108,7 @@ test("activation receipt closes the fixed-host activation and drain evidence", (
   const required = [
     "schemaVersion", "artifactKind", "orchestrator", "operation", "tuple",
     "bindings", "candidate", "activation", "termination", "cleanup",
-    "fallbackZero", "evidence",
+    "outcome", "fallbackZero", "evidence",
   ];
   assertClosed(receipt, required);
   assert.deepEqual(receipt.properties.schemaVersion, {
@@ -195,6 +195,11 @@ test("activation receipt closes the fixed-host activation and drain evidence", (
   assert.deepEqual(receipt.properties.cleanup.properties.standbyRemoved, { type: "boolean", const: true });
   assert.deepEqual(receipt.properties.cleanup.properties.orphanedStandbyCount, { type: "integer", const: 0 });
   assertDigest(receipt.properties.cleanup.properties.evidenceDigest);
+
+  assert.deepEqual(receipt.properties.outcome, {
+    type: "string",
+    const: "ACTIVE_SERVING",
+  });
 
   assertClosed(receipt.properties.fallbackZero, ["legacyGraphSuccessCount", "localRouteInvocationCount", "staleJourneyServedCount", "alternateEndpointSuccessCount"]);
   for (const name of Object.keys(receipt.properties.fallbackZero.properties)) {
