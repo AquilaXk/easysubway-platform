@@ -233,7 +233,11 @@ test("precommit failure cleans standby and never calls Nginx or canonical effect
   const events = [];
 
   await assert.rejects(
-    runFixedHostJourneyActivation(input(root), effects(events, "candidate.admit")),
+    runFixedHostJourneyActivation(
+      input(root),
+      effects(events, "candidate.admit"),
+      { failureNow: () => "2026-08-13T05:01:23.456Z" },
+    ),
     (error) => error instanceof FixedHostJourneyActivationError &&
       error.code === "FIXED_HOST_PRECOMMIT_FAILED",
   );
@@ -247,8 +251,21 @@ test("precommit failure cleans standby and never calls Nginx or canonical effect
     await readFile(path.join(root, "operation", "failed-operation.json"), "utf8"),
   );
   assert.equal(failure.phase, "FAILED_PRECOMMIT");
+  assert.equal(failure.failedAt, "2026-08-13T05:01:23.456Z");
+  assert.notEqual(failure.failedAt, input(root).generatedAt);
   assert.equal(failure.successReceiptCreated, false);
   assert.deepEqual(Object.values(failure.fallbackZero), [0, 0, 0, 0]);
+
+  const clockFailureRoot = await mkdtemp(path.join(tmpdir(), "fixed-host-clock-failure-"));
+  await assert.rejects(
+    runFixedHostJourneyActivation(
+      input(clockFailureRoot),
+      effects([], "candidate.admit"),
+      { failureNow: () => { throw new Error("clock failure"); } },
+    ),
+    (error) => error instanceof FixedHostJourneyActivationError &&
+      error.code === "FIXED_HOST_PRECOMMIT_FAILED",
+  );
 });
 
 test("post-switch failure leaves admitted standby serving and emits no success receipt", async () => {
@@ -485,9 +502,14 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
   ]);
   const commands = [];
   const probes = [];
+  let currentNs = 0n;
   const commandRunner = async (request) => {
     commands.push([request.command, ...request.args]);
+    if (request.command === "docker" && request.args.includes("stop")) {
+      currentNs = 29_000_000_000n;
+    }
     if (request.command === "docker" && request.args[0] === "inspect") {
+      currentNs = 40_000_000_000n;
       return {
         status: 0,
         signal: null,
@@ -523,10 +545,7 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
       close: async () => lockEvents.push(`close:${lockPath}`),
     }),
     nginxTargetProbe: async (request) => probes.push(request),
-    nowNs: (() => {
-      const values = [0n, 1_000_000_000n];
-      return () => values.shift() ?? 1_000_000_000n;
-    })(),
+    nowNs: () => currentNs,
   });
 
   const lock = await host.acquireDeployLock({
