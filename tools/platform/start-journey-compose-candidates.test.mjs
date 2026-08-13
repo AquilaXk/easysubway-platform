@@ -112,6 +112,35 @@ test("exact immutable inputs start only the existing inactive standby and emit o
   assert.equal(fixture.deployLockState.closeCount, 1);
 });
 
+test("an operation-owned callback retains the shared deploy lock and materialized Compose context through final cleanup", async () => {
+  const fixture = await createFixture();
+  const sequence = [];
+  const result = await startJourneyComposeCandidates({
+    ...fixture.input,
+    serviceToken: TOKEN,
+    currentPublicKeyPem: PUBLIC_KEY_PEM,
+    inspectDescriptor: fixture.inspectDescriptor,
+    withinOperation: async ({ runtime, inputIdentity, verify, composeContext }) => {
+      sequence.push("callback");
+      assert.equal(fixture.deployLockState.closeCount, 0);
+      assert.equal(inputIdentity.descriptorSha256, fixture.expected.descriptorDigest);
+      assert.equal(inputIdentity.candidateBindingSha256, fixture.expected.bindingDigest);
+      assert.equal(inputIdentity.descriptorBindingSha256, fixture.expected.descriptorBindingDigest);
+      assert.equal(composeContext.env.EASYSUBWAY_BACKEND_ENV_FILE.includes("easysubway-journey-candidate-env-"), true);
+      await verify();
+      sequence.push("verified");
+      return { runtime, held: true };
+    },
+    composeRunner: async (request) => {
+      sequence.push(request.args.includes("up") ? "start" : "probe");
+      return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    },
+  });
+  assert.deepEqual(sequence, ["probe", "start", "callback", "verified"]);
+  assert.equal(result.held, true);
+  assert.equal(fixture.deployLockState.closeCount, 1);
+});
+
 test("invalid identity, secret, key and existing runtime fail before candidate start", async () => {
   const defaults = await createFixture();
   await writeFile(defaults.input.composeEnvPath, "EASYSUBWAY_POSTGRES_DB=easysubway\n");
@@ -348,21 +377,23 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
   assert.ok(Date.now() - timeoutStartedAt < 1000);
 });
 
-test("candidate overlay reuses only base standby and keeps active traffic and secrets out", async () => {
+test("candidate overlay binds identical Journey inputs to canonical and standby with only instance identity differing", async () => {
   const overlay = await readFile(OVERLAY, "utf8");
   const baseCompose = await readFile(BASE_COMPOSE, "utf8");
   const deployScript = await readFile(DEPLOY_SCRIPT, "utf8");
   assert.match(overlay, /^x-journey-candidate-environment: &journey-candidate-environment/);
-  assert.match(overlay, /\nservices:\n  backend-standby:/);
-  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 1);
+  assert.match(overlay, /\nservices:\n  backend:\n/);
+  assert.match(overlay, /\n  backend-standby:/);
+  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 2);
   assert.equal((overlay.match(/profiles:\n      - journey-candidate/g) ?? []).length, 1);
+  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend\n/);
   assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby/);
   assert.match(baseCompose, /\n  backend-standby:/);
   assert.match(baseCompose, /EASYSUBWAY_BACKEND_STANDBY_PORT:-8082}:8080/);
   assert.match(deployScript, /LOCK_FILE="\$\{DEPLOY_ROOT\}\/deploy\.lock"/);
   for (const forbidden of [
     "backend-journey-candidate-a", "backend-journey-candidate-b", "18081", "18082",
-    "route-v2-gateway", "nginx", "KUBERNETES", "\n  backend:",
+    "route-v2-gateway", "nginx", "KUBERNETES",
   ]) {
     assert.equal(overlay.includes(forbidden), false, forbidden);
   }
@@ -443,6 +474,11 @@ async function createFixture() {
   ]);
   return {
     root,
+    expected: {
+      descriptorDigest: `sha256:${sha256(descriptorBytes)}`,
+      bindingDigest: `sha256:${sha256(`${JSON.stringify(binding)}\n`)}`,
+      descriptorBindingDigest: `sha256:${sha256(`${JSON.stringify(descriptorBinding)}\n`)}`,
+    },
     tuple,
     binding,
     descriptor,

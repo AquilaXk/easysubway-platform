@@ -88,6 +88,7 @@ export async function startJourneyComposeCandidates({
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
   deployLockRunner = acquireSharedDeployLock,
+  withinOperation,
 }) {
   validateInvocation({
     bindingPath,
@@ -105,6 +106,7 @@ export async function startJourneyComposeCandidates({
     inspectDescriptor,
     composeRunner,
     deployLockRunner,
+    withinOperation,
   });
 
   const deployLock = await openSharedDeployLock(
@@ -211,7 +213,28 @@ export async function startJourneyComposeCandidates({
       throw failure("CANDIDATE_START_COMPOSE");
     }
 
-    return candidateRuntime();
+    const runtime = candidateRuntime();
+    if (withinOperation === undefined) return runtime;
+    return withinOperation({
+      runtime,
+      inputIdentity: Object.freeze({
+        descriptorSha256: sha256Reference(descriptorInput.bytes),
+        candidateBindingSha256: sha256Reference(bindingInput.bytes),
+        descriptorBindingSha256: sha256Reference(descriptorBindingInput.bytes),
+      }),
+      verify: async () => {
+        await deployLock.verify();
+        // The source inputs remain open and identity-checked through the
+        // callback. The materialized copies are already private, sealed, and
+        // owned by this operation until the surrounding finally block.
+        await verifyInputs(inputs);
+      },
+      composeContext: Object.freeze({
+        prefix: Object.freeze([...prefix]),
+        env: Object.freeze({ ...env }),
+        composeRunner,
+      }),
+    });
   } finally {
     await executionEnvironment?.close();
     for (const input of inputs.reverse()) await input.close();
@@ -241,6 +264,7 @@ function validateInvocation(values) {
     typeof values.inspectDescriptor !== "function" ||
     typeof values.composeRunner !== "function" ||
     typeof values.deployLockRunner !== "function" ||
+    (values.withinOperation !== undefined && typeof values.withinOperation !== "function") ||
     values.ambientEnvironment === null ||
     typeof values.ambientEnvironment !== "object" ||
     Array.isArray(values.ambientEnvironment)
