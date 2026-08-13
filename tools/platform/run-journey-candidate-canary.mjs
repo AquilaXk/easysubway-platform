@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { constants, realpathSync } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  CandidateAdmissionError,
+  openStableCandidateAdmissionInput,
+} from "./admit-journey-release-candidate.mjs";
 import {
   CandidateBindingError,
   validateJourneyReleaseTupleBytes,
 } from "./bind-journey-release-candidate.mjs";
 
-const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 5000;
 const CANARY_PATH = "/internal/v1/journey/canary";
@@ -32,6 +34,19 @@ const RESPONSE_FIELDS = Object.freeze([
 const ZERO_COUNTER_FIELDS = Object.freeze([
   "legacyGraphSuccessCount", "localRouteInvocationCount",
   "staleJourneyServedCount", "alternateEndpointSuccessCount",
+]);
+const CLI_OPTIONS = new Map([
+  ["--tuple", "tuplePath"],
+  ["--base-url", "baseUrl"],
+  ["--candidate-generation", "candidateGeneration"],
+  ["--canary-request-identity", "canaryRequestIdentity"],
+  ["--request-id", "requestId"],
+  ["--origin-station-id", "originStationId"],
+  ["--destination-station-id", "destinationStationId"],
+  ["--mobility-profile", "mobilityProfile"],
+  ["--constraint-mode", "constraintMode"],
+  ["--max-transfers", "maxTransfers"],
+  ["--alternative-count", "alternativeCount"],
 ]);
 const ERROR_MESSAGES = Object.freeze({
   JOURNEY_CANARY_USAGE: "expected exact Journey candidate canary arguments",
@@ -111,7 +126,7 @@ export async function runJourneyCandidateCanary({
       fetchImpl,
       now,
     });
-    await input.verify();
+    await verifyTupleInput(input);
     return {
       schemaVersion: "PLATFORM_JOURNEY_CANDIDATE_CANARY_V1",
       artifactKind: "journey-candidate-canary",
@@ -154,17 +169,17 @@ function validateInvocation(values) {
   ) {
     throw failure("JOURNEY_CANARY_USAGE", 2);
   }
-  if (
-    typeof values.serviceToken !== "string" ||
-    values.serviceToken.length < 32 ||
-    values.serviceToken.length > 512 ||
-    [...values.serviceToken].some((character) => {
-      const codePoint = character.codePointAt(0);
-      return codePoint < 0x21 || codePoint >= 0x7f;
-    })
-  ) {
+  if (!validServiceToken(values.serviceToken)) {
     throw failure("JOURNEY_CANARY_SECRET", 2);
   }
+}
+
+function validServiceToken(value) {
+  return typeof value === "string" && value.length >= 32 && value.length <= 512 &&
+    [...value].every((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint >= 0x21 && codePoint < 0x7f;
+    });
 }
 
 function validBaseUrl(value) {
@@ -209,54 +224,27 @@ function hasWellFormedUtf16(value) {
 }
 
 async function openTupleInput(path) {
-  const absolutePath = resolve(path);
-  let handle;
   try {
-    handle = await open(
-      absolutePath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const identity = await handle.stat({ bigint: true });
-    if (!identity.isFile() || identity.size < 1n || identity.size > BigInt(MAX_INPUT_BYTES)) {
-      throw failure("JOURNEY_CANARY_INPUT", 2);
-    }
-    const bytes = await handle.readFile();
-    if (BigInt(bytes.length) !== identity.size) {
-      throw failure("JOURNEY_CANARY_INPUT_UNSTABLE");
-    }
-    await requireStableInput(handle, absolutePath, identity);
-    return {
-      bytes,
-      verify: () => requireStableInput(handle, absolutePath, identity),
-      close: () => handle.close().catch(() => {}),
-    };
+    return await openStableCandidateAdmissionInput(path);
   } catch (error) {
-    await handle?.close().catch(() => {});
-    if (error instanceof JourneyCandidateCanaryAdapterError) throw error;
-    throw failure("JOURNEY_CANARY_INPUT", 2);
+    throw translateInputError(error);
   }
 }
 
-async function requireStableInput(handle, path, expected) {
-  let descriptor;
-  let entry;
+async function verifyTupleInput(input) {
   try {
-    descriptor = await handle.stat({ bigint: true });
-    entry = await lstat(path, { bigint: true });
-  } catch {
-    throw failure("JOURNEY_CANARY_INPUT_UNSTABLE");
-  }
-  if (
-    !descriptor.isFile() || !entry.isFile() || entry.isSymbolicLink() ||
-    !sameIdentity(expected, descriptor) || !sameIdentity(expected, entry)
-  ) {
-    throw failure("JOURNEY_CANARY_INPUT_UNSTABLE");
+    await input.verify();
+  } catch (error) {
+    throw translateInputError(error);
   }
 }
 
-function sameIdentity(left, right) {
-  return ["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"]
-    .every((field) => left[field] === right[field]);
+function translateInputError(error) {
+  if (!(error instanceof CandidateAdmissionError)) return error;
+  const code = error.code === "CANDIDATE_ADMISSION_INPUT_UNSTABLE"
+    ? "JOURNEY_CANARY_INPUT_UNSTABLE"
+    : "JOURNEY_CANARY_INPUT";
+  return failure(code, error.exitCode);
 }
 
 function validateTuple(bytes) {
@@ -422,12 +410,11 @@ function validInstant(value) {
   const parsed = Date.parse(value);
   if (!match || !Number.isFinite(parsed)) return false;
   const instant = new Date(parsed);
-  return instant.getUTCFullYear() === Number(match[1]) &&
-    instant.getUTCMonth() + 1 === Number(match[2]) &&
-    instant.getUTCDate() === Number(match[3]) &&
-    instant.getUTCHours() === Number(match[4]) &&
-    instant.getUTCMinutes() === Number(match[5]) &&
-    instant.getUTCSeconds() === Number(match[6]);
+  const actual = [
+    instant.getUTCFullYear(), instant.getUTCMonth() + 1, instant.getUTCDate(),
+    instant.getUTCHours(), instant.getUTCMinutes(), instant.getUTCSeconds(),
+  ];
+  return actual.every((part, index) => part === Number(match[index + 1]));
 }
 
 function currentTime(now) {
@@ -465,34 +452,22 @@ function failure(code, exitCode = 1) {
 }
 
 function parseCliArguments(args) {
-  if (args.length !== 22) throw failure("JOURNEY_CANARY_USAGE", 2);
-  const expected = new Set([
-    "--tuple", "--base-url", "--candidate-generation",
-    "--canary-request-identity", "--request-id", "--origin-station-id",
-    "--destination-station-id", "--mobility-profile", "--constraint-mode",
-    "--max-transfers", "--alternative-count",
-  ]);
-  const values = new Map();
+  if (args.length !== CLI_OPTIONS.size * 2) throw failure("JOURNEY_CANARY_USAGE", 2);
+  const values = Object.create(null);
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
-    if (!expected.has(flag) || values.has(flag) || !isNonemptyString(value) || value.startsWith("--")) {
+    const name = CLI_OPTIONS.get(flag);
+    if (!name || Object.hasOwn(values, name) || !isNonemptyString(value) || value.startsWith("--")) {
       throw failure("JOURNEY_CANARY_USAGE", 2);
     }
-    values.set(flag, value);
+    values[name] = value;
   }
   return {
-    tuplePath: values.get("--tuple"),
-    baseUrl: values.get("--base-url"),
-    candidateGeneration: parseCanonicalInteger(values.get("--candidate-generation"), 1),
-    canaryRequestIdentity: values.get("--canary-request-identity"),
-    requestId: values.get("--request-id"),
-    originStationId: values.get("--origin-station-id"),
-    destinationStationId: values.get("--destination-station-id"),
-    mobilityProfile: values.get("--mobility-profile"),
-    constraintMode: values.get("--constraint-mode"),
-    maxTransfers: parseCanonicalInteger(values.get("--max-transfers"), 0),
-    alternativeCount: parseCanonicalInteger(values.get("--alternative-count"), 1),
+    ...values,
+    candidateGeneration: parseCanonicalInteger(values.candidateGeneration, 1),
+    maxTransfers: parseCanonicalInteger(values.maxTransfers, 0),
+    alternativeCount: parseCanonicalInteger(values.alternativeCount, 1),
   };
 }
 
@@ -506,31 +481,34 @@ function parseCanonicalInteger(value, minimum) {
   return result;
 }
 
-async function main() {
-  const input = parseCliArguments(process.argv.slice(2));
+async function runCli(args, environment) {
+  const input = parseCliArguments(args);
   const result = await runJourneyCandidateCanary({
     ...input,
-    serviceToken: process.env.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN,
+    serviceToken: environment.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN,
   });
-  process.stdout.write(formatJourneyCandidateCanary(result));
+  return formatJourneyCandidateCanary(result);
 }
 
-if (samePhysicalFile(fileURLToPath(import.meta.url), process.argv[1])) {
-  main().catch((error) => {
+if (isEntryPoint(process.argv[1])) {
+  runCli(process.argv.slice(2), process.env).then(
+    (output) => process.stdout.write(output),
+    (error) => {
     const canaryError = error instanceof JourneyCandidateCanaryAdapterError
       ? error
       : failure("JOURNEY_CANARY_INPUT_UNSTABLE");
     process.stderr.write(`${canaryError.code} ${canaryError.message}\n`);
     process.exitCode = canaryError.exitCode;
-  });
+    },
+  );
 }
 
-function samePhysicalFile(modulePath, entry) {
+function isEntryPoint(entry) {
   if (!entry) return false;
-  const entryPath = resolve(entry);
   try {
-    return realpathSync(modulePath) === realpathSync(entryPath);
+    const moduleUrl = pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+    return moduleUrl === pathToFileURL(realpathSync(resolve(entry))).href;
   } catch {
-    return modulePath === entryPath;
+    return false;
   }
 }
