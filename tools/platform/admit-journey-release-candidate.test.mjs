@@ -36,7 +36,7 @@ afterEach(() => {
   }
 });
 
-test("admits one canonical inactive-candidate exact-tuple observation set", async () => {
+test("admits one canonical exact-two inactive-candidate observation set", async () => {
   const fixture = writeFixture();
   const before = fixture.contents();
   const result = await admitJourneyReleaseCandidate(fixture.paths);
@@ -52,7 +52,23 @@ test("admits one canonical inactive-candidate exact-tuple observation set", asyn
 test("rejects missing or additional candidate instances", async () => {
   const mutations = [
     (value) => value.instances.pop(),
-    (value) => { value.instances.push({ ...value.instances[0] }); },
+    (value) => {
+      value.instances.push(validInstance(
+        validTuple(),
+        "candidate-03",
+        "oci-host-easysubway-a3",
+        "3",
+      ));
+    },
+    (value) => { value.instances[1].instanceIdentity = value.instances[0].instanceIdentity; },
+    (value) => {
+      value.instances[1].failureDomainIdentity = value.instances[0].failureDomainIdentity;
+    },
+    (value) => {
+      value.instances[1].readinessEvidenceDigest =
+        value.instances[0].readinessEvidenceDigest;
+    },
+    (value) => { value.instances.reverse(); },
   ];
 
   for (const mutate of mutations) {
@@ -70,8 +86,8 @@ test("rejects binding, tuple, orchestrator, and every-instance identity mismatch
     { mutateObservations: (value) => { value.bindingSha256 = digest("f"); } },
     { mutateObservations: (value) => { value.orchestrator = "KUBERNETES"; } },
     { mutateObservations: (value) => { value.tupleSha256 = digest("f"); } },
-    { mutateObservations: (value) => { value.instances[0].backendConfigDigest = digest("f"); } },
-    { mutateObservations: (value) => { value.instances[0].deploymentRevision = "f".repeat(40); } },
+    { mutateObservations: (value) => { value.instances[1].backendConfigDigest = digest("f"); } },
+    { mutateObservations: (value) => { value.instances[1].deploymentRevision = "f".repeat(40); } },
   ];
 
   for (const options of cases) {
@@ -85,8 +101,8 @@ test("rejects binding, tuple, orchestrator, and every-instance identity mismatch
 
 test("rejects any unwarmed or unready instance and any failed or fallback canary", async () => {
   const notReady = [
-    (value) => { value.instances[0].warmed = false; },
-    (value) => { value.instances[0].ready = false; },
+    (value) => { value.instances[1].warmed = false; },
+    (value) => { value.instances[1].ready = false; },
   ];
   for (const mutateObservations of notReady) {
     const fixture = writeFixture({ mutateObservations });
@@ -291,6 +307,7 @@ function validObservations(tuple, bindingBytes) {
     tupleSha256: tuple.tupleSha256,
     instances: [
       validInstance(tuple, "candidate-01", "oci-host-easysubway-a1", "1"),
+      validInstance(tuple, "candidate-02", "oci-host-easysubway-a2", "2"),
     ],
     canary: {
       passed: true,
