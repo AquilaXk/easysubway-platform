@@ -7,39 +7,27 @@ const schemaUrl = new URL("../../contracts/release/platform-journey-release-life
 const workflowUrl = new URL("../../.github/workflows/ci.yml", import.meta.url);
 const ciCommand = "node --test tools/platform/platform-journey-release-lifecycle-contract.test.mjs";
 
-const tupleIdentityFields = [
-  "backendImageDigest",
-  "backendConfigDigest",
-  "journeyContractDigest",
-  "serverRouteBundleDigest",
-  "deploymentRevision",
-  "environmentIdentity",
-];
-
-const candidateStates = [
+const states = [
   "ABSENT",
-  "ALLOCATED",
   "INPUTS_VALIDATED",
-  "INSTANCES_STARTED",
-  "ALL_INSTANCES_WARMED",
+  "STANDBY_STARTED",
+  "STANDBY_READY",
   "CANARY_PASSED",
   "READY_TO_ACTIVATE",
-  "ACTIVE_PENDING_CONVERGENCE",
+  "STANDBY_ACTIVE",
+  "TRAFFIC_ON_STANDBY",
+  "CANONICAL_DRAINING",
+  "CANONICAL_RECREATED",
+  "CANONICAL_ACTIVE",
+  "TRAFFIC_ON_CANONICAL",
+  "STANDBY_REMOVED",
   "ACTIVE_SERVING",
   "FAILED_PRECOMMIT",
-  "FAILED_POSTCOMMIT",
+  "FAILED_POSTSWITCH",
 ];
 
-const successTransitions = [
-  ["ABSENT", "ALLOCATED"],
-  ["ALLOCATED", "INPUTS_VALIDATED"],
-  ["INPUTS_VALIDATED", "INSTANCES_STARTED"],
-  ["INSTANCES_STARTED", "ALL_INSTANCES_WARMED"],
-  ["ALL_INSTANCES_WARMED", "CANARY_PASSED"],
-  ["CANARY_PASSED", "READY_TO_ACTIVATE"],
-  ["READY_TO_ACTIVATE", "ACTIVE_PENDING_CONVERGENCE"],
-  ["ACTIVE_PENDING_CONVERGENCE", "ACTIVE_SERVING"],
-];
+const transitions = states.slice(0, 14).slice(0, -1)
+  .map((state, index) => [state, states[index + 1]]);
 
 test("contract and schema are canonical JSON with one trailing LF", () => {
   for (const url of [contractUrl, schemaUrl]) {
@@ -51,22 +39,13 @@ test("contract and schema are canonical JSON with one trailing LF", () => {
   }
 });
 
-test("closed schema accepts only the exact lifecycle contract", () => {
+test("closed schema accepts only the exact fixed-host lifecycle contract", () => {
   const contract = readJson(contractUrl);
   const schema = readJson(schemaUrl);
   const required = [
-    "schemaVersion",
-    "artifactKind",
-    "issueRef",
-    "consumedContracts",
-    "sourceFreeInput",
-    "orchestratorBinding",
-    "candidate",
-    "activeState",
-    "activation",
-    "recoveryDeployment",
-    "failure",
-    "receipts",
+    "schemaVersion", "artifactKind", "issueRef", "consumedContracts",
+    "sourceFreeInput", "orchestratorBinding", "candidate", "activeState",
+    "activation", "recoveryDeployment", "failure", "receipts",
   ];
 
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -75,22 +54,19 @@ test("closed schema accepts only the exact lifecycle contract", () => {
   assertMatchesSchema(contract, schema);
 
   const driftCases = [
-    (value) => { value.issueRef.issueNumber = 17; },
-    (value) => { value.sourceFreeInput.sourceTreeReadCount = 1; },
-    (value) => { value.orchestratorBinding.failureSelectsAlternate = true; },
-    (value) => { value.candidate.minimumInstanceCount = 2; },
+    (value) => { value.issueRef.issueNumber = 77; },
+    (value) => { value.sourceFreeInput.hubCheckoutReadCount = 1; },
+    (value) => { value.orchestratorBinding.configured = "KUBERNETES"; },
+    (value) => { value.orchestratorBinding.lockCoverage = "STANDBY_START_ONLY"; },
     (value) => { value.candidate.maximumInstanceCount = 2; },
+    (value) => { value.candidate.roles.standby.port = 8080; },
     (value) => { value.candidate.stateMachine.successTransitions.reverse(); },
     (value) => { value.activeState.commitLinearizationPointCount = 2; },
-    (value) => { value.activeState.requiredServingEqualityFields.pop(); },
-    (value) => { value.activation.genericRollingMixedExposureCount = 1; },
-    (value) => { value.activation.priorActivePool.identity = "NEW_ACTIVE_POOL"; },
-    (value) => { value.activation.modes.FIRST_ACTIVATION.drainRequired = true; },
-    (value) => { value.activation.priorActivePool.failedPostCommitRecovery.automaticStartCount = 1; },
-    (value) => { value.recoveryDeployment.implicitPreviousSelectionCount = 1; },
-    (value) => { value.recoveryDeployment.approvalReceipt = "OPTIONAL"; },
-    (value) => { value.failure.preCommitVisibleStateMutation.active = 1; },
-    (value) => { value.failure.postCommitFailure.successClaim = 1; },
+    (value) => { value.activation.canonical.stopGracePeriodSeconds = 31; },
+    (value) => { value.activation.nginxSwitches[0].toPort = 8080; },
+    (value) => { value.failure.preCommitVisibleStateMutation.nginx = 1; },
+    (value) => { value.failure.postSwitchFailure.degradedSuccessCount = 1; },
+    (value) => { value.receipts.successReceiptAfter = "TRAFFIC_ON_STANDBY"; },
     (value) => { value.unknown = true; },
   ];
   for (const mutate of driftCases) {
@@ -100,7 +76,7 @@ test("closed schema accepts only the exact lifecycle contract", () => {
   }
 });
 
-test("source-free inputs and orchestrator binding forbid substitution", () => {
+test("source-free inputs and one inherited COMPOSE deploy lock forbid substitution", () => {
   const contract = readJson(contractUrl);
   assert.deepEqual(contract.consumedContracts, {
     journeyReleaseTuple: {
@@ -114,21 +90,21 @@ test("source-free inputs and orchestrator binding forbid substitution", () => {
     },
     activationReceiptFoundation: {
       path: "contracts/release/platform-activation-receipt.schema.json",
-      schemaVersion: "PLATFORM_ACTIVATION_RECEIPT_V1",
-      disposition: "FOUNDATION_REQUIRES_FUTURE_RUNTIME_BINDING",
+      schemaVersion: "PLATFORM_ACTIVATION_RECEIPT_V2",
+      disposition: "FIXED_HOST_RUNTIME_BINDING_REQUIRED_BY_77",
     },
     semanticOwnership: "BACKEND_AND_PLAN_JOURNEY",
   });
   assert.deepEqual(contract.sourceFreeInput, {
     allowedInputs: [
+      "IMMUTABLE_DEPLOYMENT_INPUT_ENVELOPE",
+      "IMMUTABLE_DATA_PUBLICATION_DESCRIPTOR",
       "IMMUTABLE_RELEASE_TUPLE",
-      "IMMUTABLE_BACKEND_IMAGE",
-      "IMMUTABLE_CONFIG_OBJECT",
-      "IMMUTABLE_JOURNEY_CONTRACT_OBJECT",
-      "IMMUTABLE_ACQUIRED_SERVER_ROUTE_BUNDLE_OBJECT_SET",
+      "IMMUTABLE_CANDIDATE_BINDING",
+      "IMMUTABLE_DESCRIPTOR_BINDING",
+      "IMMUTABLE_CANDIDATE_ADMISSION",
       "IMMUTABLE_EVIDENCE_REFERENCES",
     ],
-    releaseTupleIdentityFields: tupleIdentityFields,
     sourceTreeReadCount: 0,
     hubCheckoutReadCount: 0,
     rawMainReadCount: 0,
@@ -137,232 +113,159 @@ test("source-free inputs and orchestrator binding forbid substitution", () => {
     localDurableTruthCount: 0,
   });
   assert.deepEqual(contract.orchestratorBinding, {
-    contractMappings: ["COMPOSE", "KUBERNETES"],
-    selection: "EXACTLY_ONE_PER_OPERATION",
+    configured: "COMPOSE",
+    configuredCount: 1,
+    alternateSelectionCount: 0,
     mutableDuringOperation: false,
     failureSelectsAlternate: false,
-    implementationIncluded: false,
+    sharedDeployLock: "${DEPLOY_ROOT}/deploy.lock",
+    lockCoverage: "STANDBY_START_THROUGH_FINAL_CLEANUP_AND_RECEIPT",
   });
 });
 
-test("candidate state machine and active commit keep mixed traffic at zero", () => {
+test("state machine commits only at the first Nginx switch and returns to fixed canonical", () => {
   const contract = readJson(contractUrl);
   assert.deepEqual(contract.candidate, {
-    ownership: "TASK_OWNED_IMMUTABLE",
-    productionTrafficBeforeActiveServing: 0,
+    ownership: "OPERATION_OWNED_IMMUTABLE",
+    hostCount: 1,
+    realFailureDomainCount: 1,
     minimumInstanceCount: 1,
     maximumInstanceCount: 1,
-    distinctFailureDomainsRequired: false,
-    requiredSteps: [
-      "VALIDATE_EXACT_RELEASE_TUPLE",
-      "START_EVERY_TARGET_INSTANCE",
-      "LOAD_COMPILE_AND_BOUNDED_WARM",
-      "RUN_REQUIRED_CANARIES",
-      "REQUIRE_EVERY_INSTANCE_IDENTITY_AND_READINESS",
-      "RECORD_IMMUTABLE_CANDIDATE_RECEIPT",
+    productionTrafficBeforeCommit: 0,
+    roles: {
+      canonical: { service: "backend", host: "127.0.0.1", port: 8080, transient: false },
+      standby: { service: "backend-standby", host: "127.0.0.1", port: 8082, transient: true },
+    },
+    exactIdentityFields: [
+      "tupleSha256", "backendImageDigest", "backendConfigDigest",
+      "journeyContractDigest", "serverRouteBundleDigest",
+      "deploymentRevision", "environmentIdentity", "candidateGeneration",
     ],
-    exactIdentityFields: ["tupleSha256", ...tupleIdentityFields],
+    requiredPreCommitEvidence: [
+      "CANDIDATE_READINESS", "CANDIDATE_CANARY", "CANDIDATE_ADMISSION",
+      "STANDBY_ACTIVATION", "STANDBY_ACTIVE_READINESS",
+    ],
     stateMachine: {
-      states: candidateStates,
-      successTransitions,
-      preCommitStates: candidateStates.slice(0, 7),
+      states,
+      successTransitions: transitions,
+      preCommitStates: states.slice(0, 7),
+      commitTransition: ["STANDBY_ACTIVE", "TRAFFIC_ON_STANDBY"],
       preCommitFailureTarget: "FAILED_PRECOMMIT",
-      postCommitFailureTarget: "FAILED_POSTCOMMIT",
+      postCommitFailureTarget: "FAILED_POSTSWITCH",
     },
   });
   assert.deepEqual(contract.activeState, {
-    classification: "ATOMIC_GLOBAL_PLATFORM_STATE",
-    activePointerCount: 1,
-    commit: "COMPARE_AND_SET_POINTER_AND_TRAFFIC_GENERATION",
-    trafficGeneration: "STRICTLY_INCREASING_INTEGER",
+    classification: "HOST_NGINX_TARGET",
+    persistentSlotRegistryCount: 0,
+    commit: "ATOMIC_NGINX_SWITCH_TO_127_0_0_1_8082",
     commitLinearizationPointCount: 1,
-    commitPrecondition: "READY_TO_ACTIVATE",
-    postCommitState: "ACTIVE_PENDING_CONVERGENCE",
-    servingState: "ACTIVE_SERVING",
-    trafficAdmission: "ONLY_ACTIVE_SERVING_WITH_ALL_IDENTITIES_EQUAL",
-    requiredServingEqualityFields: ["tupleSha256", "trafficGeneration"],
-    candidateTrafficCount: 0,
+    commitPrecondition: "STANDBY_ACTIVE",
+    trafficGeneration: "STRICTLY_INCREASING_INTEGER",
+    postCommitState: "TRAFFIC_ON_STANDBY",
+    steadyState: "ACTIVE_SERVING",
+    steadyStateTarget: "127.0.0.1:8080",
     mixedUnknownOrUnreadyTrafficCount: 0,
     localDurableTruthCount: 0,
   });
+});
+
+test("activation binds standby, two Nginx switches and canonical 30-second drain", () => {
+  const contract = readJson(contractUrl);
   assert.deepEqual(contract.activation, {
-    modes: {
-      FIRST_ACTIVATION: {
-        requiredPreviousActiveState: "ABSENT",
-        previousActiveIdentityRequired: false,
-        drainRequired: false,
-      },
-      REPLACEMENT_ACTIVATION: {
-        requiredPreviousActiveState: "PRESENT_EXACT_TUPLE_AND_GENERATION",
-        previousActiveIdentityRequired: true,
-        drainRequired: true,
-      },
+    standby: {
+      activationAttemptCount: 1,
+      endpoint: "/internal/v1/journey/activation",
+      activeReadinessRequired: true,
+      beforeFirstTrafficSwitch: true,
     },
-    commonPostCommitSteps: [
-      "REQUERY_EVERY_SERVING_INSTANCE",
-      "REQUIRE_EXACT_ACTIVE_IDENTITY_EQUALITY",
-      "OPEN_JOURNEY_TRAFFIC",
+    nginxSwitches: [
+      { fromPort: 8080, toPort: 8082, nginxTestRequired: true, reloadRequired: true },
+      { fromPort: 8082, toPort: 8080, nginxTestRequired: true, reloadRequired: true },
     ],
-    modePostCommitSteps: {
-      FIRST_ACTIVATION: ["RECORD_IMMUTABLE_ACTIVATION_RECEIPT"],
-      REPLACEMENT_ACTIVATION: [
-        "MARK_OLD_POOL_NOT_READY",
-        "DRAIN_OLD_POOL",
-        "RECORD_IMMUTABLE_ACTIVATION_RECEIPT",
-      ],
+    canonical: {
+      signal: "SIGTERM",
+      stopGracePeriodSeconds: 30,
+      newRequestAdmissionAfterSignal: 0,
+      inFlightSnapshot: "PINNED_TO_REQUEST_START_RELEASE_TUPLE",
+      inFlightCompletionRequired: true,
+      recreateWithAdmittedBytes: true,
+      activationAttemptCount: 1,
+      activeReadinessConvergenceRequired: true,
     },
-    successRequiresByMode: {
-      FIRST_ACTIVATION: ["POST_COMMIT_CONVERGENCE", "SUCCESS_RECEIPT_STORED"],
-      REPLACEMENT_ACTIVATION: ["POST_COMMIT_CONVERGENCE", "OLD_POOL_DRAINED", "SUCCESS_RECEIPT_STORED"],
-    },
+    successRequires: [
+      "CANONICAL_ACTIVE_READINESS_EQUALITY",
+      "NGINX_SWITCHBACK_TO_8080",
+      "STANDBY_REMOVED",
+      "SUCCESS_RECEIPT_STORED",
+    ],
     genericRollingMixedExposureCount: 0,
-    oldPoolReadinessAfterConvergence: "DOWN",
-    inFlightSnapshot: "PINNED_TO_REQUEST_START_RELEASE_TUPLE",
-    drainFailureOutcome: "FAILED_POSTCOMMIT_WITH_JOURNEY_TRAFFIC_ZERO",
     implicitReversalCount: 0,
-    priorActivePool: {
-      identity: "PREVIOUS_ACTIVE_POINTER_TUPLE_AND_GENERATION",
-      drainStartsAfter: "NEW_ACTIVE_POST_COMMIT_CONVERGENCE",
-      states: ["ACTIVE_SERVING", "NOT_READY", "DRAINING", "DRAINED", "FAILED_POSTCOMMIT"],
-      successTransitions: [
-        ["ACTIVE_SERVING", "NOT_READY"],
-        ["NOT_READY", "DRAINING"],
-        ["DRAINING", "DRAINED"],
-      ],
-      drainFailureTarget: "FAILED_POSTCOMMIT",
-      failedPostCommitRecovery: {
-        operationKind: "RECOVERY_DEPLOYMENT",
-        requiresOperatorApprovalReceipt: true,
-        requiredStartingState: "FAILED_POSTCOMMIT",
-        requiredPointerIdentity: "EXACT_CURRENT_POINTER_TUPLE_AND_GENERATION",
-        successTransitions: [
-          ["FAILED_POSTCOMMIT", "NOT_READY"],
-          ["NOT_READY", "DRAINING"],
-          ["DRAINING", "DRAINED"],
-        ],
-        journeyTrafficDuringCleanup: 0,
-        automaticStartCount: 0,
-        implicitPreviousSelectionCount: 0,
-        cleanupReceiptRequired: true,
-      },
-    },
+  });
+  assert.deepEqual(contract.recoveryDeployment, {
+    ownerIssueNumber: 17,
+    includedInCurrentRuntime: false,
+    automaticStartCount: 0,
+    implicitPreviousSelectionCount: 0,
+    olderTargetTrialCount: 0,
+    requiredTarget: "OPERATOR_SELECTED_CURRENT_VALID_IMMUTABLE_RELEASE_TUPLE",
+    repeatsFixedHostLifecycle: true,
   });
 });
 
-test("recovery and failure contracts require explicit targets and zero alternates", () => {
+test("failure and receipts keep admitted-standby failure distinct from success", () => {
   const contract = readJson(contractUrl);
-  assert.deepEqual(contract.recoveryDeployment, {
-    operationKind: "RECOVERY_DEPLOYMENT",
-    trigger: "EXPLICIT_OPERATOR_APPROVAL",
-    operationIdentity: "NEW_UNIQUE_OPERATION_ID",
-    approvalReceipt: "IMMUTABLE_OPERATOR_APPROVAL_RECEIPT_DIGEST",
-    cause: "REQUIRED_SANITIZED_NON_EMPTY_CAUSE",
-    exactTargetCount: 1,
-    targetSelection: "OPERATOR_SELECTED_IMMUTABLE_RELEASE_TUPLE",
-    currentValidationFields: [
-      "SIGNATURE_AND_CURRENT_KEY",
-      "FRESHNESS",
-      "SCHEMA_AND_STATION_SET",
-      "CONTRACT_IMAGE_AND_CONFIG_COMPATIBILITY",
-      "EVERY_INSTANCE_WARMUP_IDENTITY_AND_READINESS",
-    ],
-    repeatsLifecycle: true,
-    currentValidationResult: "IMMUTABLE_CURRENT_VALIDATION_RESULT_DIGEST",
-    receiptBinding: "APPROVAL_CAUSE_TARGET_VALIDATION_AND_OUTCOME",
-    automaticStartAfterFailureCount: 0,
-    implicitPreviousSelectionCount: 0,
-    olderTargetTrialCount: 0,
-    invalidTargetMutation: { active: 0, trafficGeneration: 0, traffic: 0 },
-  });
   assert.deepEqual(contract.failure, {
     result: "TYPED_NONZERO",
     codes: [
-      "OPERATION_INPUT_INVALID",
-      "SOURCE_FREE_INPUT_POLICY_VIOLATION",
-      "CANDIDATE_OWNERSHIP_VIOLATION",
-      "INSTANCE_COUNT_OR_FAILURE_DOMAIN_INVALID",
-      "VALIDATION_OR_WARMUP_FAILED",
-      "INSTANCE_IDENTITY_MISMATCH",
-      "CANARY_FAILED",
-      "ACTIVE_COMPARE_AND_SET_CONFLICT",
-      "POST_COMMIT_CONVERGENCE_FAILED",
-      "OLD_POOL_DRAIN_FAILED",
-      "RECOVERY_APPROVAL_OR_TARGET_INVALID",
+      "OPERATION_INPUT_INVALID", "SOURCE_FREE_INPUT_POLICY_VIOLATION",
+      "DEPLOY_LOCK_UNAVAILABLE", "STANDBY_START_OR_READINESS_FAILED",
+      "CANARY_OR_ADMISSION_FAILED", "STANDBY_ACTIVATION_FAILED",
+      "NGINX_STANDBY_SWITCH_FAILED", "CANONICAL_DRAIN_FAILED",
+      "CANONICAL_RECREATE_OR_ACTIVATION_FAILED",
+      "NGINX_CANONICAL_SWITCHBACK_FAILED", "STANDBY_CLEANUP_FAILED",
       "EVIDENCE_INVALID",
     ],
-    preCommitVisibleStateMutation: { candidate: 0, active: 0, trafficGeneration: 0, traffic: 0 },
-    postCommitFailure: {
-      journeyTraffic: 0,
+    preCommitVisibleStateMutation: {
+      canonical: 0, nginx: 0, trafficTarget: 0, trafficGeneration: 0,
+      candidateCleanupRequired: true,
+    },
+    postSwitchFailure: {
+      exactAdmittedStandbyMayRemainServing: true,
       successClaim: 0,
       goContribution: 0,
       successReceipt: 0,
-      automaticAlternateActivation: 0,
+      degradedSuccessCount: 0,
+      automaticPreviousSelectionCount: 0,
+      automaticAlternateActivationCount: 0,
     },
     forbiddenSuccessSources: [
-      "SOURCE_TREE",
-      "HUB_OR_RAW_MAIN",
-      "MUTABLE_LOCATOR",
-      "PREVIOUS_ARTIFACT_CONFIG_OR_IMAGE",
-      "ROUTE_V2_OR_LEGACY",
-      "ALTERNATE_ORCHESTRATOR",
-      "CROSS_RC_EVIDENCE",
+      "SOURCE_TREE", "HUB_OR_RAW_MAIN", "MUTABLE_LOCATOR",
+      "PREVIOUS_ARTIFACT_CONFIG_OR_IMAGE", "ROUTE_V2_OR_LEGACY",
+      "ALTERNATE_ORCHESTRATOR", "CACHED_OR_LOCAL_ARTIFACT",
     ],
-    counters: {
-      currentFailureToAlternateSuccessCount: 0,
-      previousTargetSelectedAfterFailureCount: 0,
-      orchestratorFallbackCount: 0,
-      crossRcEvidenceCount: 0,
-    },
   });
   assert.deepEqual(contract.receipts, {
     immutableNoOverwrite: true,
-    requiredKinds: ["CANDIDATE", "ACTIVATION", "RECOVERY_DEPLOYMENT", "FAILED_OPERATION"],
-    commonIdentityFields: [
-      "operationId",
-      "operationKind",
-      "selectedOrchestrator",
-      "tupleSha256",
-      "expectedTrafficGeneration",
-      "resultingTrafficGeneration",
-      "outcome",
-      "evidenceDigests",
-    ],
-    activationModeIdentityFields: {
-      FIRST_ACTIVATION: {
-        previousActivePointerState: "ABSENT",
-        requiredFields: [],
-      },
-      REPLACEMENT_ACTIVATION: {
-        previousActivePointerState: "PRESENT",
-        requiredFields: ["previousActiveTupleSha256", "previousTrafficGeneration"],
-      },
-    },
-    recoveryDeploymentIdentityFields: [
-      "operatorApprovalReceiptDigest",
-      "recoveryCause",
-      "selectedTargetTupleSha256",
-      "currentValidationResultDigest",
+    requiredKinds: ["CANDIDATE", "ACTIVATION", "FAILED_OPERATION"],
+    activationIdentityFields: [
+      "operationId", "dataDescriptorSha256", "tupleSha256",
+      "candidateBindingSha256", "descriptorBindingSha256",
+      "candidateAdmissionSha256", "candidateGeneration", "trafficGeneration",
+      "standbyActiveReadinessEvidenceDigest", "standbyNginxSwitchEvidenceDigest",
+      "canonicalDrainEvidenceDigest", "canonicalActiveReadinessEvidenceDigest",
+      "canonicalNginxSwitchEvidenceDigest", "standbyRemovalEvidenceDigest",
       "outcome",
     ],
-    successReceiptAfterByMode: {
-      FIRST_ACTIVATION: "POST_COMMIT_CONVERGENCE",
-      REPLACEMENT_ACTIVATION: "POST_COMMIT_CONVERGENCE_AND_OLD_POOL_DRAIN",
-    },
+    successReceiptAfter: "ACTIVE_SERVING_AND_STANDBY_REMOVED",
     failedOperationReceiptRequired: true,
     sanitizedEvidenceDigestsOnly: true,
   });
 
   const serialized = JSON.stringify(contract);
-  for (const permissive of [
-    "WARN_AND_CONTINUE",
-    "BEST_EFFORT",
-    "SELECT_PREVIOUS",
-    "AUTO_RECOVERY",
-    "FALLBACK_TO_HUB",
-    "ALLOW_MIXED_TRAFFIC",
-  ]) {
-    assert.equal(serialized.includes(permissive), false, permissive);
-  }
+  for (const forbidden of [
+    "COMPARE_AND_SET_POINTER", "KUBERNETES", "SELECT_PREVIOUS",
+    "AUTO_RECOVERY", "FALLBACK_TO_HUB", "ALLOW_MIXED_TRAFFIC",
+  ]) assert.equal(serialized.includes(forbidden), false, forbidden);
 });
 
 test("Platform CI runs the exact focused lifecycle test in jobs.platform", () => {
