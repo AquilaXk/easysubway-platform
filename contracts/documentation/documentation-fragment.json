@@ -147,7 +147,7 @@
       "lastVerifiedIdentity": "git:fbd1e8c0608a897d57c8906765940286a93268be:README.md:fae58d1b2d0ff4ef3efde475f7cb2f37e8a001ee",
       "verificationMethod": "owner-review",
       "verificationEvidence": [
-        "https://github.com/AquilaXk/easysubway-platform/issues/1"
+        "https://github.com/AquilaXk/easysubway-platform/pull/4"
       ],
       "nextReviewAtOrSemanticExpiry": null,
       "implementationPlan": "PLAN-DOC",
@@ -198,7 +198,7 @@
       "lastVerifiedIdentity": "git:fbd1e8c0608a897d57c8906765940286a93268be:contracts/release/journey-release-tuple.schema.json:fb84864cf3a834f08ff7348405e7e5363bc67891",
       "verificationMethod": "contract-test",
       "verificationEvidence": [
-        "https://github.com/AquilaXk/easysubway-platform/issues/17"
+        "https://github.com/AquilaXk/easysubway-platform/pull/38"
       ],
       "nextReviewAtOrSemanticExpiry": null,
       "implementationPlan": "PLAN-JOURNEY",
