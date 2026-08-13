@@ -243,26 +243,38 @@ async function requestActivation({
   } catch {
     throw failure("JOURNEY_ACTIVATION_NETWORK");
   }
-  if (response?.status !== 200) throw failure("JOURNEY_ACTIVATION_HTTP");
-  if (
-    !response.headers?.get("content-type")?.toLowerCase().startsWith("application/json") ||
-    !response.headers?.get("cache-control")?.toLowerCase().split(",")
-      .map((value) => value.trim()).includes("no-store")
-  ) {
-    throw failure("JOURNEY_ACTIVATION_HTTP");
-  }
-  let bytes;
-  try {
-    bytes = await readBoundedResponse(response);
-  } catch {
-    throw failure("JOURNEY_ACTIVATION_RESPONSE");
-  }
-  if (bytes.length < 2 || bytes.length > MAX_RESPONSE_BYTES) {
-    throw failure("JOURNEY_ACTIVATION_RESPONSE");
-  }
+  requireActivationHttpContract(response);
+  const bytes = await readActivationResponse(response);
   const active = parseJson(bytes, "JOURNEY_ACTIVATION_RESPONSE", 1);
   validateActiveReadiness(active, admission, instanceIdentity, command, observedAt);
   return active;
+}
+
+function requireActivationHttpContract(response) {
+  const contentType = response?.headers?.get("content-type")?.toLowerCase() ?? "";
+  const cacheDirectives = new Set(
+    (response?.headers?.get("cache-control") ?? "")
+      .toLowerCase()
+      .split(",")
+      .map((value) => value.trim()),
+  );
+  if (response?.status !== 200 || !contentType.startsWith("application/json") ||
+      !cacheDirectives.has("no-store")) {
+    throw failure("JOURNEY_ACTIVATION_HTTP");
+  }
+}
+
+async function readActivationResponse(response) {
+  try {
+    const bytes = await readBoundedResponse(response);
+    if (bytes.length < 2 || bytes.length > MAX_RESPONSE_BYTES) {
+      throw failure("JOURNEY_ACTIVATION_RESPONSE");
+    }
+    return bytes;
+  } catch (error) {
+    if (error instanceof JourneyBackendActivationError) throw error;
+    throw failure("JOURNEY_ACTIVATION_RESPONSE");
+  }
 }
 
 async function readBoundedResponse(response) {
