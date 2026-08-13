@@ -1,0 +1,53 @@
+x-journey-candidate-common: &journey-candidate-common
+  profiles:
+    - journey-candidate
+  image: ${EASYSUBWAY_BACKEND_IMAGE:?set exact immutable backend image}
+  restart: "no"
+  stop_grace_period: 30s
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,noexec
+    - /opt/easysubway/logs:rw,nosuid,nodev,noexec
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  env_file:
+    - ${EASYSUBWAY_BACKEND_ENV_FILE:?set backend env file}
+
+x-journey-candidate-environment: &journey-candidate-environment
+  SPRING_PROFILES_ACTIVE: prod
+  EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
+  EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
+  EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false"
+  EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_DESCRIPTOR_BASE64: ${EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_DESCRIPTOR_BASE64:?set descriptor bytes}
+  EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_ACTIVATION_REQUEST_IDENTITY: ${EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_ACTIVATION_REQUEST_IDENTITY:?set activation identity}
+  EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_TRUSTED_RAW_DESCRIPTOR_BASE_URL: ${EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_TRUSTED_RAW_DESCRIPTOR_BASE_URL:?set descriptor base URL}
+  EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_KEY_ID: ${EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_KEY_ID:?set current key ID}
+  EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM: ${EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM:?set current public key}
+  EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN: ${EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN:?set readiness token}
+  EASYSUBWAY_JOURNEY_V3_READINESS_RELEASE_TUPLE_SHA256: ${EASYSUBWAY_JOURNEY_V3_READINESS_RELEASE_TUPLE_SHA256:?set tuple digest}
+  EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST: ${EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST:?set backend image digest}
+  EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_CONFIG_SHA256: ${EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_CONFIG_SHA256:?set backend config digest}
+  EASYSUBWAY_JOURNEY_V3_READINESS_JOURNEY_CONTRACT_SHA256: ${EASYSUBWAY_JOURNEY_V3_READINESS_JOURNEY_CONTRACT_SHA256:?set Journey contract digest}
+  EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: ${EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION:?set traffic generation}
+
+services:
+  backend-journey-candidate-a:
+    <<: *journey-candidate-common
+    container_name: easysubway-backend-journey-candidate-a
+    environment:
+      <<: *journey-candidate-environment
+      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-01
+    ports:
+      - "127.0.0.1:18081:8080"
+
+  backend-journey-candidate-b:
+    <<: *journey-candidate-common
+    container_name: easysubway-backend-journey-candidate-b
+    environment:
+      <<: *journey-candidate-environment
+      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-02
+    ports:
+      - "127.0.0.1:18082:8080"
