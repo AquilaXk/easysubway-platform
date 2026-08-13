@@ -104,45 +104,103 @@ test("tupleSha256 uses exact ordered UTF-8 LF-delimited identity bytes", () => {
   assert.equal(tupleSha256(values), "sha256:341ae0aa029d74f164efc0f1bb9290c50ec60c8e45680a99dc5972a5db338f0a");
 });
 
-test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evidence shapes", () => {
+test("activation receipt closes the fixed-host activation and drain evidence", () => {
   const required = [
-    "schemaVersion", "artifactKind", "orchestrator", "tuple", "candidate", "activation", "termination", "fallbackZero", "evidence",
+    "schemaVersion", "artifactKind", "orchestrator", "operation", "tuple",
+    "bindings", "candidate", "activation", "termination", "cleanup",
+    "outcome", "fallbackZero", "evidence",
   ];
   assertClosed(receipt, required);
-  assert.equal(receipt.properties.schemaVersion.type, "string");
-  assert.equal(receipt.properties.schemaVersion.const, "PLATFORM_ACTIVATION_RECEIPT_V1");
-  assert.equal(receipt.properties.artifactKind.type, "string");
-  assert.equal(receipt.properties.artifactKind.const, "platform-activation-receipt");
-  assert.equal(receipt.properties.orchestrator.type, "string");
-  assert.deepEqual(receipt.properties.orchestrator.enum, ["COMPOSE", "KUBERNETES"]);
+  assert.deepEqual(receipt.properties.schemaVersion, {
+    type: "string",
+    const: "PLATFORM_ACTIVATION_RECEIPT_V2",
+  });
+  assert.deepEqual(receipt.properties.artifactKind, {
+    type: "string",
+    const: "platform-activation-receipt",
+  });
+  assert.deepEqual(receipt.properties.orchestrator, {
+    type: "string",
+    const: "COMPOSE",
+  });
+
+  assertClosed(receipt.properties.operation, [
+    "operationId", "hostIdentity", "deployLockPath", "deployLockEvidenceDigest",
+  ]);
+  assert.deepEqual(receipt.properties.operation.properties.operationId, {
+    type: "string",
+    pattern: `^[A-Za-z0-9._:-]{1,255}${absoluteEnd}`,
+  });
+  assert.deepEqual(receipt.properties.operation.properties.hostIdentity, {
+    type: "string",
+    const: "oci-host-easysubway-a1",
+  });
+  assert.deepEqual(receipt.properties.operation.properties.deployLockPath, {
+    type: "string",
+    const: "${DEPLOY_ROOT}/deploy.lock",
+  });
+  assertDigest(receipt.properties.operation.properties.deployLockEvidenceDigest);
+
   assert.equal(receipt.properties.tuple.$ref, "journey-release-tuple.schema.json");
-  assertClosed(receipt.properties.candidate, ["instanceCount", "spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"]);
-  assert.deepEqual(receipt.properties.candidate.properties.instanceCount, {
-    type: "integer",
-    const: 1,
-  });
-  assert.deepEqual(receipt.properties.candidate.properties.spansMultipleFailureDomains, {
-    type: "boolean",
-    const: false,
-  });
+  assertClosed(receipt.properties.bindings, [
+    "dataDescriptorSha256", "tupleSha256", "candidateBindingSha256",
+    "descriptorBindingSha256", "candidateAdmissionSha256",
+  ]);
+  for (const property of Object.values(receipt.properties.bindings.properties)) assertDigest(property);
+
+  assertClosed(receipt.properties.candidate, [
+    "instanceCount", "failureDomainCount", "instanceIdentity", "failureDomainIdentity",
+    "baseUrl", "candidateGeneration", "allReady", "allInstancesMatchTuple",
+    "canaryPassed", "canaryEvidenceDigest", "standbyActiveReadinessEvidenceDigest",
+  ]);
+  assert.deepEqual(receipt.properties.candidate.properties.instanceCount, { type: "integer", const: 1 });
+  assert.deepEqual(receipt.properties.candidate.properties.failureDomainCount, { type: "integer", const: 1 });
+  assert.deepEqual(receipt.properties.candidate.properties.instanceIdentity, { type: "string", const: "backend-standby" });
+  assert.deepEqual(receipt.properties.candidate.properties.failureDomainIdentity, { type: "string", const: "oci-host-easysubway-a1" });
+  assert.deepEqual(receipt.properties.candidate.properties.baseUrl, { type: "string", const: "http://127.0.0.1:8082" });
+  assert.deepEqual(receipt.properties.candidate.properties.candidateGeneration, { type: "integer", minimum: 1 });
   for (const name of ["allReady", "allInstancesMatchTuple", "canaryPassed"]) {
-    assert.equal(receipt.properties.candidate.properties[name].type, "boolean");
-    assert.equal(receipt.properties.candidate.properties[name].const, true);
+    assert.deepEqual(receipt.properties.candidate.properties[name], { type: "boolean", const: true });
   }
-  assertClosed(receipt.properties.activation, ["trafficGeneration", "trafficSwitchAtomic", "oldPoolDrained"]);
-  assert.equal(receipt.properties.activation.properties.trafficGeneration.type, "integer");
-  assert.equal(receipt.properties.activation.properties.trafficGeneration.minimum, 1);
-  for (const name of ["trafficSwitchAtomic", "oldPoolDrained"]) {
-    assert.equal(receipt.properties.activation.properties[name].type, "boolean");
-    assert.equal(receipt.properties.activation.properties[name].const, true);
+  for (const name of ["canaryEvidenceDigest", "standbyActiveReadinessEvidenceDigest"]) {
+    assertDigest(receipt.properties.candidate.properties[name]);
   }
-  assertClosed(receipt.properties.termination, ["withinBudget", "droppedJourneyCount", "duplicateJourneyCount"]);
-  assert.equal(receipt.properties.termination.properties.withinBudget.type, "boolean");
-  assert.equal(receipt.properties.termination.properties.withinBudget.const, true);
+
+  assertClosed(receipt.properties.activation, [
+    "trafficGeneration", "standbySwitch", "canonicalActiveReadinessEvidenceDigest", "canonicalSwitch",
+  ]);
+  assert.deepEqual(receipt.properties.activation.properties.trafficGeneration, { type: "integer", minimum: 1 });
+  assertSwitch(receipt.properties.activation.properties.standbySwitch, 8080, 8082);
+  assertDigest(receipt.properties.activation.properties.canonicalActiveReadinessEvidenceDigest);
+  assertSwitch(receipt.properties.activation.properties.canonicalSwitch, 8082, 8080);
+
+  assertClosed(receipt.properties.termination, [
+    "signal", "stopGracePeriodSeconds", "newRequestAdmissionAfterSignal",
+    "inFlightSnapshotPinned", "inFlightCompleted", "oldProcessExited",
+    "withinBudget", "droppedJourneyCount", "duplicateJourneyCount", "evidenceDigest",
+  ]);
+  const termination = receipt.properties.termination.properties;
+  assert.deepEqual(termination.signal, { type: "string", const: "SIGTERM" });
+  assert.deepEqual(termination.stopGracePeriodSeconds, { type: "integer", const: 30 });
+  assert.deepEqual(termination.newRequestAdmissionAfterSignal, { type: "integer", const: 0 });
+  for (const name of ["inFlightSnapshotPinned", "inFlightCompleted", "oldProcessExited", "withinBudget"]) {
+    assert.deepEqual(termination[name], { type: "boolean", const: true });
+  }
   for (const name of ["droppedJourneyCount", "duplicateJourneyCount"]) {
-    assert.equal(receipt.properties.termination.properties[name].type, "integer");
-    assert.equal(receipt.properties.termination.properties[name].const, 0);
+    assert.deepEqual(termination[name], { type: "integer", const: 0 });
   }
+  assertDigest(termination.evidenceDigest);
+
+  assertClosed(receipt.properties.cleanup, ["standbyRemoved", "orphanedStandbyCount", "evidenceDigest"]);
+  assert.deepEqual(receipt.properties.cleanup.properties.standbyRemoved, { type: "boolean", const: true });
+  assert.deepEqual(receipt.properties.cleanup.properties.orphanedStandbyCount, { type: "integer", const: 0 });
+  assertDigest(receipt.properties.cleanup.properties.evidenceDigest);
+
+  assert.deepEqual(receipt.properties.outcome, {
+    type: "string",
+    const: "ACTIVE_SERVING",
+  });
+
   assertClosed(receipt.properties.fallbackZero, ["legacyGraphSuccessCount", "localRouteInvocationCount", "staleJourneyServedCount", "alternateEndpointSuccessCount"]);
   for (const name of Object.keys(receipt.properties.fallbackZero.properties)) {
     assert.equal(receipt.properties.fallbackZero.properties[name].type, "integer");
@@ -169,6 +227,13 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
     ...["backendImageDigest", "backendConfigDigest", "journeyContractDigest", "serverRouteBundleDigest"].map((name) => [tuple.properties[name].pattern, `sha256:${"a".repeat(64)}`]),
     [tuple.properties.deploymentRevision.pattern, "a".repeat(40)],
     [tuple.properties.environmentIdentity.pattern, "production"],
+    [receipt.properties.operation.properties.operationId.pattern, "release:2026.08.13"],
+    [receipt.properties.operation.properties.deployLockEvidenceDigest.pattern, `sha256:${"a".repeat(64)}`],
+    [receipt.properties.bindings.properties.candidateAdmissionSha256.pattern, `sha256:${"b".repeat(64)}`],
+    [receipt.properties.candidate.properties.canaryEvidenceDigest.pattern, `sha256:${"c".repeat(64)}`],
+    [receipt.properties.activation.properties.standbySwitch.properties.evidenceDigest.pattern, `sha256:${"d".repeat(64)}`],
+    [receipt.properties.termination.properties.evidenceDigest.pattern, `sha256:${"e".repeat(64)}`],
+    [receipt.properties.cleanup.properties.evidenceDigest.pattern, `sha256:${"f".repeat(64)}`],
     [receipt.properties.evidence.properties.generatedAt.pattern, "2026-08-04T22:30:00+09:00"],
     [receipt.properties.evidence.properties.runUrl.pattern, "https://github.com/AquilaXk/easysubway-platform/actions/runs/123"],
   ];
@@ -179,6 +244,26 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
     }
   }
 });
+
+function assertDigest(property) {
+  assert.deepEqual(property, {
+    type: "string",
+    pattern: digestPattern,
+  });
+}
+
+function assertSwitch(schema, fromPort, toPort) {
+  assertClosed(schema, [
+    "fromPort", "toPort", "nginxConfigSha256", "nginxTestPassed",
+    "reloadCompleted", "evidenceDigest",
+  ]);
+  assert.deepEqual(schema.properties.fromPort, { type: "integer", const: fromPort });
+  assert.deepEqual(schema.properties.toPort, { type: "integer", const: toPort });
+  assertDigest(schema.properties.nginxConfigSha256);
+  assert.deepEqual(schema.properties.nginxTestPassed, { type: "boolean", const: true });
+  assert.deepEqual(schema.properties.reloadCompleted, { type: "boolean", const: true });
+  assertDigest(schema.properties.evidenceDigest);
+}
 
 function assertClosed(schema, required) {
   assert.equal(schema.type, "object");

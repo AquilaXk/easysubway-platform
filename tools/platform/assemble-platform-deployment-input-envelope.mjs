@@ -352,9 +352,9 @@ function validatePolicies(acquisition, lifecycle, activationSchema, runtimeInven
     !isObject(acquisition.producer) ||
     acquisition.producer.repository !== DATA_REPOSITORY ||
     !matchesString(acquisition.producer.gitSha, REVISION) ||
-    lifecycle.schemaVersion !== "PLATFORM_JOURNEY_RELEASE_LIFECYCLE_CONTRACT_V1" ||
+    lifecycle.schemaVersion !== "PLATFORM_JOURNEY_RELEASE_LIFECYCLE_CONTRACT_V2" ||
     lifecycle.artifactKind !== "platform-journey-release-lifecycle-contract" ||
-    activationSchema.properties?.schemaVersion?.const !== "PLATFORM_ACTIVATION_RECEIPT_V1" ||
+    activationSchema.properties?.schemaVersion?.const !== "PLATFORM_ACTIVATION_RECEIPT_V2" ||
     activationSchema.properties?.artifactKind?.const !== "platform-activation-receipt" ||
     runtimeInventory.schemaVersion !== 1 ||
     runtimeInventory.artifactKind !== "platform-deployment-runtime-input-inventory-v1" ||

@@ -98,6 +98,29 @@ test("exact producer identities assemble one closed canonical COMPOSE envelope",
   assert.equal(parsed.envelopeSha256, digest(Buffer.from(`${JSON.stringify(preimage, null, 2)}\n`)));
 });
 
+test("deployment envelope rejects the old lifecycle and activation receipt V1 pair", async (t) => {
+  const fixture = await createFixture(t);
+  const directory = await mkdtemp(join(tmpdir(), "platform-envelope-policy-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lifecycleContractPath = join(directory, "lifecycle.json");
+  const activationReceiptSchemaPath = join(directory, "activation-receipt.schema.json");
+  const lifecycle = JSON.parse(await readFile(fixture.input.lifecycleContractPath, "utf8"));
+  const activationSchema = JSON.parse(await readFile(fixture.input.activationReceiptSchemaPath, "utf8"));
+  lifecycle.schemaVersion = "PLATFORM_JOURNEY_RELEASE_LIFECYCLE_CONTRACT_V1";
+  activationSchema.properties.schemaVersion.const = "PLATFORM_ACTIVATION_RECEIPT_V1";
+  await writePretty(lifecycleContractPath, lifecycle);
+  await writePretty(activationReceiptSchemaPath, activationSchema);
+
+  await assert.rejects(
+    assemblePlatformDeploymentInputEnvelope({
+      ...fixture.input,
+      lifecycleContractPath,
+      activationReceiptSchemaPath,
+    }),
+    matchesError("DEPLOYMENT_ENVELOPE_INPUT_INVALID", 2),
+  );
+});
+
 test("approval receipt is bound to the exact Platform revision", async (t) => {
   const fixture = await createFixture(t);
   const receipt = JSON.parse(await readFile(fixture.input.admissionReceiptPath, "utf8"));
