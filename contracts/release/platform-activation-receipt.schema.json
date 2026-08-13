@@ -24,8 +24,8 @@
       "additionalProperties": false,
       "required": ["instanceCount", "spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"],
       "properties": {
-        "instanceCount": { "type": "integer", "minimum": 1 },
-        "spansMultipleFailureDomains": { "type": "boolean" },
+        "instanceCount": { "type": "integer", "const": 1 },
+        "spansMultipleFailureDomains": { "type": "boolean", "const": false },
         "allReady": { "type": "boolean", "const": true },
         "allInstancesMatchTuple": { "type": "boolean", "const": true },
         "canaryPassed": { "type": "boolean", "const": true }
