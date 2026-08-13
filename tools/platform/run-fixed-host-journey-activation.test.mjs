@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import {
   createFixedHostOperations,
   parseFixedHostJourneyActivationCli,
   runFixedHostJourneyActivation,
+  writeActivationReceiptForTest,
 } from "./run-fixed-host-journey-activation.mjs";
 
 const DIGEST = (character) => `sha256:${character.repeat(64)}`;
@@ -70,7 +71,7 @@ test("runs the exact fixed-host order once and stores only the final immutable s
       }; },
       destroy() {},
     }),
-    fetchImpl: async () => { hostCalls.push("post-signal"); throw new Error("connection refused"); },
+    postSignalJourneyImpl: async () => { hostCalls.push("post-signal"); return { kind: "PRE_CONNECT_REFUSED" }; },
   } });
   const composeContext = { prefix: ["compose"], env: {}, composeRunner: async ({ args }) => {
     hostCalls.push(args.slice(-4).join(" "));
@@ -109,6 +110,7 @@ test("runs the exact fixed-host order once and stores only the final immutable s
   assert.equal(receipt.outcome, "ACTIVE_SERVING");
   assert.equal(receipt.candidate.instanceIdentity, "backend-standby");
   assert.equal(receipt.activation.trafficGeneration, 19);
+  assert.equal(receipt.bindings.dataDescriptorSha256, DIGEST("a"));
   assert.equal(fixture.lease.verifyCount, 12);
   assert.deepEqual(JSON.parse(await readFile(fixture.input.receiptPath, "utf8")), receipt);
   assert.equal(JSON.stringify(receipt).includes(fixture.secret), false);
@@ -117,15 +119,23 @@ test("runs the exact fixed-host order once and stores only the final immutable s
 test("pre-commit failure cleans only the operation-owned standby and makes no visible mutation or success receipt", async () => {
   const fixture = await createFixture();
   const calls = [];
+  let leaseOpen = true;
   await assert.rejects(
     runFixedHostJourneyActivation({
       ...fixture.input,
-      startCandidates: async ({ withinOperation }) => withinOperation(fixture.lease),
+      startCandidates: async ({ withinOperation }) => {
+        try { return await withinOperation(fixture.lease); }
+        finally { leaseOpen = false; }
+      },
       runCanary: async () => { throw new Error(fixture.secret); },
       observeReadiness: async () => { throw new Error("not reached"); },
       admitCandidate: async () => { throw new Error("not reached"); },
       activateBackend: async () => { throw new Error("not reached"); },
-      operations: operations(calls),
+      operations: operations(calls, { removeStandby: async () => {
+        assert.equal(leaseOpen, true);
+        calls.push("remove");
+        return { evidenceDigest: DIGEST("9") };
+      } }),
     }),
     (error) => error instanceof FixedHostJourneyActivationError &&
       error.code === "CANARY_OR_ADMISSION_FAILED" && !error.message.includes(fixture.secret),
@@ -194,6 +204,47 @@ test("receipt existence, lease drift, and drain identity mismatch fail closed wi
     }),
     (error) => error instanceof FixedHostJourneyActivationError && error.code === "CANONICAL_DRAIN_FAILED",
   );
+
+  const probe = {
+    inFlightRequest: journeyRequest("01K2H7Q5B7E3T19N8J4M6P0R2V"),
+    afterSignalRequest: journeyRequest("01K2H7Q5B7E3T19N8J4M6P0R2W"),
+  };
+  const ambiguousOperations = createFixedHostOperations({ drainProbe: probe, host: {
+    now: (() => { let value = 1000; return () => value += 10; })(),
+    openInFlightJourneyImpl: async () => ({
+      async finish() { return {
+        status: 200, headers: { "content-type": "application/json", "cache-control": "private, no-store" },
+        body: Buffer.from(JSON.stringify({ requestId: probe.inFlightRequest.requestId })),
+      }; },
+      destroy() {},
+    }),
+    postSignalJourneyImpl: async () => { throw new Error("timeout after connect"); },
+  } });
+  await assert.rejects(
+    ambiguousOperations.drainCanonical({
+      tuple,
+      sessionToken: "same_rc_journey_session_token_0123456789",
+      composeContext: { prefix: [], env: {}, composeRunner: async () => ({ status: 0, signal: null, timedOut: false }) },
+    }),
+    (error) => error instanceof FixedHostJourneyActivationError && error.code === "CANONICAL_DRAIN_FAILED",
+  );
+
+  const receiptRoot = await mkdtemp(join(tmpdir(), "fixed-host-receipt-"));
+  const atomicReceiptPath = join(receiptRoot, "activation.json");
+  await assert.rejects(
+    writeActivationReceiptForTest(atomicReceiptPath, { outcome: "ACTIVE_SERVING" }, {
+      beforePublish: async () => { throw new Error("interrupted"); },
+    }),
+    (error) => error instanceof FixedHostJourneyActivationError && error.code === "EVIDENCE_INVALID",
+  );
+  assert.deepEqual(await readdir(receiptRoot), []);
+  await writeFile(atomicReceiptPath, "existing\n");
+  await assert.rejects(
+    writeActivationReceiptForTest(atomicReceiptPath, { outcome: "ACTIVE_SERVING" }),
+    (error) => error instanceof FixedHostJourneyActivationError && error.code === "EVIDENCE_INVALID",
+  );
+  assert.equal(await readFile(atomicReceiptPath, "utf8"), "existing\n");
+  assert.deepEqual(await readdir(receiptRoot), ["activation.json"]);
 });
 
 async function createFixture() {
@@ -201,7 +252,7 @@ async function createFixture() {
   const lease = {
     verifyCount: 0,
     inputIdentity: {
-      descriptorSha256: "sha256:" + "a".repeat(64),
+      descriptorSha256: "sha256:" + "b".repeat(64),
       candidateBindingSha256: DIGEST("2"),
       descriptorBindingSha256: DIGEST("3"),
     },
@@ -218,7 +269,8 @@ async function createFixture() {
     input: {
       operationId: "journey-activation-103", trafficGeneration: 19,
       receiptPath: join(root, "activation-receipt.json"),
-      tuple, descriptorSha256: "a".repeat(64), candidateBindingSha256: DIGEST("2"),
+      tuple, descriptorSha256: "a".repeat(64), descriptorBytesSha256: "b".repeat(64),
+      candidateBindingSha256: DIGEST("2"),
       descriptorBindingSha256: DIGEST("3"), serviceToken: secret,
       journeySessionToken: "same_rc_journey_session_token_0123456789",
       currentPublicKeyPem: "not-rendered", runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/123",

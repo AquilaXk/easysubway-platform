@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { access, chmod, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, link, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -58,88 +58,91 @@ export async function runFixedHostJourneyActivation(input) {
   validateInvocation(input);
   await requireAbsentReceipt(input.receiptPath);
   let committed = false;
-  let operationEntered = false;
-  let operationComposeContext;
   try {
     return await input.startCandidates({
       ...input.candidateStartInput,
       serviceToken: input.serviceToken,
       currentPublicKeyPem: input.currentPublicKeyPem,
       withinOperation: async (lease) => {
-        operationEntered = true;
         requireLease(lease);
-        requireInputIdentity(lease.inputIdentity, input);
-        operationComposeContext = lease.composeContext;
-        await verifyLease(lease);
+        try {
+          requireInputIdentity(lease.inputIdentity, input);
+          await verifyLease(lease);
 
-        const runtime = requireRuntime(lease.runtime);
-        const canary = await guarded(lease, "CANARY_OR_ADMISSION_FAILED", () =>
-          input.runCanary({
-            tuple: input.tuple,
-            baseUrl: runtime.baseUrl,
-            trafficGeneration: input.trafficGeneration,
-            serviceToken: input.serviceToken,
-          }));
-        requireCanary(canary, input.tuple);
+          const runtime = requireRuntime(lease.runtime);
+          const canary = await guarded(lease, "CANARY_OR_ADMISSION_FAILED", () =>
+            input.runCanary({
+              tuple: input.tuple,
+              baseUrl: runtime.baseUrl,
+              trafficGeneration: input.trafficGeneration,
+              serviceToken: input.serviceToken,
+            }));
+          requireCanary(canary, input.tuple);
 
-        const observations = await guarded(lease, "STANDBY_START_OR_READINESS_FAILED", () =>
-          input.observeReadiness({ runtime, canary, serviceToken: input.serviceToken }));
-        requireObservations(observations, runtime, canary);
+          const observations = await guarded(lease, "STANDBY_START_OR_READINESS_FAILED", () =>
+            input.observeReadiness({ runtime, canary, serviceToken: input.serviceToken }));
+          requireObservations(observations, runtime, canary);
 
-        const admitted = await guarded(lease, "CANARY_OR_ADMISSION_FAILED", () =>
-          input.admitCandidate({ observations, tuple: input.tuple }));
-        requireAdmission(admitted, input.tuple);
+          const admitted = await guarded(lease, "CANARY_OR_ADMISSION_FAILED", () =>
+            input.admitCandidate({ observations, tuple: input.tuple }));
+          requireAdmission(admitted, input.tuple);
 
-        const standbyActivation = await guarded(lease, "STANDBY_ACTIVATION_FAILED", () =>
-          input.activateBackend({
-            admission: admitted, baseUrl: runtime.baseUrl, instanceIdentity: "backend-standby",
-            activationRequestIdentity: `${input.operationId}:standby`,
-            trafficGeneration: input.trafficGeneration, serviceToken: input.serviceToken,
-          }));
-        requireActivation(standbyActivation, admitted, "backend-standby", input.trafficGeneration);
+          const standbyActivation = await guarded(lease, "STANDBY_ACTIVATION_FAILED", () =>
+            input.activateBackend({
+              admission: admitted, baseUrl: runtime.baseUrl, instanceIdentity: "backend-standby",
+              activationRequestIdentity: `${input.operationId}:standby`,
+              trafficGeneration: input.trafficGeneration, serviceToken: input.serviceToken,
+            }));
+          requireActivation(standbyActivation, admitted, "backend-standby", input.trafficGeneration);
 
-        const standbySwitch = await guarded(lease, "NGINX_STANDBY_SWITCH_FAILED", () =>
-          operations.switchNginx({ fromPort: 8080, toPort: 8082, tuple: input.tuple }));
-        requireSwitch(standbySwitch, 8080, 8082);
-        committed = true;
+          const standbySwitch = await guarded(lease, "NGINX_STANDBY_SWITCH_FAILED", () =>
+            operations.switchNginx({ fromPort: 8080, toPort: 8082, tuple: input.tuple }));
+          requireSwitch(standbySwitch, 8080, 8082);
+          committed = true;
 
-        const termination = await guarded(lease, "CANONICAL_DRAIN_FAILED", () =>
-          operations.drainCanonical({ tuple: input.tuple, sessionToken: input.journeySessionToken, composeContext: lease.composeContext }));
-        requireDrain(termination, input.tuple);
+          const termination = await guarded(lease, "CANONICAL_DRAIN_FAILED", () =>
+            operations.drainCanonical({ tuple: input.tuple, sessionToken: input.journeySessionToken, composeContext: lease.composeContext }));
+          requireDrain(termination, input.tuple);
 
-        const recreated = await guarded(lease, "CANONICAL_RECREATE_OR_ACTIVATION_FAILED", () =>
-          operations.recreateCanonical({ tuple: input.tuple, composeContext: lease.composeContext }));
-        if (recreated?.tupleSha256 !== input.tuple.tupleSha256) throw failure("CANONICAL_RECREATE_OR_ACTIVATION_FAILED");
+          const recreated = await guarded(lease, "CANONICAL_RECREATE_OR_ACTIVATION_FAILED", () =>
+            operations.recreateCanonical({ tuple: input.tuple, composeContext: lease.composeContext }));
+          if (recreated?.tupleSha256 !== input.tuple.tupleSha256) throw failure("CANONICAL_RECREATE_OR_ACTIVATION_FAILED");
 
-        const canonicalActivation = await guarded(lease, "CANONICAL_RECREATE_OR_ACTIVATION_FAILED", () =>
-          input.activateBackend({
-            admission: admitted, baseUrl: "http://127.0.0.1:8080", instanceIdentity: "backend",
-            activationRequestIdentity: `${input.operationId}:canonical`,
-            trafficGeneration: input.trafficGeneration, serviceToken: input.serviceToken,
-          }));
-        requireActivation(canonicalActivation, admitted, "backend", input.trafficGeneration);
+          const canonicalActivation = await guarded(lease, "CANONICAL_RECREATE_OR_ACTIVATION_FAILED", () =>
+            input.activateBackend({
+              admission: admitted, baseUrl: "http://127.0.0.1:8080", instanceIdentity: "backend",
+              activationRequestIdentity: `${input.operationId}:canonical`,
+              trafficGeneration: input.trafficGeneration, serviceToken: input.serviceToken,
+            }));
+          requireActivation(canonicalActivation, admitted, "backend", input.trafficGeneration);
 
-        const canonicalSwitch = await guarded(lease, "NGINX_CANONICAL_SWITCHBACK_FAILED", () =>
-          operations.switchNginx({ fromPort: 8082, toPort: 8080, tuple: input.tuple }));
-        requireSwitch(canonicalSwitch, 8082, 8080);
+          const canonicalSwitch = await guarded(lease, "NGINX_CANONICAL_SWITCHBACK_FAILED", () =>
+            operations.switchNginx({ fromPort: 8082, toPort: 8080, tuple: input.tuple }));
+          requireSwitch(canonicalSwitch, 8082, 8080);
 
-        const cleanup = await guarded(lease, "STANDBY_CLEANUP_FAILED", () =>
-          operations.removeStandby({ runtime, composeContext: lease.composeContext }));
-        if (!matches(cleanup?.evidenceDigest, DIGEST)) throw failure("STANDBY_CLEANUP_FAILED");
+          const cleanup = await guarded(lease, "STANDBY_CLEANUP_FAILED", () =>
+            operations.removeStandby({ runtime, composeContext: lease.composeContext }));
+          if (!matches(cleanup?.evidenceDigest, DIGEST)) throw failure("STANDBY_CLEANUP_FAILED");
 
-        const receipt = receiptFor({ input, lease, runtime, canary, admitted, standbyActivation,
-          standbySwitch, termination, canonicalActivation, canonicalSwitch, cleanup });
-        await guarded(lease, "EVIDENCE_INVALID", () => operations.writeReceipt(receipt));
-        await writeNewReceipt(input.receiptPath, receipt);
-        return receipt;
+          const receipt = receiptFor({ input, lease, runtime, canary, admitted, standbyActivation,
+            standbySwitch, termination, canonicalActivation, canonicalSwitch, cleanup });
+          await guarded(lease, "EVIDENCE_INVALID", () => operations.writeReceipt(receipt));
+          await writeNewReceipt(input.receiptPath, receipt);
+          return receipt;
+        } catch (error) {
+          const typed = translate(error, committed ? "EVIDENCE_INVALID" : "STANDBY_START_OR_READINESS_FAILED");
+          if (!committed) {
+            try {
+              await verifyLease(lease);
+              await operations.removeStandby({ reason: typed.code, composeContext: lease.composeContext });
+            } catch { /* typed failure wins */ }
+          }
+          throw typed;
+        }
       },
     });
   } catch (error) {
-    const typed = translate(error, committed ? "EVIDENCE_INVALID" : "STANDBY_START_OR_READINESS_FAILED");
-    if (!committed && operationEntered) {
-      try { await operations.removeStandby({ reason: typed.code, composeContext: operationComposeContext }); } catch { /* typed failure wins */ }
-    }
-    throw typed;
+    throw translate(error, committed ? "EVIDENCE_INVALID" : "STANDBY_START_OR_READINESS_FAILED");
   }
 }
 
@@ -147,7 +150,7 @@ function validateInvocation(input) {
   if (!isObject(input) || !matches(input.operationId, OPERATION_ID) ||
     !Number.isSafeInteger(input.trafficGeneration) || input.trafficGeneration < 1 ||
     !isPath(input.receiptPath) || !isObject(input.tuple) ||
-    !matches(input.descriptorSha256, RAW_DIGEST) ||
+    !matches(input.descriptorSha256, RAW_DIGEST) || !matches(input.descriptorBytesSha256, RAW_DIGEST) ||
     ![input.candidateBindingSha256, input.descriptorBindingSha256].every((value) => matches(value, DIGEST)) ||
     !matches(input.runUrl, RUN_URL) || !validSecret(input.serviceToken) ||
     !validSessionToken(input.journeySessionToken) || input.journeySessionToken === input.serviceToken ||
@@ -184,7 +187,7 @@ function requireLease(lease) {
   }
 }
 function requireInputIdentity(identity, input) {
-  if (identity.descriptorSha256 !== `sha256:${input.descriptorSha256}` ||
+  if (identity.descriptorSha256 !== `sha256:${input.descriptorBytesSha256}` ||
     identity.candidateBindingSha256 !== input.candidateBindingSha256 ||
     identity.descriptorBindingSha256 !== input.descriptorBindingSha256) {
     throw failure("OPERATION_INPUT_INVALID", 2);
@@ -250,11 +253,30 @@ function receiptFor({ input, lease, runtime, canary, admitted, standbyActivation
     evidence: { generatedAt: new Date().toISOString(), runUrl: input.runUrl },
   };
 }
-async function writeNewReceipt(path, receipt) {
+async function writeNewReceipt(path, receipt, { beforePublish } = {}) {
+  const temporary = join(dirname(path), `.${randomUUID()}.activation-receipt.tmp`);
   let handle;
-  try { handle = await open(path, "wx", 0o600); await handle.writeFile(`${JSON.stringify(receipt)}\n`); await handle.sync(); }
-  catch (error) { if (error instanceof FixedHostJourneyActivationError) throw error; throw failure("EVIDENCE_INVALID"); }
-  finally { await handle?.close().catch(() => {}); }
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(receipt)}\n`);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await beforePublish?.();
+    await link(temporary, path);
+    const parent = await open(dirname(path), "r");
+    try { await parent.sync(); } finally { await parent.close(); }
+  } catch (error) {
+    if (error instanceof FixedHostJourneyActivationError) throw error;
+    throw failure("EVIDENCE_INVALID");
+  } finally {
+    await handle?.close().catch(() => {});
+    await rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+export async function writeActivationReceiptForTest(path, receipt, hooks) {
+  return writeNewReceipt(path, receipt, hooks);
 }
 
 export function parseFixedHostJourneyActivationCli(args) {
@@ -298,7 +320,7 @@ export function createFixedHostOperations(input) {
     }),
     drainCanonical: async ({ tuple, sessionToken, composeContext }) => drainCanonical({
       tuple, sessionToken, composeContext, drainProbe,
-      fetchImpl: host.fetchImpl ?? fetch,
+      postSignalJourneyImpl: host.postSignalJourneyImpl ?? postSignalJourney,
       openInFlightJourneyImpl: host.openInFlightJourneyImpl ?? openInFlightJourney,
       now: host.now ?? Date.now,
     }),
@@ -359,7 +381,7 @@ async function restoreNginx({ original, configPath, commandRunner }) {
   } finally { await rm(root, { recursive: true, force: true }).catch(() => {}); }
 }
 
-async function drainCanonical({ tuple, sessionToken, composeContext, drainProbe, fetchImpl, openInFlightJourneyImpl, now }) {
+async function drainCanonical({ tuple, sessionToken, composeContext, drainProbe, postSignalJourneyImpl, openInFlightJourneyImpl, now }) {
   requireDrainProbe(drainProbe);
   if (!composeContext || !validSessionToken(sessionToken) || typeof now !== "function") throw failure("CANONICAL_DRAIN_FAILED");
   const inFlight = await openInFlightJourneyImpl(drainProbe.inFlightRequest, sessionToken);
@@ -368,8 +390,13 @@ async function drainCanonical({ tuple, sessionToken, composeContext, drainProbe,
     await compose(composeContext, ["kill", "--signal", "SIGTERM", "backend"], "CANONICAL_DRAIN_FAILED");
     const response = await inFlight.finish();
     requireJourneyResponse(response, drainProbe.inFlightRequest.requestId, true);
-    const after = await postJourney(drainProbe.afterSignalRequest, sessionToken, fetchImpl);
-    if (!after.networkFailure && after.status >= 200 && after.status < 300) throw failure("CANONICAL_DRAIN_FAILED");
+    const after = await postSignalJourneyImpl(drainProbe.afterSignalRequest, sessionToken);
+    if (after?.kind === "RESPONSE") {
+      if (!Number.isInteger(after.status) || after.status < 100 || after.status > 599 ||
+        after.status >= 200 && after.status < 300) throw failure("CANONICAL_DRAIN_FAILED");
+    } else if (after?.kind !== "PRE_CONNECT_REFUSED") {
+      throw failure("CANONICAL_DRAIN_FAILED");
+    }
     await compose(composeContext, ["stop", "--timeout", "30", "backend"], "CANONICAL_DRAIN_FAILED");
     const elapsedMs = now() - startedAt;
     if (!Number.isFinite(elapsedMs) || elapsedMs < 0 || elapsedMs > 30_000) throw failure("CANONICAL_DRAIN_FAILED");
@@ -379,7 +406,10 @@ async function drainCanonical({ tuple, sessionToken, composeContext, drainProbe,
       oldProcessExited: true, withinBudget: true, droppedJourneyCount: 0, duplicateJourneyCount: 0,
       evidenceDigest: digest(Buffer.from(`${drainProbe.inFlightRequest.requestId}\n${drainProbe.afterSignalRequest.requestId}\n`)),
     };
-  } catch (error) { inFlight.destroy(); throw error; }
+  } catch (error) {
+    inFlight.destroy();
+    throw translate(error, "CANONICAL_DRAIN_FAILED");
+  }
 }
 
 function requireDrainProbe(probe) {
@@ -419,14 +449,29 @@ function openInFlightJourney(value, token) {
   });
 }
 
-async function postJourney(value, token, fetchImpl) {
-  try {
-    const response = await fetchImpl("http://127.0.0.1:8080/api/v3/journeys/search", {
-      method: "POST", headers: { Authorization: `Bearer ${token}`, Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify(value), redirect: "error", signal: AbortSignal.timeout(5000),
+function postSignalJourney(value, token) {
+  const body = Buffer.from(JSON.stringify(value));
+  return new Promise((resolveResult, rejectResult) => {
+    let connected = false;
+    const request = httpRequest("http://127.0.0.1:8080/api/v3/journeys/search", {
+      method: "POST", agent: false,
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json", "Content-Type": "application/json", "Content-Length": String(body.length) },
     });
-    return { networkFailure: false, status: response.status, headers: Object.fromEntries(response.headers.entries()), body: Buffer.from(await response.arrayBuffer()) };
-  } catch { return { networkFailure: true }; }
+    request.setTimeout(5000, () => request.destroy(failure("CANONICAL_DRAIN_FAILED")));
+    request.once("socket", (socket) => {
+      if (socket.connecting) socket.once("connect", () => { connected = true; });
+      else connected = true;
+    });
+    request.once("response", (response) => {
+      response.resume();
+      resolveResult({ kind: "RESPONSE", status: response.statusCode });
+    });
+    request.once("error", (error) => {
+      if (!connected && error?.code === "ECONNREFUSED") resolveResult({ kind: "PRE_CONNECT_REFUSED" });
+      else rejectResult(failure("CANONICAL_DRAIN_FAILED"));
+    });
+    request.end(body);
+  });
 }
 
 function requireJourneyResponse(response, requestId, requireSuccess) {
@@ -484,6 +529,7 @@ async function main() {
     const adapters = await productionAdapters({ cli, scratch });
     const receipt = await runFixedHostJourneyActivation({
       ...cli, ...adapters, tuple, descriptorSha256: adapters.descriptorSha256,
+      descriptorBytesSha256: adapters.descriptorBytesSha256,
       candidateBindingSha256: adapters.candidateBindingSha256, descriptorBindingSha256: adapters.descriptorBindingSha256,
       drainProbe, serviceToken: process.env.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN,
       journeySessionToken: process.env.EASYSUBWAY_JOURNEY_SAME_RC_SESSION_TOKEN,
@@ -495,7 +541,9 @@ async function main() {
 }
 
 async function productionAdapters({ cli, scratch }) {
-  const [bindingBytes, descriptorBindingBytes] = await Promise.all([readFile(cli.bindingPath), readFile(cli.descriptorBindingPath)]);
+  const [bindingBytes, descriptorBindingBytes, descriptorBytes] = await Promise.all([
+    readFile(cli.bindingPath), readFile(cli.descriptorBindingPath), readFile(cli.descriptorPath),
+  ]);
   let descriptorBinding;
   try { descriptorBinding = JSON.parse(descriptorBindingBytes); } catch { throw failure("OPERATION_INPUT_INVALID", 2); }
   const runtimePath = join(scratch, "runtime.json"); const canaryPath = join(scratch, "canary.json");
@@ -504,6 +552,7 @@ async function productionAdapters({ cli, scratch }) {
   const write = (path, value) => writeFile(path, `${JSON.stringify(value)}\n`, { mode: 0o400, flag: "wx" });
   return {
     candidateStartInput: cli, descriptorSha256: descriptorBinding.descriptorSha256,
+    descriptorBytesSha256: createHash("sha256").update(descriptorBytes).digest("hex"),
     candidateBindingSha256: `sha256:${createHash("sha256").update(bindingBytes).digest("hex")}`,
     descriptorBindingSha256: `sha256:${createHash("sha256").update(descriptorBindingBytes).digest("hex")}`,
     runCanary: async ({ baseUrl }) => {
