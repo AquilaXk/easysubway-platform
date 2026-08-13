@@ -235,10 +235,10 @@ export async function createFixedHostJourneyActivationHost({
       await invoke("docker", [
         ...composePrefix, "stop", "--timeout", "30", "backend",
       ], 35_000);
+      const elapsedNs = nowNs() - startedAt;
       const stopped = await invoke("docker", [
         "inspect", "--format", "{{json .State}}", "easysubway-backend",
       ], 10_000);
-      const elapsedNs = nowNs() - startedAt;
       const state = parseStoppedContainerState(stopped.stdout);
       if (elapsedNs < 0n || elapsedNs > 30_000_000_000n) {
         throw new Error("canonical drain exceeded 30 seconds");
@@ -375,8 +375,15 @@ export function renderFixedHostNginxConfig(source, fromPort, toPort) {
   return Buffer.from(text.replaceAll(from, to), "utf8");
 }
 
-export async function runFixedHostJourneyActivation(input, effects) {
+export async function runFixedHostJourneyActivation(
+  input,
+  effects,
+  { failureNow = () => new Date().toISOString() } = {},
+) {
   validateInvocation(input, effects);
+  if (typeof failureNow !== "function") {
+    throw typed("FIXED_HOST_USAGE", undefined, 2);
+  }
   await reserveOperationDirectory(input.operationDirectory);
 
   let lock;
@@ -576,7 +583,13 @@ export async function runFixedHostJourneyActivation(input, effects) {
         // The original failure remains authoritative; failed evidence records cleanup uncertainty.
       }
     }
-    await writeFailureReceipt(input, failure, phase, failureCommitted).catch(() => {});
+    await writeFailureReceipt(
+      input,
+      failure,
+      phase,
+      failureCommitted,
+      failureNow(),
+    ).catch(() => {});
     throw failure;
   } finally {
     await lock?.close().catch(() => {});
@@ -1349,7 +1362,8 @@ function activationReceipt({
   };
 }
 
-async function writeFailureReceipt(input, error, phase, committed) {
+async function writeFailureReceipt(input, error, phase, committed, failedAt) {
+  if (!validInstant(failedAt)) throw typed("FIXED_HOST_RECEIPT_FAILED");
   const value = {
     schemaVersion: "PLATFORM_FIXED_HOST_ACTIVATION_FAILURE_V1",
     artifactKind: "platform-fixed-host-activation-failure",
@@ -1361,7 +1375,7 @@ async function writeFailureReceipt(input, error, phase, committed) {
     admittedStandbyMayRemainServing: committed,
     successReceiptCreated: false,
     fallbackZero: { ...FALLBACK_ZERO },
-    failedAt: input.generatedAt,
+    failedAt,
     runUrl: input.runUrl,
   };
   await writeEvidence(
