@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { createPublicKey } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { chmod, lstat, mkdtemp, open, rm, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -18,6 +19,7 @@ import {
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const COMPOSE_TIMEOUT_MS = 120_000;
+const FORCE_KILL_GRACE_MS = 1000;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -26,6 +28,11 @@ const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const SERVICES = Object.freeze([
   "backend-journey-candidate-a",
   "backend-journey-candidate-b",
+]);
+const DOCKER_OPERATIONAL_ENV_KEYS = Object.freeze([
+  "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+  "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY",
+  "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
 ]);
 const BINDING_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "orchestrator", "tupleSha256",
@@ -42,6 +49,7 @@ const ERROR_MESSAGES = Object.freeze({
   CANDIDATE_START_IDENTITY: "candidate start identity validation failed",
   CANDIDATE_START_SECRET: "candidate start secret validation failed",
   CANDIDATE_START_EXISTS: "candidate runtime already exists",
+  CANDIDATE_START_LOCKED: "candidate start operation is already running",
   CANDIDATE_START_COMPOSE: "candidate compose start failed",
   CANDIDATE_START_TIMEOUT: "candidate compose start timed out",
   CANDIDATE_START_INPUT_UNSTABLE: "candidate start input changed during execution",
@@ -75,6 +83,7 @@ export async function startJourneyComposeCandidates({
   trafficGeneration,
   serviceToken,
   currentPublicKeyPem,
+  ambientEnvironment = process.env,
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
 }) {
@@ -90,11 +99,14 @@ export async function startJourneyComposeCandidates({
     trafficGeneration,
     serviceToken,
     currentPublicKeyPem,
+    ambientEnvironment,
     inspectDescriptor,
     composeRunner,
   });
 
+  const operationLock = await CandidateStartLock.acquire(projectName, operationId);
   const inputs = [];
+  let executionEnvironment;
   try {
     inputs.push(...await openStableInputs([
       bindingPath,
@@ -104,7 +116,14 @@ export async function startJourneyComposeCandidates({
       composeEnvPath,
       backendEnvPath,
     ]));
-    const [bindingInput, descriptorBindingInput, tupleInput, descriptorInput] = inputs;
+    const [
+      bindingInput,
+      descriptorBindingInput,
+      tupleInput,
+      descriptorInput,
+      composeEnvInput,
+      backendEnvInput,
+    ] = inputs;
     const tuple = validateTuple(tupleInput.bytes);
     const binding = validateBinding(bindingInput.bytes, tuple);
     const descriptorBinding = validateDescriptorBinding(
@@ -117,28 +136,34 @@ export async function startJourneyComposeCandidates({
       tuple,
       inspectDescriptor,
     );
-    const composeEnvAbsolute = resolve(composeEnvPath);
-    const backendEnvAbsolute = resolve(backendEnvPath);
+    if (sha256Reference(backendEnvInput.bytes) !== tuple.backendConfigDigest) {
+      throw failure("CANDIDATE_START_IDENTITY", 2);
+    }
+    executionEnvironment = await materializeEnvironmentFiles(
+      composeEnvInput.bytes,
+      backendEnvInput.bytes,
+    );
     const env = candidateEnvironment({
       tuple,
       descriptorBytes: descriptorInput.bytes,
       descriptorFacts,
-      backendEnvPath: backendEnvAbsolute,
+      backendEnvPath: executionEnvironment.backendEnvPath,
       operationId,
       trafficGeneration,
       serviceToken,
       currentPublicKeyPem,
+      ambientEnvironment,
     });
     const prefix = [
       "compose",
       "--project-name", projectName,
-      "--env-file", composeEnvAbsolute,
+      "--env-file", executionEnvironment.composeEnvPath,
       "-f", BASE_COMPOSE_PATH,
       "-f", CANDIDATE_COMPOSE_PATH,
       "--profile", "journey-candidate",
     ];
 
-    await verifyInputs(inputs);
+    await verifyExecutionInputs(inputs, executionEnvironment);
     const existing = await invokeCompose(composeRunner, {
       command: "docker",
       args: [...prefix, "ps", "--all", "--quiet", ...SERVICES],
@@ -149,7 +174,7 @@ export async function startJourneyComposeCandidates({
     if (existing.stdout.trim().length > 0) throw failure("CANDIDATE_START_EXISTS", 2);
 
     try {
-      await verifyInputs(inputs);
+      await verifyExecutionInputs(inputs, executionEnvironment);
       const result = await invokeCompose(composeRunner, {
         command: "docker",
         args: [
@@ -161,7 +186,7 @@ export async function startJourneyComposeCandidates({
         timeoutMs: COMPOSE_TIMEOUT_MS,
       });
       if (!successful(result)) throw failure(composeFailureCode(result));
-      await verifyInputs(inputs);
+      await verifyExecutionInputs(inputs, executionEnvironment);
     } catch (error) {
       await cleanupCandidates(composeRunner, prefix, env);
       if (error instanceof CandidateStartError) throw error;
@@ -170,7 +195,9 @@ export async function startJourneyComposeCandidates({
 
     return candidateRuntime();
   } finally {
+    await executionEnvironment?.close();
     for (const input of inputs.reverse()) await input.close();
+    await operationLock.close();
   }
 }
 
@@ -193,7 +220,10 @@ function validateInvocation(values) {
     !Number.isSafeInteger(values.trafficGeneration) ||
     values.trafficGeneration < 1 ||
     typeof values.inspectDescriptor !== "function" ||
-    typeof values.composeRunner !== "function"
+    typeof values.composeRunner !== "function" ||
+    values.ambientEnvironment === null ||
+    typeof values.ambientEnvironment !== "object" ||
+    Array.isArray(values.ambientEnvironment)
   ) {
     throw failure("CANDIDATE_START_USAGE", 2);
   }
@@ -223,6 +253,133 @@ function validateSecrets(serviceToken, currentPublicKeyPem) {
     if (key.asymmetricKeyType !== "rsa") throw new Error("unexpected key type");
   } catch {
     throw failure("CANDIDATE_START_SECRET", 2);
+  }
+}
+
+class CandidateStartLock {
+  static async acquire(projectName, operationId) {
+    const path = join(
+      tmpdir(),
+      `.easysubway-journey-candidate-${projectName}.lock`,
+    );
+    let handle;
+    try {
+      handle = await open(
+        path,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW,
+        0o600,
+      );
+      await handle.writeFile(`${operationId}\n`, "utf8");
+      await handle.sync();
+      const identity = await handle.stat({ bigint: true });
+      if (!identity.isFile()) throw new Error("lock is not regular");
+      return new CandidateStartLock(handle, path, identity);
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      if (handle) await unlink(path).catch(() => {});
+      if (error?.code === "EEXIST") {
+        throw failure("CANDIDATE_START_LOCKED", 2);
+      }
+      throw failure("CANDIDATE_START_INPUT", 2);
+    }
+  }
+
+  constructor(handle, path, identity) {
+    this.handle = handle;
+    this.path = path;
+    this.identity = identity;
+    this.closed = false;
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      const descriptor = await this.handle.stat({ bigint: true });
+      const entry = await lstat(this.path, { bigint: true });
+      if (
+        descriptor.isFile() &&
+        entry.isFile() &&
+        !entry.isSymbolicLink() &&
+        identitiesMatch(this.identity, descriptor, entry)
+      ) {
+        await unlink(this.path);
+      }
+    } catch {
+      // A changed lock is preserved rather than deleting an unowned entry.
+    } finally {
+      await this.handle.close().catch(() => {});
+    }
+  }
+}
+
+async function materializeEnvironmentFiles(composeBytes, backendBytes) {
+  const root = await mkdtemp(join(tmpdir(), "easysubway-journey-candidate-env-"));
+  const composeEnvPath = join(root, "compose.env");
+  const backendEnvPath = join(root, "backend.env");
+  let stableInputs = [];
+  try {
+    await chmod(root, 0o700);
+    await writeProtectedFile(composeEnvPath, composeBytes);
+    await writeProtectedFile(backendEnvPath, backendBytes);
+    stableInputs = await openStableInputs([composeEnvPath, backendEnvPath]);
+    await chmod(root, 0o500);
+    return new MaterializedEnvironment(
+      root,
+      composeEnvPath,
+      backendEnvPath,
+      stableInputs,
+    );
+  } catch (error) {
+    for (const input of stableInputs.reverse()) await input.close();
+    await chmod(root, 0o700).catch(() => {});
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+    if (error instanceof CandidateStartError) throw error;
+    throw failure("CANDIDATE_START_INPUT", 2);
+  }
+}
+
+async function writeProtectedFile(path, bytes) {
+  let handle;
+  try {
+    handle = await open(
+      path,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+  await chmod(path, 0o400);
+}
+
+class MaterializedEnvironment {
+  constructor(root, composeEnvPath, backendEnvPath, stableInputs) {
+    this.root = root;
+    this.composeEnvPath = composeEnvPath;
+    this.backendEnvPath = backendEnvPath;
+    this.stableInputs = stableInputs;
+    this.closed = false;
+  }
+
+  async verify() {
+    await verifyInputs(this.stableInputs);
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const input of this.stableInputs.reverse()) await input.close();
+    await chmod(this.root, 0o700).catch(() => {});
+    await rm(this.root, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -397,9 +554,10 @@ function candidateEnvironment({
   trafficGeneration,
   serviceToken,
   currentPublicKeyPem,
+  ambientEnvironment,
 }) {
   return {
-    ...process.env,
+    ...dockerOperationalEnvironment(ambientEnvironment),
     EASYSUBWAY_BACKEND_ENV_FILE: backendEnvPath,
     EASYSUBWAY_BACKEND_IMAGE:
       `ghcr.io/aquilaxk/easysubway-backend@${tuple.backendImageDigest}`,
@@ -427,8 +585,25 @@ function candidateEnvironment({
   };
 }
 
+function dockerOperationalEnvironment(ambientEnvironment) {
+  return Object.fromEntries(
+    DOCKER_OPERATIONAL_ENV_KEYS
+      .filter((key) => typeof ambientEnvironment[key] === "string")
+      .map((key) => [key, ambientEnvironment[key]]),
+  );
+}
+
+function sha256Reference(bytes) {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
 async function verifyInputs(inputs) {
   for (const input of inputs) await input.verify();
+}
+
+async function verifyExecutionInputs(inputs, executionEnvironment) {
+  await verifyInputs(inputs);
+  await executionEnvironment.verify();
 }
 
 async function invokeCompose(composeRunner, request) {
@@ -493,16 +668,40 @@ function candidateRuntime() {
   };
 }
 
-function runCompose({ command, args, env, timeoutMs }) {
+export function runComposeForTest(request) {
+  return runCompose(request);
+}
+
+function runCompose({
+  command,
+  args,
+  env,
+  timeoutMs,
+  forceKillGraceMs = FORCE_KILL_GRACE_MS,
+}) {
   return new Promise((resolveResult) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let settled = false;
-    const child = spawn(command, args, { env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    let forceKillTimer;
+    let forcedSettlementTimer;
+    const child = spawn(command, args, {
+      env,
+      shell: false,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminateChildGroup(child, "SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        terminateChildGroup(child, "SIGKILL");
+        forcedSettlementTimer = setTimeout(
+          () => finish(null, "SIGKILL"),
+          forceKillGraceMs,
+        );
+      }, forceKillGraceMs);
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       if (stdout.length < MAX_OUTPUT_BYTES) stdout += chunk.toString("utf8");
@@ -519,9 +718,27 @@ function runCompose({ command, args, env, timeoutMs }) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(forceKillTimer);
+      clearTimeout(forcedSettlementTimer);
       resolveResult({ status, signal, timedOut, stdout, stderr });
     }
   });
+}
+
+function terminateChildGroup(child, signal) {
+  try {
+    if (process.platform !== "win32" && Number.isInteger(child.pid)) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch {
+    // Fall through to the direct child signal.
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may have exited between timeout and signal delivery.
+  }
 }
 
 function parseJson(bytes) {

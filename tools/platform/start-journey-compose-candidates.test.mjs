@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import {
+import * as candidateStartModule from "./start-journey-compose-candidates.mjs";
+
+const {
   CandidateStartError,
   formatCandidateRuntime,
   startJourneyComposeCandidates,
-} from "./start-journey-compose-candidates.mjs";
+} = candidateStartModule;
 
 const SCRIPT = new URL("./start-journey-compose-candidates.mjs", import.meta.url);
 const OVERLAY = new URL("../../infra/docker-compose.journey-candidate.yml", import.meta.url);
@@ -26,7 +28,27 @@ test("exact immutable inputs start only two named candidates and emit observer r
     serviceToken: TOKEN,
     currentPublicKeyPem: PUBLIC_KEY_PEM,
     inspectDescriptor: fixture.inspectDescriptor,
+    ambientEnvironment: {
+      PATH: process.env.PATH,
+      DOCKER_CONTEXT: "verified-test-context",
+      EASYSUBWAY_POSTGRES_DB: "ambient-must-not-win",
+    },
     composeRunner: async (request) => {
+      const envFile = request.args[request.args.indexOf("--env-file") + 1];
+      assert.notEqual(envFile, fixture.input.composeEnvPath);
+      assert.notEqual(request.env.EASYSUBWAY_BACKEND_ENV_FILE, fixture.input.backendEnvPath);
+      assert.equal(await readFile(envFile, "utf8"), fixture.composeEnvText);
+      assert.equal(
+        await readFile(request.env.EASYSUBWAY_BACKEND_ENV_FILE, "utf8"),
+        fixture.backendEnvText,
+      );
+      assert.equal((await stat(envFile)).mode & 0o777, 0o400);
+      assert.equal(
+        (await stat(request.env.EASYSUBWAY_BACKEND_ENV_FILE)).mode & 0o777,
+        0o400,
+      );
+      assert.equal(request.env.DOCKER_CONTEXT, "verified-test-context");
+      assert.equal(request.env.EASYSUBWAY_POSTGRES_DB, undefined);
       calls.push(request);
       return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     },
@@ -97,6 +119,9 @@ test("invalid identity, secret, key and existing runtime fail before candidate s
       await writeFile(fixture.input.descriptorBindingPath,
         `${JSON.stringify(fixture.descriptorBinding)}\n`);
     }, "CANDIDATE_START_IDENTITY"],
+    ["backend config digest mismatch", async (fixture) => {
+      await writeFile(fixture.input.backendEnvPath, "EASYSUBWAY_OTHER_CONFIG=changed\n");
+    }, "CANDIDATE_START_IDENTITY"],
     ["short token", async (fixture) => { fixture.serviceToken = "short"; },
       "CANDIDATE_START_SECRET"],
     ["invalid PEM", async (fixture) => { fixture.currentPublicKeyPem = "not a key"; },
@@ -141,6 +166,44 @@ test("invalid identity, secret, key and existing runtime fail before candidate s
     (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_EXISTS",
   );
   assert.equal(calls.length, 1);
+
+  const first = await createFixture();
+  const second = await createFixture();
+  let releasePreflight;
+  let reachedPreflight;
+  const preflightReached = new Promise((resolveReached) => { reachedPreflight = resolveReached; });
+  const holdPreflight = new Promise((resolveRelease) => { releasePreflight = resolveRelease; });
+  const firstStart = startJourneyComposeCandidates({
+    ...first.input,
+    serviceToken: TOKEN,
+    currentPublicKeyPem: PUBLIC_KEY_PEM,
+    inspectDescriptor: first.inspectDescriptor,
+    composeRunner: async (request) => {
+      if (request.args.includes("ps")) {
+        reachedPreflight();
+        await holdPreflight;
+      }
+      return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    },
+  });
+  await preflightReached;
+  let secondAttempts = 0;
+  await assert.rejects(
+    startJourneyComposeCandidates({
+      ...second.input,
+      serviceToken: TOKEN,
+      currentPublicKeyPem: PUBLIC_KEY_PEM,
+      inspectDescriptor: second.inspectDescriptor,
+      composeRunner: async () => {
+        secondAttempts += 1;
+        return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+      },
+    }),
+    (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_LOCKED",
+  );
+  assert.equal(secondAttempts, 0);
+  releasePreflight();
+  await firstStart;
 });
 
 test("failed or timed-out start performs only exact candidate cleanup and exposes no bytes", async () => {
@@ -152,6 +215,7 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
   ]) {
     const fixture = await createFixture();
     const calls = [];
+    let cleanupUsedVerifiedCopy = false;
     await assert.rejects(
       startJourneyComposeCandidates({
         ...fixture.input,
@@ -164,6 +228,9 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
             return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
           }
           if (calls.length === 2) return upResult;
+          const envFile = request.args[request.args.indexOf("--env-file") + 1];
+          cleanupUsedVerifiedCopy = envFile !== fixture.input.composeEnvPath &&
+            await readFile(envFile, "utf8") === fixture.composeEnvText;
           return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
         },
       }),
@@ -180,7 +247,49 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
       "rm", "--force", "--stop",
       "backend-journey-candidate-a", "backend-journey-candidate-b",
     ]);
+    assert.equal(cleanupUsedVerifiedCopy, true, name);
   }
+
+  const pathFixture = await createFixture();
+  let pathCleanupVerified = false;
+  await assert.rejects(
+    startJourneyComposeCandidates({
+      ...pathFixture.input,
+      serviceToken: TOKEN,
+      currentPublicKeyPem: PUBLIC_KEY_PEM,
+      inspectDescriptor: pathFixture.inspectDescriptor,
+      composeRunner: async (request) => {
+        if (request.args.includes("ps")) {
+          return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+        }
+        if (request.args.includes("up")) {
+          await rename(
+            pathFixture.input.composeEnvPath,
+            `${pathFixture.input.composeEnvPath}.removed`,
+          );
+          return { status: 1, signal: null, timedOut: false, stdout: "", stderr: "" };
+        }
+        const envFile = request.args[request.args.indexOf("--env-file") + 1];
+        pathCleanupVerified = envFile !== pathFixture.input.composeEnvPath &&
+          await readFile(envFile, "utf8") === pathFixture.composeEnvText;
+        return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+      },
+    }),
+    (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_COMPOSE",
+  );
+  assert.equal(pathCleanupVerified, true);
+
+  assert.equal(typeof candidateStartModule.runComposeForTest, "function");
+  const timeoutStartedAt = Date.now();
+  const hardTimeout = await candidateStartModule.runComposeForTest({
+    command: process.execPath,
+    args: ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
+    env: process.env,
+    timeoutMs: 20,
+    forceKillGraceMs: 20,
+  });
+  assert.equal(hardTimeout.timedOut, true);
+  assert.ok(Date.now() - timeoutStartedAt < 1000);
 });
 
 test("candidate overlay and CLI keep public traffic, canonical services and secrets out", async () => {
@@ -221,7 +330,11 @@ test("candidate overlay and CLI keep public traffic, canonical services and secr
 
 async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), "journey-compose-start-"));
-  const tuple = validTuple();
+  const composeEnvText = "EASYSUBWAY_POSTGRES_DB=easysubway\n";
+  const backendEnvText = "EASYSUBWAY_DATASOURCE_USERNAME=private\n";
+  const tuple = validTuple({
+    backendConfigDigest: `sha256:${sha256(backendEnvText)}`,
+  });
   const tupleBody = `${JSON.stringify(tuple, null, 2)}\n`;
   const binding = {
     schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
@@ -269,8 +382,8 @@ async function createFixture() {
     writeFile(paths.descriptorBindingPath, `${JSON.stringify(descriptorBinding)}\n`),
     writeFile(paths.tuplePath, tupleBody),
     writeFile(paths.descriptorPath, descriptorBytes),
-    writeFile(paths.composeEnvPath, "EASYSUBWAY_POSTGRES_DB=easysubway\n"),
-    writeFile(paths.backendEnvPath, "EASYSUBWAY_DATASOURCE_USERNAME=private\n"),
+    writeFile(paths.composeEnvPath, composeEnvText),
+    writeFile(paths.backendEnvPath, backendEnvText),
   ]);
   return {
     root,
@@ -281,6 +394,8 @@ async function createFixture() {
     descriptorBytes,
     keyId,
     publicBaseUrl,
+    composeEnvText,
+    backendEnvText,
     serviceToken: TOKEN,
     currentPublicKeyPem: PUBLIC_KEY_PEM,
     inspectDescriptor: () => ({
@@ -297,7 +412,7 @@ async function createFixture() {
   };
 }
 
-function validTuple() {
+function validTuple(overrides = {}) {
   const tuple = {
     schemaVersion: "JOURNEY_RELEASE_TUPLE_V1",
     artifactKind: "journey-release-tuple",
@@ -307,6 +422,7 @@ function validTuple() {
     serverRouteBundleDigest: digest("d"),
     deploymentRevision: "e".repeat(40),
     environmentIdentity: "production",
+    ...overrides,
   };
   const identity = [
     tuple.backendImageDigest,
