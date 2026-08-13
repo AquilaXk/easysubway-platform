@@ -17,6 +17,7 @@ const {
 const SCRIPT = new URL("./start-journey-compose-candidates.mjs", import.meta.url);
 const OVERLAY = new URL("../../infra/docker-compose.journey-candidate.yml", import.meta.url);
 const BASE_COMPOSE = new URL("../../infra/docker-compose.yml", import.meta.url);
+const DEPLOY_SCRIPT = new URL("../deploy/deploy-backend.sh", import.meta.url);
 const TOKEN = "candidate-readiness-token-0123456789abcdef";
 const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const PUBLIC_KEY_PEM = publicKey.export({ type: "spki", format: "pem" });
@@ -32,6 +33,7 @@ test("exact immutable inputs start only the existing inactive standby and emit o
     ambientEnvironment: {
       PATH: process.env.PATH,
       DOCKER_CONTEXT: "verified-test-context",
+      DEPLOY_ROOT: fixture.root,
       EASYSUBWAY_POSTGRES_DB: "ambient-must-not-win",
     },
     composeRunner: async (request) => {
@@ -105,12 +107,27 @@ test("exact immutable inputs start only the existing inactive standby and emit o
   assert.equal(fixture.deployLockState.requests.length, 1);
   assert.equal(
     fixture.deployLockState.requests[0].lockPath,
-    fixture.input.deployLockPath,
+    join(fixture.root, "deploy.lock"),
   );
   assert.equal(fixture.deployLockState.closeCount, 1);
 });
 
 test("invalid identity, secret, key and existing runtime fail before candidate start", async () => {
+  const defaults = await createFixture();
+  await writeFile(defaults.input.composeEnvPath, "EASYSUBWAY_POSTGRES_DB=easysubway\n");
+  let defaultCalls = 0;
+  await startJourneyComposeCandidates({
+    ...defaults.input,
+    serviceToken: TOKEN,
+    currentPublicKeyPem: PUBLIC_KEY_PEM,
+    inspectDescriptor: defaults.inspectDescriptor,
+    composeRunner: async () => {
+      defaultCalls += 1;
+      return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(defaultCalls, 2);
+
   const cases = [
     ["binding mismatch", async (fixture) => {
       fixture.binding.tupleSha256 = digest("9");
@@ -134,6 +151,12 @@ test("invalid identity, secret, key and existing runtime fail before candidate s
       await writeFile(
         fixture.input.composeEnvPath,
         "EASYSUBWAY_POSTGRES_DB=easysubway\nEASYSUBWAY_BACKEND_BIND=127.0.0.1\nEASYSUBWAY_BACKEND_STANDBY_PORT=18082\n",
+      );
+    }, "CANDIDATE_START_IDENTITY"],
+    ["duplicate backend bind", async (fixture) => {
+      await writeFile(
+        fixture.input.composeEnvPath,
+        "EASYSUBWAY_BACKEND_BIND=127.0.0.1\nEASYSUBWAY_BACKEND_BIND=127.0.0.1\n",
       );
     }, "CANDIDATE_START_IDENTITY"],
     ["short token", async (fixture) => { fixture.serviceToken = "short"; },
@@ -328,6 +351,7 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
 test("candidate overlay reuses only base standby and keeps active traffic and secrets out", async () => {
   const overlay = await readFile(OVERLAY, "utf8");
   const baseCompose = await readFile(BASE_COMPOSE, "utf8");
+  const deployScript = await readFile(DEPLOY_SCRIPT, "utf8");
   assert.match(overlay, /^x-journey-candidate-environment: &journey-candidate-environment/);
   assert.match(overlay, /\nservices:\n  backend-standby:/);
   assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 1);
@@ -335,6 +359,7 @@ test("candidate overlay reuses only base standby and keeps active traffic and se
   assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby/);
   assert.match(baseCompose, /\n  backend-standby:/);
   assert.match(baseCompose, /EASYSUBWAY_BACKEND_STANDBY_PORT:-8082}:8080/);
+  assert.match(deployScript, /LOCK_FILE="\$\{DEPLOY_ROOT\}\/deploy\.lock"/);
   for (const forbidden of [
     "backend-journey-candidate-a", "backend-journey-candidate-b", "18081", "18082",
     "route-v2-gateway", "nginx", "KUBERNETES", "\n  backend:",
@@ -407,7 +432,6 @@ async function createFixture() {
     descriptorPath: join(root, "descriptor.json"),
     composeEnvPath: join(root, "compose.env"),
     backendEnvPath: join(root, "backend.env"),
-    deployLockPath: join(root, "deploy.lock"),
   };
   await Promise.all([
     writeFile(paths.bindingPath, `${JSON.stringify(binding)}\n`),

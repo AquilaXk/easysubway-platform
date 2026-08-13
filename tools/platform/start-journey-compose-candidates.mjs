@@ -21,7 +21,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 const COMPOSE_TIMEOUT_MS = 120_000;
 const FORCE_KILL_GRACE_MS = 1000;
 const SHARED_LOCK_ACQUIRE_TIMEOUT_MS = 5000;
-const SHARED_DEPLOY_LOCK_PATH = "/opt/easysubway/deploy.lock";
+const DEFAULT_DEPLOY_ROOT = "/opt/easysubway";
 const SHARED_LOCK_HOLDER_ARGUMENT = "--hold-shared-deploy-lock";
 const SHARED_LOCK_READY = "EASYSUBWAY_STANDBY_LOCKED\n";
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -87,7 +87,6 @@ export async function startJourneyComposeCandidates({
   ambientEnvironment = process.env,
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
-  deployLockPath = SHARED_DEPLOY_LOCK_PATH,
   deployLockRunner = acquireSharedDeployLock,
 }) {
   validateInvocation({
@@ -105,13 +104,12 @@ export async function startJourneyComposeCandidates({
     ambientEnvironment,
     inspectDescriptor,
     composeRunner,
-    deployLockPath,
     deployLockRunner,
   });
 
   const deployLock = await openSharedDeployLock(
     deployLockRunner,
-    deployLockPath,
+    sharedDeployLockPath(ambientEnvironment),
     ambientEnvironment,
   );
   let operationLock;
@@ -243,8 +241,6 @@ function validateInvocation(values) {
     typeof values.inspectDescriptor !== "function" ||
     typeof values.composeRunner !== "function" ||
     typeof values.deployLockRunner !== "function" ||
-    !isNonemptyString(values.deployLockPath) ||
-    resolve(values.deployLockPath) !== values.deployLockPath ||
     values.ambientEnvironment === null ||
     typeof values.ambientEnvironment !== "object" ||
     Array.isArray(values.ambientEnvironment)
@@ -261,18 +257,44 @@ function validateCandidateComposeEnvironment(bytes) {
   } catch {
     throw failure("CANDIDATE_START_IDENTITY", 2);
   }
-  const lines = text.split("\n");
-  const bindLines = lines.filter((line) => line.startsWith("EASYSUBWAY_BACKEND_BIND="));
-  const standbyPortLines = lines.filter(
-    (line) => line.startsWith("EASYSUBWAY_BACKEND_STANDBY_PORT="),
-  );
+  const assignments = new Map([
+    ["EASYSUBWAY_BACKEND_BIND", []],
+    ["EASYSUBWAY_BACKEND_STANDBY_PORT", []],
+  ]);
+  const targetAssignment = /^\s*(?:export\s+)?(EASYSUBWAY_BACKEND_BIND|EASYSUBWAY_BACKEND_STANDBY_PORT)\s*=/;
+  for (const line of text.split("\n")) {
+    if (line.trimStart().startsWith("#")) continue;
+    const match = line.match(targetAssignment);
+    if (match) assignments.get(match[1]).push(line);
+  }
   if (
-    bindLines.length !== 1 ||
-    bindLines[0] !== "EASYSUBWAY_BACKEND_BIND=127.0.0.1" ||
-    standbyPortLines.length !== 0
+    !validOptionalAssignment(
+      assignments.get("EASYSUBWAY_BACKEND_BIND"),
+      "EASYSUBWAY_BACKEND_BIND=127.0.0.1",
+    ) ||
+    !validOptionalAssignment(
+      assignments.get("EASYSUBWAY_BACKEND_STANDBY_PORT"),
+      "EASYSUBWAY_BACKEND_STANDBY_PORT=8082",
+    )
   ) {
     throw failure("CANDIDATE_START_IDENTITY", 2);
   }
+}
+
+function validOptionalAssignment(lines, expected) {
+  return lines.length === 0 || (lines.length === 1 && lines[0] === expected);
+}
+
+function sharedDeployLockPath(ambientEnvironment) {
+  const deployRoot = ambientEnvironment.DEPLOY_ROOT ?? DEFAULT_DEPLOY_ROOT;
+  if (
+    !isNonemptyString(deployRoot) ||
+    resolve(deployRoot) !== deployRoot ||
+    deployRoot === "/"
+  ) {
+    throw failure("CANDIDATE_START_USAGE", 2);
+  }
+  return join(deployRoot, "deploy.lock");
 }
 
 async function openSharedDeployLock(runner, lockPath, ambientEnvironment) {
@@ -296,7 +318,7 @@ async function openSharedDeployLock(runner, lockPath, ambientEnvironment) {
 function acquireSharedDeployLock({ lockPath, ambientEnvironment }) {
   return new Promise((resolveLock, rejectLock) => {
     const child = spawn(
-      "flock",
+      "/usr/bin/flock",
       [
         "--nonblock",
         "--exclusive",
