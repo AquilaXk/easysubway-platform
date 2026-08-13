@@ -35,6 +35,17 @@ test("source-free workflow pins exact artifacts, keeps PREVIEW read-only, and re
   assert.equal(count(deploy, "--mode DEPLOY"), 1);
   assert.equal(count(deploy, "run-fixed-host-journey-activation.mjs"), 1);
   assert.equal(count(deploy, "--request \"${RUNNER_TEMP}/fixed-host-request.json\""), 1);
+  assert.equal(count(workflow,
+    'repos/AquilaXk/easysubway-backend/actions/runs/${BACKEND_RUN_ID}'), 2);
+  assert.equal(count(workflow,
+    'repos/AquilaXk/easysubway-data/actions/runs/${DATA_RUN_ID}'), 2);
+  assert.equal(count(workflow, ".github/workflows/release-artifacts.yml"), 2);
+  assert.equal(count(workflow, ".github/workflows/datapack-release.yml"), 2);
+  assert.equal(count(workflow, "--backend-producer-sha"), 2);
+  assert.equal(count(workflow, "--data-producer-sha"), 2);
+  assert.equal(count(workflow, ".conclusion"), 4);
+  assert.equal(count(workflow, ".head_branch"), 4);
+  assert.equal(count(workflow, ".head_sha"), 4);
 });
 
 test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or mutable artifact lookup", () => {

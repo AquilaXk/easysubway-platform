@@ -17,6 +17,10 @@ import {
   prepareSourceFreeFixedHostDeployment,
   SourceFreePreparationError,
 } from "./prepare-source-free-fixed-host-deployment.mjs";
+import {
+  parseFixedHostRequestForTest,
+  verifyRuntimeComposeCopiesForTest,
+} from "./run-fixed-host-journey-activation.mjs";
 
 const SCRIPT = new URL(
   "./prepare-source-free-fixed-host-deployment.mjs",
@@ -66,6 +70,16 @@ test("PREVIEW prepares exact descriptor-v2 inputs and one existing fixed-host re
   assert.equal(request.canary.originStationId, "station-sangnoksu");
   assert.equal(request.canary.destinationStationId, "station-sadang");
   assert.equal(request.operationDirectory, fixture.input.operationDirectory);
+  assert.equal(
+    parseFixedHostRequestForTest(
+      await readFile(fixture.input.requestOutputPath),
+    ).baseComposePath,
+    request.baseComposePath,
+  );
+  await verifyRuntimeComposeCopiesForTest(
+    request.baseComposePath,
+    request.candidateComposePath,
+  );
   assert.equal((await stat(request.tuplePath)).mode & 0o777, 0o400);
   assert.equal((await stat(request.backendEnvPath)).mode & 0o777, 0o400);
   assert.equal(fixture.assembled.length, 1);
@@ -96,6 +110,26 @@ test("duplicate artifact names and producer identity mismatch fail before reques
   await writeFile(receiptPath, compact(receipt));
   await assert.rejects(
     prepareSourceFreeFixedHostDeployment(mismatch.input, mismatch.dependencies),
+    matchesError("SOURCE_FREE_PREPARE_INPUT", 1),
+  );
+
+  const backendRunMismatch = await createFixture(t);
+  backendRunMismatch.input.backendProducerGitSha = "9".repeat(40);
+  await assert.rejects(
+    prepareSourceFreeFixedHostDeployment(
+      backendRunMismatch.input,
+      backendRunMismatch.dependencies,
+    ),
+    matchesError("SOURCE_FREE_PREPARE_INPUT", 1),
+  );
+
+  const dataRunMismatch = await createFixture(t);
+  dataRunMismatch.input.dataProducerGitSha = "9".repeat(40);
+  await assert.rejects(
+    prepareSourceFreeFixedHostDeployment(
+      dataRunMismatch.input,
+      dataRunMismatch.dependencies,
+    ),
     matchesError("SOURCE_FREE_PREPARE_INPUT", 1),
   );
 });
@@ -203,6 +237,8 @@ async function createFixture(t) {
     outputRoot,
     operationDirectory,
     requestOutputPath,
+    backendProducerGitSha: BACKEND_REVISION,
+    dataProducerGitSha: DATA_REVISION,
     platformRevision: PLATFORM_REVISION,
     trafficGeneration: 41,
     runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/41",

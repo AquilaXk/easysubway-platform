@@ -120,11 +120,21 @@ export async function createFixedHostJourneyActivationHost({
     ...ambientEnvironment,
     EASYSUBWAY_BACKEND_ENV_FILE: backendEnvPath,
   };
+  let candidateCommandEnvironment;
   const inputsByPath = new Map(inputs.map((input) => [input.pathname, input]));
-  const invoke = (command, args, timeoutMs = 120_000) => invokeHostCommand(
-    commandRunner,
-    { command, args, env: commandEnvironment, timeoutMs },
-  );
+  const invoke = (command, args, timeoutMs = 120_000) => {
+    if (command === "docker" && candidateCommandEnvironment === undefined) {
+      throw new Error("candidate lifecycle environment is unavailable");
+    }
+    return invokeHostCommand(commandRunner, {
+      command,
+      args,
+      env: command === "docker"
+        ? candidateCommandEnvironment
+        : commandEnvironment,
+      timeoutMs,
+    });
+  };
   const removeStandby = async () => {
     await invoke("docker", [
       ...composePrefix, "rm", "--force", "--stop", "backend-standby",
@@ -138,6 +148,25 @@ export async function createFixedHostJourneyActivationHost({
     return withEvidence({ standbyRemoved: true, orphanedStandbyCount: 0 });
   };
   return {
+    setCandidateEnvironment(environment) {
+      if (
+        candidateCommandEnvironment !== undefined ||
+        !isObject(environment) ||
+        Object.values(environment).some((value) => typeof value !== "string") ||
+        ![
+          "EASYSUBWAY_BACKEND_IMAGE",
+          "EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_DESCRIPTOR_BASE64",
+          "EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN",
+        ].every((key) => typeof environment[key] === "string" &&
+          environment[key].length > 0)
+      ) {
+        throw new Error("candidate lifecycle environment is invalid");
+      }
+      candidateCommandEnvironment = Object.freeze({
+        ...environment,
+        EASYSUBWAY_BACKEND_ENV_FILE: backendEnvPath,
+      });
+    },
     readInput(pathname) {
       const input = inputsByPath.get(pathname);
       if (!input) throw new Error("fixed-host input was not opened");
@@ -301,6 +330,8 @@ export function createFixedHostJourneyActivationEffects({
         serviceToken: config.serviceToken,
         currentPublicKeyPem: config.currentPublicKeyPem,
         ambientEnvironment: config.ambientEnvironment ?? process.env,
+        candidateEnvironmentConsumer: (environment) =>
+          host.setCandidateEnvironment(environment),
         deployLockRunner: async ({ lockPath }) => {
           if (lockPath !== path.join(input.deployRoot, "deploy.lock")) {
             throw new Error("candidate requested a different deploy lock");
@@ -1078,6 +1109,7 @@ function validateEffectFactory(config, adapters, host) {
       "drainAndRecreateCanonical",
       "removeStandby",
       "cleanupStandby",
+      "setCandidateEnvironment",
     ].some((name) => typeof host[name] !== "function")
   ) {
     throw typed("FIXED_HOST_USAGE", undefined, 2);
@@ -1539,8 +1571,6 @@ function parseFixedHostRequest(bytes) {
       value.baseComposePath, value.candidateComposePath,
     ].every(validAbsoluteFilePath) ||
     value.nginxConfigPath !== RUNTIME_NGINX_CONFIG_PATH ||
-    value.baseComposePath !== RUNTIME_BASE_COMPOSE_PATH ||
-    value.candidateComposePath !== RUNTIME_CANDIDATE_COMPOSE_PATH ||
     ![
       value.operationDirectory, value.bindingPath, value.descriptorBindingPath,
       value.tuplePath, value.descriptorPath, value.composeEnvPath,
@@ -1558,6 +1588,40 @@ function parseFixedHostRequest(bytes) {
     throw typed("FIXED_HOST_USAGE", undefined, 2);
   }
   return value;
+}
+
+export function parseFixedHostRequestForTest(bytes) {
+  return parseFixedHostRequest(bytes);
+}
+
+async function verifyRuntimeComposeCopies(baseComposePath, candidateComposePath) {
+  const inputs = [];
+  try {
+    for (const pathname of [
+      baseComposePath,
+      candidateComposePath,
+      RUNTIME_BASE_COMPOSE_PATH,
+      RUNTIME_CANDIDATE_COMPOSE_PATH,
+    ]) {
+      inputs.push(await StableHostInput.open(pathname));
+    }
+    if (
+      !inputs[0].bytes.equals(inputs[2].bytes) ||
+      !inputs[1].bytes.equals(inputs[3].bytes)
+    ) {
+      throw typed("FIXED_HOST_USAGE", undefined, 2);
+    }
+    await Promise.all(inputs.map((input) => input.verify()));
+  } finally {
+    for (const input of inputs.reverse()) await input.close();
+  }
+}
+
+export async function verifyRuntimeComposeCopiesForTest(
+  baseComposePath,
+  candidateComposePath,
+) {
+  await verifyRuntimeComposeCopies(baseComposePath, candidateComposePath);
 }
 
 function isStrictDescendant(parent, candidate) {
@@ -1601,6 +1665,10 @@ async function runFixedHostCli(requestPath) {
   let lifecycleOwnsHost = false;
   try {
     const request = parseFixedHostRequest(requestInput.bytes);
+    await verifyRuntimeComposeCopies(
+      request.baseComposePath,
+      request.candidateComposePath,
+    );
     const inputPaths = [
       request.bindingPath,
       request.descriptorBindingPath,

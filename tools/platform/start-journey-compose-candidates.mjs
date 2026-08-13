@@ -85,6 +85,7 @@ export async function startJourneyComposeCandidates({
   serviceToken,
   currentPublicKeyPem,
   ambientEnvironment = process.env,
+  candidateEnvironmentConsumer,
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
   deployLockRunner = acquireSharedDeployLock,
@@ -102,6 +103,7 @@ export async function startJourneyComposeCandidates({
     serviceToken,
     currentPublicKeyPem,
     ambientEnvironment,
+    candidateEnvironmentConsumer,
     inspectDescriptor,
     composeRunner,
     deployLockRunner,
@@ -167,6 +169,7 @@ export async function startJourneyComposeCandidates({
       currentPublicKeyPem,
       ambientEnvironment,
     });
+    candidateEnvironmentConsumer?.(Object.freeze({ ...env }));
     const prefix = [
       "compose",
       "--project-name", projectName,
@@ -194,7 +197,7 @@ export async function startJourneyComposeCandidates({
         command: "docker",
         args: [
           ...prefix,
-          "up", "--detach", "--no-deps", "--no-build", "--pull", "never",
+          "up", "--detach", "--no-deps", "--no-build", "--pull", "always",
           ...SERVICES,
         ],
         env,
@@ -244,6 +247,8 @@ function validateInvocation(values) {
     typeof values.inspectDescriptor !== "function" ||
     typeof values.composeRunner !== "function" ||
     typeof values.deployLockRunner !== "function" ||
+    (values.candidateEnvironmentConsumer !== undefined &&
+      typeof values.candidateEnvironmentConsumer !== "function") ||
     values.ambientEnvironment === null ||
     typeof values.ambientEnvironment !== "object" ||
     Array.isArray(values.ambientEnvironment)

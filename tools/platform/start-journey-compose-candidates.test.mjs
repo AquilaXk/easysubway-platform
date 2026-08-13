@@ -25,6 +25,7 @@ const PUBLIC_KEY_PEM = publicKey.export({ type: "spki", format: "pem" });
 test("exact immutable inputs start only the existing inactive standby and emit one-host runtime", async () => {
   const fixture = await createFixture();
   const calls = [];
+  let lifecycleEnvironment;
   const runtime = await startJourneyComposeCandidates({
     ...fixture.input,
     serviceToken: TOKEN,
@@ -35,6 +36,9 @@ test("exact immutable inputs start only the existing inactive standby and emit o
       DOCKER_CONTEXT: "verified-test-context",
       DEPLOY_ROOT: fixture.root,
       EASYSUBWAY_POSTGRES_DB: "ambient-must-not-win",
+    },
+    candidateEnvironmentConsumer: (environment) => {
+      lifecycleEnvironment = environment;
     },
     composeRunner: async (request) => {
       const envFile = request.args[request.args.indexOf("--env-file") + 1];
@@ -63,9 +67,17 @@ test("exact immutable inputs start only the existing inactive standby and emit o
     "backend-standby",
   ]);
   assert.deepEqual(calls[1].args.slice(-7), [
-    "up", "--detach", "--no-deps", "--no-build", "--pull", "never",
+    "up", "--detach", "--no-deps", "--no-build", "--pull", "always",
     "backend-standby",
   ]);
+  assert.equal(
+    lifecycleEnvironment.EASYSUBWAY_BACKEND_IMAGE,
+    `ghcr.io/aquilaxk/easysubway-backend@${fixture.tuple.backendImageDigest}`,
+  );
+  assert.equal(
+    lifecycleEnvironment.EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN,
+    TOKEN,
+  );
   for (const call of calls) {
     assert.equal(call.command, "docker");
     assert.equal(call.args.includes("--profile"), true);

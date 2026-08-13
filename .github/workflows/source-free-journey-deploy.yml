@@ -103,8 +103,14 @@ jobs:
           set -euo pipefail
           backend_metadata="$(gh api "repos/AquilaXk/easysubway-backend/actions/artifacts/${BACKEND_ARTIFACT_ID}" --jq '[.name, (.workflow_run.id|tostring), (.expired|tostring)] | @tsv')"
           data_metadata="$(gh api "repos/AquilaXk/easysubway-data/actions/artifacts/${DATA_ARTIFACT_ID}" --jq '[.name, (.workflow_run.id|tostring), (.expired|tostring)] | @tsv')"
+          backend_run_metadata="$(gh api "repos/AquilaXk/easysubway-backend/actions/runs/${BACKEND_RUN_ID}" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')"
+          data_run_metadata="$(gh api "repos/AquilaXk/easysubway-data/actions/runs/${DATA_RUN_ID}" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')"
+          IFS=$'\t' read -r backend_workflow backend_conclusion backend_branch backend_producer_sha <<< "${backend_run_metadata}"
+          IFS=$'\t' read -r data_workflow data_conclusion data_branch data_producer_sha <<< "${data_run_metadata}"
           [[ "${backend_metadata}" == "${BACKEND_ARTIFACT_NAME}"$'\t'"${BACKEND_RUN_ID}"$'\tfalse' ]]
           [[ "${data_metadata}" == "${DATA_ARTIFACT_NAME}"$'\t'"${DATA_RUN_ID}"$'\tfalse' ]]
+          [[ "${backend_workflow}" == ".github/workflows/release-artifacts.yml" && "${backend_conclusion}" == "success" && "${backend_branch}" == "main" && "${backend_producer_sha}" =~ ^[a-f0-9]{40}$ ]]
+          [[ "${data_workflow}" == ".github/workflows/datapack-release.yml" && "${data_conclusion}" == "success" && "${data_branch}" == "main" && "${data_producer_sha}" =~ ^[a-f0-9]{40}$ ]]
           mapfile -t backend_archives < <(find "${RUNNER_TEMP}/backend-archive" -maxdepth 1 -type f -print)
           mapfile -t data_archives < <(find "${RUNNER_TEMP}/data-archive" -maxdepth 1 -type f -print)
           [[ "${#backend_archives[@]}" -eq 1 && "${#data_archives[@]}" -eq 1 ]]
@@ -130,6 +136,8 @@ jobs:
             --output-root "${preview_root}/source-free-inputs/source-free-${GITHUB_RUN_ID}" \
             --operation-directory "${preview_root}/release-receipts/source-free-${GITHUB_RUN_ID}" \
             --request-output "${RUNNER_TEMP}/fixed-host-request.json" \
+            --backend-producer-sha "${backend_producer_sha}" \
+            --data-producer-sha "${data_producer_sha}" \
             --platform-revision "${GITHUB_SHA}" \
             --traffic-generation "${GITHUB_RUN_ID}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
@@ -195,8 +203,14 @@ jobs:
           set -euo pipefail
           backend_metadata="$(gh api "repos/AquilaXk/easysubway-backend/actions/artifacts/${BACKEND_ARTIFACT_ID}" --jq '[.name, (.workflow_run.id|tostring), (.expired|tostring)] | @tsv')"
           data_metadata="$(gh api "repos/AquilaXk/easysubway-data/actions/artifacts/${DATA_ARTIFACT_ID}" --jq '[.name, (.workflow_run.id|tostring), (.expired|tostring)] | @tsv')"
+          backend_run_metadata="$(gh api "repos/AquilaXk/easysubway-backend/actions/runs/${BACKEND_RUN_ID}" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')"
+          data_run_metadata="$(gh api "repos/AquilaXk/easysubway-data/actions/runs/${DATA_RUN_ID}" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')"
+          IFS=$'\t' read -r backend_workflow backend_conclusion backend_branch backend_producer_sha <<< "${backend_run_metadata}"
+          IFS=$'\t' read -r data_workflow data_conclusion data_branch data_producer_sha <<< "${data_run_metadata}"
           [[ "${backend_metadata}" == "${BACKEND_ARTIFACT_NAME}"$'\t'"${BACKEND_RUN_ID}"$'\tfalse' ]]
           [[ "${data_metadata}" == "${DATA_ARTIFACT_NAME}"$'\t'"${DATA_RUN_ID}"$'\tfalse' ]]
+          [[ "${backend_workflow}" == ".github/workflows/release-artifacts.yml" && "${backend_conclusion}" == "success" && "${backend_branch}" == "main" && "${backend_producer_sha}" =~ ^[a-f0-9]{40}$ ]]
+          [[ "${data_workflow}" == ".github/workflows/datapack-release.yml" && "${data_conclusion}" == "success" && "${data_branch}" == "main" && "${data_producer_sha}" =~ ^[a-f0-9]{40}$ ]]
           mapfile -t backend_archives < <(find "${RUNNER_TEMP}/backend-archive" -maxdepth 1 -type f -print)
           mapfile -t data_archives < <(find "${RUNNER_TEMP}/data-archive" -maxdepth 1 -type f -print)
           [[ "${#backend_archives[@]}" -eq 1 && "${#data_archives[@]}" -eq 1 ]]
@@ -222,6 +236,8 @@ jobs:
             --output-root "${DEPLOY_ROOT}/source-free-inputs/source-free-${GITHUB_RUN_ID}" \
             --operation-directory "${DEPLOY_ROOT}/release-receipts/source-free-${GITHUB_RUN_ID}" \
             --request-output "${RUNNER_TEMP}/fixed-host-request.json" \
+            --backend-producer-sha "${backend_producer_sha}" \
+            --data-producer-sha "${data_producer_sha}" \
             --platform-revision "${GITHUB_SHA}" \
             --traffic-generation "${GITHUB_RUN_ID}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \

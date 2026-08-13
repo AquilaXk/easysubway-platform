@@ -111,8 +111,10 @@ export async function prepareSourceFreeFixedHostDeployment(
     const contract = validateContractReceipt(contractInput.bytes, component.gitSha);
     const descriptor = adapters.inspectDescriptor(descriptorInput.bytes);
     if (
+      component.gitSha !== input.backendProducerGitSha ||
       !matches(descriptor?.descriptorSha256, RAW_DIGEST) ||
       !matches(descriptor?.producerGitSha, REVISION) ||
+      descriptor.producerGitSha !== input.dataProducerGitSha ||
       !matches(descriptor?.serverRouteBundleDigest, DIGEST)
     ) throw new Error("invalid Data publication descriptor projection");
 
@@ -246,6 +248,8 @@ function validateInvocation(input, dependencies) {
     !isStrictDescendant(input.deployRoot, input.outputRoot) ||
     !isStrictDescendant(input.deployRoot, input.operationDirectory) ||
     !matches(input.platformRevision, REVISION) ||
+    !matches(input.backendProducerGitSha, REVISION) ||
+    !matches(input.dataProducerGitSha, REVISION) ||
     !matches(input.runUrl, RUN_URL) ||
     !matches(input.projectName, SAFE_PROJECT) ||
     !Number.isSafeInteger(input.trafficGeneration) || input.trafficGeneration < 1 ||
@@ -497,6 +501,8 @@ function parseCliArguments(args) {
     ["--output-root", "outputRoot"],
     ["--operation-directory", "operationDirectory"],
     ["--request-output", "requestOutputPath"],
+    ["--backend-producer-sha", "backendProducerGitSha"],
+    ["--data-producer-sha", "dataProducerGitSha"],
     ["--platform-revision", "platformRevision"],
     ["--traffic-generation", "trafficGeneration"],
     ["--run-url", "runUrl"],

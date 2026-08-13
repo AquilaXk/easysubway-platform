@@ -381,6 +381,11 @@ test("terminal adapters are delegated exactly once with fixed instance URLs and 
   const adapters = {
     startJourneyComposeCandidates: async (value) => {
       calls.push(["start", value]);
+      value.candidateEnvironmentConsumer({
+        EASYSUBWAY_BACKEND_IMAGE: `ghcr.io/aquilaxk/easysubway-backend@${digest("a")}`,
+        EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_DESCRIPTOR_BASE64: "descriptor",
+        EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN: "t".repeat(32),
+      });
       return base.startStandby();
     },
     runJourneyCandidateCanary: async (value) => {
@@ -409,6 +414,9 @@ test("terminal adapters are delegated exactly once with fixed instance URLs and 
     drainAndRecreateCanonical: base.drainAndRecreateCanonical,
     removeStandby: base.removeStandby,
     cleanupStandby: base.cleanupStandby,
+    setCandidateEnvironment: (environment) => {
+      calls.push(["environment", environment]);
+    },
   };
   const delegated = createFixedHostJourneyActivationEffects({
     config: {
@@ -439,18 +447,22 @@ test("terminal adapters are delegated exactly once with fixed instance URLs and 
   await runFixedHostJourneyActivation(inputValue, delegated);
 
   assert.deepEqual(calls.map(([name]) => name), [
-    "start", "canary", "observe", "admit",
+    "start", "environment", "canary", "observe", "admit",
     "activate:backend-standby", "activate:backend",
   ]);
   assert.equal(calls[0][1].operationId, inputValue.operationId);
   assert.equal(calls[0][1].trafficGeneration, 17);
   assert.equal(typeof calls[0][1].deployLockRunner, "function");
-  assert.equal(calls[1][1].baseUrl, "http://127.0.0.1:8082");
-  assert.equal(calls[1][1].candidateGeneration, 9);
-  assert.equal(calls[4][1].baseUrl, "http://127.0.0.1:8082");
-  assert.equal(calls[5][1].baseUrl, "http://127.0.0.1:8080");
-  assert.equal(calls[4][1].trafficGeneration, 17);
+  assert.equal(
+    calls[1][1].EASYSUBWAY_BACKEND_IMAGE,
+    `ghcr.io/aquilaxk/easysubway-backend@${digest("a")}`,
+  );
+  assert.equal(calls[2][1].baseUrl, "http://127.0.0.1:8082");
+  assert.equal(calls[2][1].candidateGeneration, 9);
+  assert.equal(calls[5][1].baseUrl, "http://127.0.0.1:8082");
+  assert.equal(calls[6][1].baseUrl, "http://127.0.0.1:8080");
   assert.equal(calls[5][1].trafficGeneration, 17);
+  assert.equal(calls[6][1].trafficGeneration, 17);
 });
 
 test("Nginx render changes only three canonical proxy targets and rejects drift", () => {
@@ -501,10 +513,12 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     ].join("\n"))),
   ]);
   const commands = [];
+  const dockerEnvironments = [];
   const probes = [];
   let currentNs = 0n;
   const commandRunner = async (request) => {
     commands.push([request.command, ...request.args]);
+    if (request.command === "docker") dockerEnvironments.push(request.env);
     if (request.command === "docker" && request.args.includes("stop")) {
       currentNs = 29_000_000_000n;
     }
@@ -551,6 +565,11 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
   const lock = await host.acquireDeployLock({
     lockPath: "/opt/easysubway/deploy.lock",
     operationId: digest("7"),
+  });
+  host.setCandidateEnvironment({
+    EASYSUBWAY_BACKEND_IMAGE: `ghcr.io/aquilaxk/easysubway-backend@${digest("a")}`,
+    EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_DESCRIPTOR_BASE64: "descriptor",
+    EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN: "t".repeat(32),
   });
   await lock.verify();
   await host.verifyInputs();
@@ -617,6 +636,14 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     "verify:/opt/easysubway/deploy.lock",
     "close:/opt/easysubway/deploy.lock",
   ]);
+  assert.equal(dockerEnvironments.length, 5);
+  assert.equal(
+    dockerEnvironments.every((environment) =>
+      environment.EASYSUBWAY_BACKEND_IMAGE ===
+        `ghcr.io/aquilaxk/easysubway-backend@${digest("a")}` &&
+      environment.EASYSUBWAY_BACKEND_ENV_FILE === backendEnvPath),
+    true,
+  );
   assert.deepEqual(probes.map(({ expectedPort, instanceIdentity, evidenceDigest }) =>
     [expectedPort, instanceIdentity, evidenceDigest]), [
     [8082, "backend-standby", digest("8")],
