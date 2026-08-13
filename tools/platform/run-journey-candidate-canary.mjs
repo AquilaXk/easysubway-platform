@@ -23,6 +23,9 @@ const ULID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 const MOBILITY_PROFILES = new Set(["STANDARD", "SLOW", "NO_STAIRS", "STEP_FREE"]);
 const CONSTRAINT_MODES = new Set(["NONE", "REQUIRE_STEP_FREE"]);
+const isNonemptyString = (value) => typeof value === "string" && value.length > 0;
+const matches = (value, pattern) => typeof value === "string" && pattern.test(value);
+const positiveSafeInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const RESPONSE_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "canaryRequestIdentity", "requestId",
   "candidateManifestSha256", "candidateGeneration", "bundleId",
@@ -278,7 +281,10 @@ async function requestCanary({ baseUrl, command, serviceToken, fetchImpl, now })
   }
   requireHttpContract(response);
   const bytes = await readResponse(response);
-  const receivedAt = currentTime(now);
+  const receivedAt = now();
+  if (!(receivedAt instanceof Date) || !Number.isFinite(receivedAt.valueOf())) {
+    throw failure("JOURNEY_CANARY_USAGE", 2);
+  }
   const result = parseJson(bytes);
   validateResult(result, bytes, command, receivedAt);
   return result;
@@ -417,34 +423,11 @@ function validInstant(value) {
   return actual.every((part, index) => part === Number(match[index + 1]));
 }
 
-function currentTime(now) {
-  const value = now();
-  if (!(value instanceof Date) || !Number.isFinite(value.valueOf())) {
-    throw failure("JOURNEY_CANARY_USAGE", 2);
-  }
-  return value;
-}
-
 function isExactObject(value, fields) {
-  return value !== null && !Array.isArray(value) && typeof value === "object" &&
-    sameArray(Object.keys(value), fields);
-}
-
-function sameArray(left, right) {
-  return left.length === right.length &&
-    left.every((value, index) => value === right[index]);
-}
-
-function positiveSafeInteger(value) {
-  return Number.isSafeInteger(value) && value >= 1;
-}
-
-function isNonemptyString(value) {
-  return typeof value === "string" && value.length > 0;
-}
-
-function matches(value, pattern) {
-  return typeof value === "string" && pattern.test(value);
+  if (value === null || Array.isArray(value) || typeof value !== "object") return false;
+  const actual = Object.keys(value);
+  return actual.length === fields.length &&
+    fields.every((field, index) => actual[index] === field);
 }
 
 function failure(code, exitCode = 1) {
