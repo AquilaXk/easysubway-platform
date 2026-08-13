@@ -30,7 +30,9 @@ test("one authenticated activation POST returns canonical active evidence", asyn
     now: () => NOW,
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
-      return response(activeResponse(fixture.admission, "backend-standby", 31));
+      return response(activeResponse(fixture.admission, "backend-standby", 31), {
+        contentType: "application/json; charset=utf-8",
+      });
     },
   });
 
@@ -118,6 +120,8 @@ test("HTTP, response, identity, freshness, evidence, and network failures make o
     ["409", () => response({}, { status: 409 }), "JOURNEY_ACTIVATION_HTTP"],
     ["503", () => response({}, { status: 503 }), "JOURNEY_ACTIVATION_HTTP"],
     ["non-JSON", ({ valid }) => response(valid, { contentType: "text/plain" }), "JOURNEY_ACTIVATION_HTTP"],
+    ["JSON prefix", ({ valid }) => response(valid, { contentType: "application/jsonp" }), "JOURNEY_ACTIVATION_HTTP"],
+    ["JSON sequence", ({ valid }) => response(valid, { contentType: "application/json-seq" }), "JOURNEY_ACTIVATION_HTTP"],
     ["cacheable", ({ valid }) => response(valid, { cacheControl: "max-age=60" }), "JOURNEY_ACTIVATION_HTTP"],
     ["oversize", () => response("x".repeat(64 * 1024 + 1)), "JOURNEY_ACTIVATION_RESPONSE"],
     ["extra field", ({ valid }) => response({ ...valid, extra: true }), "JOURNEY_ACTIVATION_RESPONSE"],
@@ -125,6 +129,18 @@ test("HTTP, response, identity, freshness, evidence, and network failures make o
     ["generation", ({ valid }) => response({ ...valid, generation: 8 }), "JOURNEY_ACTIVATION_IDENTITY"],
     ["traffic", ({ valid }) => response({ ...valid, trafficGeneration: 32 }), "JOURNEY_ACTIVATION_IDENTITY"],
     ["stale", ({ valid }) => response({ ...valid, freshUntil: NOW.toISOString() }), "JOURNEY_ACTIVATION_FRESHNESS"],
+    ["future activation", ({ valid }) => response({
+      ...valid,
+      activatedAt: "2026-08-13T03:00:01Z",
+    }), "JOURNEY_ACTIVATION_FRESHNESS"],
+    ["impossible fresh date", ({ valid }) => response({
+      ...valid,
+      freshUntil: "2026-02-30T03:00:00Z",
+    }), "JOURNEY_ACTIVATION_RESPONSE"],
+    ["impossible activation date", ({ valid }) => response({
+      ...valid,
+      activatedAt: "2026-02-30T03:00:00Z",
+    }), "JOURNEY_ACTIVATION_RESPONSE"],
     ["evidence", ({ valid }) => response({ ...valid, evidenceSha256: "0".repeat(64) }), "JOURNEY_ACTIVATION_EVIDENCE"],
     ["network", () => { throw new TypeError("private response"); }, "JOURNEY_ACTIVATION_NETWORK"],
   ];
@@ -152,6 +168,71 @@ test("HTTP, response, identity, freshness, evidence, and network failures make o
     );
     assert.equal(attempts, 1, name);
   }
+});
+
+test("response completion time and bounded reader remain fail closed", async () => {
+  const staleFixture = await createFixture();
+  let clockCalls = 0;
+  await assert.rejects(
+    activateJourneyBackend({
+      admissionPath: staleFixture.path,
+      baseUrl: "http://127.0.0.1:8082",
+      instanceIdentity: "backend-standby",
+      activationRequestIdentity: "deploy-abc:standby",
+      trafficGeneration: 31,
+      serviceToken: TOKEN,
+      now: () => [NOW, new Date("2026-08-14T03:00:00Z")][clockCalls++],
+      fetchImpl: async () => response(activeResponse(
+        staleFixture.admission, "backend-standby", 31,
+      )),
+    }),
+    (error) => error instanceof JourneyBackendActivationError &&
+      error.code === "JOURNEY_ACTIVATION_FRESHNESS",
+  );
+  assert.equal(clockCalls, 2);
+
+  const readerFixture = await createFixture();
+  let reads = 0;
+  let cancels = 0;
+  let arrayBufferCalls = 0;
+  const readerOnlyResponse = {
+    status: 200,
+    headers: new Headers({
+      "content-type": "application/json",
+      "cache-control": "no-store",
+    }),
+    body: {
+      getReader: () => ({
+        read: async () => {
+          reads += 1;
+          return { done: false, value: Buffer.alloc(64 * 1024 + 1) };
+        },
+        cancel: async () => { cancels += 1; },
+        releaseLock: () => {},
+      }),
+    },
+    arrayBuffer: async () => {
+      arrayBufferCalls += 1;
+      return Buffer.alloc(64 * 1024 + 1);
+    },
+  };
+  await assert.rejects(
+    activateJourneyBackend({
+      admissionPath: readerFixture.path,
+      baseUrl: "http://127.0.0.1:8082",
+      instanceIdentity: "backend-standby",
+      activationRequestIdentity: "deploy-abc:standby",
+      trafficGeneration: 31,
+      serviceToken: TOKEN,
+      now: () => NOW,
+      fetchImpl: async () => readerOnlyResponse,
+    }),
+    (error) => error instanceof JourneyBackendActivationError &&
+      error.code === "JOURNEY_ACTIVATION_RESPONSE",
+  );
+  assert.equal(reads, 1);
+  assert.equal(cancels, 1);
+  assert.equal(arrayBufferCalls, 0);
 });
 
 test("CLI failure emits only a closed code", async () => {
@@ -230,7 +311,7 @@ function activeResponse(admission, instanceId, trafficGeneration) {
     servingReady: true,
     draining: false,
     freshUntil: "2026-08-14T03:00:00Z",
-    activatedAt: "2026-08-13T03:00:01Z",
+    activatedAt: "2026-08-13T02:59:59Z",
   };
   return { ...value, evidenceSha256: activeEvidenceSha256(value) };
 }

@@ -79,10 +79,7 @@ export async function activateJourneyBackend({
   const input = await openActivationInput(admissionPath);
   try {
     const admission = validateAdmission(input.bytes);
-    const observedAt = now();
-    if (!(observedAt instanceof Date) || !Number.isFinite(observedAt.valueOf())) {
-      throw failure("JOURNEY_ACTIVATION_USAGE", 2);
-    }
+    currentTime(now);
     const command = {
       schemaVersion: 1,
       artifactKind: "journey-v3-activation-command",
@@ -99,7 +96,7 @@ export async function activateJourneyBackend({
       command,
       serviceToken,
       fetchImpl,
-      observedAt,
+      now,
     });
     await input.verify();
     return {
@@ -224,7 +221,7 @@ async function requestActivation({
   command,
   serviceToken,
   fetchImpl,
-  observedAt,
+  now,
 }) {
   const url = new URL(ACTIVATION_PATH, `${baseUrl}/`).href;
   let response;
@@ -245,20 +242,22 @@ async function requestActivation({
   }
   requireActivationHttpContract(response);
   const bytes = await readActivationResponse(response);
+  const receivedAt = currentTime(now);
   const active = parseJson(bytes, "JOURNEY_ACTIVATION_RESPONSE", 1);
-  validateActiveReadiness(active, admission, instanceIdentity, command, observedAt);
+  validateActiveReadiness(active, admission, instanceIdentity, command, receivedAt);
   return active;
 }
 
 function requireActivationHttpContract(response) {
   const contentType = response?.headers?.get("content-type")?.toLowerCase() ?? "";
+  const mediaType = contentType.split(";", 1)[0].trim();
   const cacheDirectives = new Set(
     (response?.headers?.get("cache-control") ?? "")
       .toLowerCase()
       .split(",")
       .map((value) => value.trim()),
   );
-  if (response?.status !== 200 || !contentType.startsWith("application/json") ||
+  if (response?.status !== 200 || mediaType !== "application/json" ||
       !cacheDirectives.has("no-store")) {
     throw failure("JOURNEY_ACTIVATION_HTTP");
   }
@@ -278,25 +277,45 @@ async function readActivationResponse(response) {
 }
 
 async function readBoundedResponse(response) {
-  if (typeof response.body?.[Symbol.asyncIterator] !== "function") {
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > MAX_RESPONSE_BYTES) throw failure("JOURNEY_ACTIVATION_RESPONSE");
-    return bytes;
-  }
+  const reader = responseReader(response.body);
   const chunks = [];
   let length = 0;
-  for await (const value of response.body) {
-    length += value.byteLength;
-    if (length > MAX_RESPONSE_BYTES) {
-      await response.body.cancel().catch(() => {});
-      throw failure("JOURNEY_ACTIVATION_RESPONSE");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_RESPONSE_BYTES) {
+        await cancelReader(reader);
+        throw failure("JOURNEY_ACTIVATION_RESPONSE");
+      }
+      chunks.push(Buffer.from(value));
     }
-    chunks.push(Buffer.from(value));
+    return Buffer.concat(chunks, length);
+  } finally {
+    reader.releaseLock?.();
   }
-  return Buffer.concat(chunks, length);
 }
 
-function validateActiveReadiness(value, admission, instanceIdentity, command, observedAt) {
+function responseReader(body) {
+  if (typeof body?.getReader === "function") return body.getReader();
+  const iterator = body?.[Symbol.asyncIterator]?.();
+  if (!iterator) throw failure("JOURNEY_ACTIVATION_RESPONSE");
+  return {
+    read: () => iterator.next(),
+    cancel: () => iterator.return?.(),
+  };
+}
+
+async function cancelReader(reader) {
+  try {
+    await reader.cancel?.();
+  } catch {
+    // The bounded failure remains authoritative even if cancellation fails.
+  }
+}
+
+function validateActiveReadiness(value, admission, instanceIdentity, command, receivedAt) {
   if (
     !isExactObject(value, ACTIVE_FIELDS) ||
     value.schemaVersion !== 1 ||
@@ -329,9 +348,12 @@ function validateActiveReadiness(value, admission, instanceIdentity, command, ob
   ) {
     throw failure("JOURNEY_ACTIVATION_IDENTITY");
   }
+  const freshUntil = Date.parse(value.freshUntil);
+  const activatedAt = Date.parse(value.activatedAt);
   if (
-    Date.parse(value.freshUntil) <= observedAt.valueOf() ||
-    Date.parse(value.activatedAt) >= Date.parse(value.freshUntil)
+    freshUntil <= receivedAt.valueOf() ||
+    activatedAt > receivedAt.valueOf() ||
+    activatedAt >= freshUntil
   ) {
     throw failure("JOURNEY_ACTIVATION_FRESHNESS");
   }
@@ -360,9 +382,25 @@ function parseJson(bytes, code, exitCode) {
 }
 
 function validInstant(value) {
-  return typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
-    Number.isFinite(Date.parse(value));
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value);
+  const parsed = Date.parse(value);
+  if (!match || !Number.isFinite(parsed)) return false;
+  const instant = new Date(parsed);
+  return instant.getUTCFullYear() === Number(match[1]) &&
+    instant.getUTCMonth() + 1 === Number(match[2]) &&
+    instant.getUTCDate() === Number(match[3]) &&
+    instant.getUTCHours() === Number(match[4]) &&
+    instant.getUTCMinutes() === Number(match[5]) &&
+    instant.getUTCSeconds() === Number(match[6]);
+}
+
+function currentTime(now) {
+  const value = now();
+  if (!(value instanceof Date) || !Number.isFinite(value.valueOf())) {
+    throw failure("JOURNEY_ACTIVATION_USAGE", 2);
+  }
+  return value;
 }
 
 function isExactObject(value, fields) {
