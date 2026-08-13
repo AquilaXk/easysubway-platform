@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Platform deployment input envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "orchestrator",
+    "platform",
+    "backend",
+    "data",
+    "release",
+    "policies",
+    "envelopeSha256"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "PLATFORM_DEPLOYMENT_INPUT_ENVELOPE_V1" },
+    "artifactKind": { "type": "string", "const": "platform-deployment-input-envelope" },
+    "orchestrator": { "type": "string", "const": "COMPOSE" },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "gitSha", "environment", "deploymentEnvironmentIdentity", "admissionReceiptSha256", "credentialInventorySha256"],
+      "properties": {
+        "repository": { "type": "string", "const": "AquilaXk/easysubway-platform" },
+        "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}(?![\\s\\S])" },
+        "environment": { "type": "string", "const": "production-deploy" },
+        "deploymentEnvironmentIdentity": { "type": "string", "const": "production" },
+        "admissionReceiptSha256": { "$ref": "#/$defs/prefixedDigest" },
+        "credentialInventorySha256": { "$ref": "#/$defs/prefixedDigest" }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "gitSha", "imageDigest", "configDigest", "journeyContractDigest", "componentManifestSha256"],
+      "properties": {
+        "repository": { "type": "string", "const": "AquilaXk/easysubway-backend" },
+        "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}(?![\\s\\S])" },
+        "imageDigest": { "$ref": "#/$defs/prefixedDigest" },
+        "configDigest": { "$ref": "#/$defs/prefixedDigest" },
+        "journeyContractDigest": { "$ref": "#/$defs/prefixedDigest" },
+        "componentManifestSha256": { "$ref": "#/$defs/prefixedDigest" }
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "producerGitSha", "descriptorSha256", "handoffSha256", "serverRouteBundleDigest"],
+      "properties": {
+        "repository": { "type": "string", "const": "AquilaXk/easysubway-data" },
+        "producerGitSha": { "type": "string", "pattern": "^[a-f0-9]{40}(?![\\s\\S])" },
+        "descriptorSha256": { "$ref": "#/$defs/rawDigest" },
+        "handoffSha256": { "$ref": "#/$defs/rawDigest" },
+        "serverRouteBundleDigest": { "$ref": "#/$defs/prefixedDigest" }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tupleSha256", "candidateBindingSha256", "descriptorBindingSha256"],
+      "properties": {
+        "tupleSha256": { "$ref": "#/$defs/prefixedDigest" },
+        "candidateBindingSha256": { "$ref": "#/$defs/prefixedDigest" },
+        "descriptorBindingSha256": { "$ref": "#/$defs/prefixedDigest" }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundleAcquisitionContractSha256", "lifecycleContractSha256", "activationReceiptSchemaSha256", "runtimeInputInventorySha256"],
+      "properties": {
+        "bundleAcquisitionContractSha256": { "$ref": "#/$defs/prefixedDigest" },
+        "lifecycleContractSha256": { "$ref": "#/$defs/prefixedDigest" },
+        "activationReceiptSchemaSha256": { "$ref": "#/$defs/prefixedDigest" },
+        "runtimeInputInventorySha256": { "$ref": "#/$defs/prefixedDigest" }
+      }
+    },
+    "envelopeSha256": { "$ref": "#/$defs/prefixedDigest" }
+  },
+  "$defs": {
+    "prefixedDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "rawDigest": { "type": "string", "pattern": "^[a-f0-9]{64}(?![\\s\\S])" }
+  }
+}

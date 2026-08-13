@@ -55,6 +55,7 @@ jobs:
           node --test tools/platform/observe-journey-candidate-readiness.test.mjs
           node --test tools/platform/activate-journey-backend.test.mjs
           node --test tools/platform/start-journey-compose-candidates.test.mjs
+          node --test tools/platform/assemble-platform-deployment-input-envelope.test.mjs
           node --test tools/platform/platform-journey-release-lifecycle-contract.test.mjs
           node --test tools/platform/stage-journey-release-tuple.test.mjs
           node --test tools/platform/read-staged-journey-release-tuple.test.mjs
