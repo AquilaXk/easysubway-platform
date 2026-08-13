@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   JourneyCandidateCanaryAdapterError,
@@ -129,6 +130,11 @@ test("HTTP, bounded body, response, identity, timestamp, and evidence failures m
     ["future capturedAt", ({ valid }) => response({
       ...valid, capturedAt: "2026-08-13T03:00:01Z",
     }), "JOURNEY_CANARY_TIMESTAMP"],
+    ["stale capturedAt", ({ valid }) => {
+      const { evidenceSha256: _evidenceSha256, ...stale } = valid;
+      stale.capturedAt = "2026-08-13T02:59:59Z";
+      return response({ ...stale, evidenceSha256: canaryEvidenceSha256(stale) });
+    }, "JOURNEY_CANARY_TIMESTAMP"],
     ["impossible capturedAt", ({ valid }) => response({
       ...valid, capturedAt: "2026-02-30T03:00:00Z",
     }), "JOURNEY_CANARY_RESPONSE"],
@@ -175,8 +181,12 @@ test("tuple drift after the request fails closed", async () => {
 
 test("CLI failure emits only a closed code", async () => {
   const fixture = await createFixture();
+  const cliRoot = await mkdtemp(join(tmpdir(), "journey canary % 한글 "));
+  const cliScript = join(cliRoot, "canary #.mjs");
+  await symlink(fileURLToPath(SCRIPT), cliScript);
+  const cliUrl = pathToFileURL(cliScript);
   const result = spawnSync(process.execPath, [
-    SCRIPT.pathname,
+    fileURLToPath(cliUrl),
     "--tuple", fixture.path,
     "--base-url", "http://127.0.0.1:8082",
     "--candidate-generation", "7",
@@ -287,7 +297,7 @@ function canaryResponse(tuple) {
     bundleId: "route-bundle-20260813",
     bundleReleaseSequence: 23,
     queryId: REQUEST_ID,
-    capturedAt: "2026-08-13T02:59:59Z",
+    capturedAt: "2026-08-13T03:00:00Z",
     passed: true,
     legacyGraphSuccessCount: 0,
     localRouteInvocationCount: 0,

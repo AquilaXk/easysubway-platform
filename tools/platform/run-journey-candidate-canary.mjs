@@ -263,6 +263,7 @@ function validateTuple(bytes) {
 
 async function requestCanary({ baseUrl, command, serviceToken, fetchImpl, now }) {
   const url = new URL(CANARY_PATH, `${baseUrl}/`).href;
+  const requestStartedAt = readClock(now);
   let response;
   try {
     response = await fetchImpl(url, {
@@ -281,13 +282,16 @@ async function requestCanary({ baseUrl, command, serviceToken, fetchImpl, now })
   }
   requireHttpContract(response);
   const bytes = await readResponse(response);
-  const receivedAt = now();
-  if (!(receivedAt instanceof Date) || !Number.isFinite(receivedAt.valueOf())) {
-    throw failure("JOURNEY_CANARY_USAGE", 2);
-  }
+  const receivedAt = readClock(now);
   const result = parseJson(bytes);
-  validateResult(result, bytes, command, receivedAt);
+  validateResult(result, bytes, command, requestStartedAt, receivedAt);
   return result;
+}
+
+function readClock(now) {
+  const value = now();
+  if (value instanceof Date && Number.isFinite(value.valueOf())) return value;
+  throw failure("JOURNEY_CANARY_USAGE", 2);
 }
 
 function requireHttpContract(response) {
@@ -364,7 +368,7 @@ function parseJson(bytes) {
   }
 }
 
-function validateResult(value, bytes, command, receivedAt) {
+function validateResult(value, bytes, command, requestStartedAt, receivedAt) {
   if (
     !isExactObject(value, RESPONSE_FIELDS) ||
     value.schemaVersion !== 1 ||
@@ -393,7 +397,8 @@ function validateResult(value, bytes, command, receivedAt) {
   ) {
     throw failure("JOURNEY_CANARY_IDENTITY");
   }
-  if (Date.parse(value.capturedAt) > receivedAt.valueOf()) {
+  const capturedAt = Date.parse(value.capturedAt);
+  if (capturedAt < requestStartedAt.valueOf() || capturedAt > receivedAt.valueOf()) {
     throw failure("JOURNEY_CANARY_TIMESTAMP");
   }
   if (canaryEvidenceSha256(value) !== value.evidenceSha256) {
