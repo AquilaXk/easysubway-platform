@@ -185,13 +185,19 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
 
 test("candidate overlay and CLI keep public traffic, canonical services and secrets out", async () => {
   const overlay = await readFile(OVERLAY, "utf8");
-  assert.match(overlay, /^services:\n  backend-journey-candidate-a:/);
+  assert.match(overlay, /^x-journey-candidate-common: &journey-candidate-common/);
+  assert.match(overlay, /x-journey-candidate-environment: &journey-candidate-environment/);
+  assert.match(overlay, /\nservices:\n  backend-journey-candidate-a:/);
   assert.match(overlay, /\n  backend-journey-candidate-b:/);
-  assert.equal((overlay.match(/profiles:\n      - journey-candidate/g) ?? []).length, 2);
-  assert.equal((overlay.match(/restart: "no"/g) ?? []).length, 2);
-  assert.equal((overlay.match(/user: "10001:10001"/g) ?? []).length, 2);
-  assert.equal((overlay.match(/read_only: true/g) ?? []).length, 2);
-  assert.equal((overlay.match(/no-new-privileges:true/g) ?? []).length, 2);
+  assert.equal((overlay.match(/<<: \*journey-candidate-common/g) ?? []).length, 2);
+  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 2);
+  assert.equal((overlay.match(/profiles:\n    - journey-candidate/g) ?? []).length, 1);
+  assert.equal((overlay.match(/restart: "no"/g) ?? []).length, 1);
+  assert.equal((overlay.match(/user: "10001:10001"/g) ?? []).length, 1);
+  assert.equal((overlay.match(/read_only: true/g) ?? []).length, 1);
+  assert.equal((overlay.match(/no-new-privileges:true/g) ?? []).length, 1);
+  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-01/);
+  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-02/);
   assert.match(overlay, /127\.0\.0\.1:18081:8080/);
   assert.match(overlay, /127\.0\.0\.1:18082:8080/);
   for (const forbidden of ["backend-standby", "route-v2-gateway", "nginx", "KUBERNETES"] ) {
