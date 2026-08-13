@@ -49,9 +49,10 @@ test("one authenticated inactive candidate response normalizes into the admissio
     instance.instanceIdentity,
     instance.failureDomainIdentity,
     instance.tupleSha256,
+    instance.candidateGeneration,
     instance.readinessEvidenceDigest,
   ]), [
-    ["candidate-01", "oci-host-easysubway-a1", fixture.tuple.tupleSha256,
+    ["candidate-01", "oci-host-easysubway-a1", fixture.tuple.tupleSha256, 1,
       `sha256:${candidateResponse(fixture.tuple, "candidate-01", 1).evidenceSha256}`],
   ]);
   assert.deepEqual(observations.canary, {
@@ -73,6 +74,7 @@ test("one authenticated inactive candidate response normalizes into the admissio
   assert.equal(admission.instanceCount, 1);
   assert.equal(admission.failureDomainCount, 1);
   assert.equal(admission.tupleSha256, fixture.tuple.tupleSha256);
+  assert.equal(admission.candidateGeneration, 1);
 });
 
 test("HTTP, schema, identity, freshness and evidence failures are closed and bounded", async () => {
@@ -83,6 +85,7 @@ test("HTTP, schema, identity, freshness and evidence failures are closed and bou
     ["non-JSON", ({ valid }) => response(valid, { contentType: "text/plain" }), "CANDIDATE_READINESS_HTTP"],
     ["oversize", () => response("x".repeat(64 * 1024 + 1)), "CANDIDATE_READINESS_RESPONSE"],
     ["extra field", ({ valid }) => response({ ...valid, extra: true }), "CANDIDATE_READINESS_RESPONSE"],
+    ["zero generation", ({ valid }) => response({ ...valid, generation: 0 }), "CANDIDATE_READINESS_RESPONSE"],
     ["identity mismatch", ({ valid }) => response({ ...valid, releaseTupleSha256: "0".repeat(64) }), "CANDIDATE_READINESS_IDENTITY"],
     ["stale", ({ valid }) => response({ ...valid, freshUntil: NOW.toISOString() }), "CANDIDATE_READINESS_FRESHNESS"],
     ["evidence mismatch", ({ valid }) => response({ ...valid, evidenceSha256: "0".repeat(64) }), "CANDIDATE_READINESS_EVIDENCE"],

@@ -41,6 +41,7 @@ const INSTANCE_FIELDS = Object.freeze([
   "serverRouteBundleDigest",
   "deploymentRevision",
   "environmentIdentity",
+  "candidateGeneration",
   "warmed",
   "ready",
   "readinessEvidenceDigest",
@@ -306,6 +307,7 @@ function validateInstanceShape(instance) {
     matches(instance.serverRouteBundleDigest, DIGEST) &&
     matches(instance.deploymentRevision, REVISION) &&
     matches(instance.environmentIdentity, ENVIRONMENT) &&
+    positiveSafeInteger(instance.candidateGeneration) &&
     typeof instance.warmed === "boolean" &&
     typeof instance.ready === "boolean" &&
     matches(instance.readinessEvidenceDigest, DIGEST);
@@ -366,6 +368,7 @@ function admit({
     instanceCount: observations.instances.length,
     failureDomainCount: failureDomains.size,
     canaryEvidenceDigest: observations.canary.evidenceDigest,
+    candidateGeneration: observations.instances[0].candidateGeneration,
   };
   return {
     ...admission,
@@ -405,6 +408,10 @@ function isNonemptyString(value) {
 
 function matches(value, pattern) {
   return typeof value === "string" && pattern.test(value);
+}
+
+function positiveSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 1;
 }
 
 function admissionFailure(code, exitCode = 1) {

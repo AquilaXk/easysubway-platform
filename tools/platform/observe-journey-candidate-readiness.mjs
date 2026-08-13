@@ -326,6 +326,7 @@ async function observeInstance({ instance, tuple, serviceToken, fetchImpl, obser
     serverRouteBundleDigest: tuple.serverRouteBundleDigest,
     deploymentRevision: tuple.deploymentRevision,
     environmentIdentity: tuple.environmentIdentity,
+    candidateGeneration: value.generation,
     warmed: true,
     ready: true,
     readinessEvidenceDigest: `sha256:${value.evidenceSha256}`,

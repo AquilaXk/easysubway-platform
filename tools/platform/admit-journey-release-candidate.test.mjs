@@ -124,6 +124,12 @@ test("rejects malformed, open, reordered, and noncanonical bytes", async () => {
       mutateObservations: (value) => { value.instances[0].instanceIdentity = 123; },
     },
     {
+      mutateObservations: (value) => { delete value.instances[0].candidateGeneration; },
+    },
+    {
+      mutateObservations: (value) => { value.instances[0].candidateGeneration = 0; },
+    },
+    {
       encodeObservations: (value) => `${JSON.stringify({
         artifactKind: value.artifactKind,
         schemaVersion: value.schemaVersion,
@@ -314,6 +320,7 @@ function validInstance(tuple, instanceIdentity, failureDomainIdentity, evidence)
     serverRouteBundleDigest: tuple.serverRouteBundleDigest,
     deploymentRevision: tuple.deploymentRevision,
     environmentIdentity: tuple.environmentIdentity,
+    candidateGeneration: 7,
     warmed: true,
     ready: true,
     readinessEvidenceDigest: digest(evidence),
@@ -340,6 +347,7 @@ function expectedAdmission(fixture) {
       fixture.observations.instances.map((instance) => instance.failureDomainIdentity),
     ).size,
     canaryEvidenceDigest: fixture.observations.canary.evidenceDigest,
+    candidateGeneration: fixture.observations.instances[0].candidateGeneration,
   };
   return {
     ...admission,
