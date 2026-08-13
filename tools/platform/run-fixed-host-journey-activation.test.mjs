@@ -5,7 +5,10 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  createFixedHostJourneyActivationEffects,
+  createFixedHostJourneyActivationHost,
   FixedHostJourneyActivationError,
+  renderFixedHostNginxConfig,
   runFixedHostJourneyActivation,
 } from "./run-fixed-host-journey-activation.mjs";
 
@@ -14,7 +17,7 @@ const digest = (value) => `sha256:${value.repeat(64)}`;
 function input(root) {
   return {
     operationDirectory: path.join(root, "operation"),
-    operationId: "journey-activation-20260813-001",
+    operationId: digest("7"),
     deployRoot: "/opt/easysubway",
     runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/31670000000",
     generatedAt: "2026-08-13T05:00:00.000Z",
@@ -83,10 +86,18 @@ function effects(events, failAt) {
       schemaVersion: "PLATFORM_JOURNEY_CANDIDATE_OBSERVATIONS_V1",
       artifactKind: "journey-candidate-observations",
       orchestrator: "COMPOSE",
+      bindingSha256: digest("2"),
       tupleSha256: digest("f"),
       instances: [{
         instanceIdentity: "backend-standby",
         failureDomainIdentity: "oci-host-easysubway-a1",
+        tupleSha256: digest("f"),
+        backendImageDigest: digest("a"),
+        backendConfigDigest: digest("b"),
+        journeyContractDigest: digest("c"),
+        serverRouteBundleDigest: digest("d"),
+        deploymentRevision: "e".repeat(40),
+        environmentIdentity: "production",
         candidateGeneration: 9,
         warmed: true,
         ready: true,
@@ -106,6 +117,14 @@ function effects(events, failAt) {
       artifactKind: "journey-candidate-admission",
       orchestrator: "COMPOSE",
       tupleSha256: digest("f"),
+      backendImageDigest: digest("a"),
+      backendConfigDigest: digest("b"),
+      journeyContractDigest: digest("c"),
+      serverRouteBundleDigest: digest("d"),
+      deploymentRevision: "e".repeat(40),
+      environmentIdentity: "production",
+      bindingSha256: digest("2"),
+      canaryEvidenceDigest: digest("5"),
       candidateGeneration: 9,
       candidateAdmissionSha256: digest("7"),
     }),
@@ -247,6 +266,26 @@ test("post-switch failure leaves admitted standby serving and emits no success r
   assert.equal(failure.successReceiptCreated, false);
 });
 
+test("cross-stage identity drift fails before traffic commit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-identity-drift-"));
+  const events = [];
+  const injected = effects(events);
+  const originalCanary = injected.runCanary;
+  injected.runCanary = async (request) => ({
+    ...await originalCanary(request),
+    tupleSha256: digest("0"),
+  });
+
+  await assert.rejects(
+    runFixedHostJourneyActivation(input(root), injected),
+    (error) => error instanceof FixedHostJourneyActivationError &&
+      error.code === "FIXED_HOST_PRECOMMIT_FAILED",
+  );
+
+  assert.ok(events.includes("standby.cleanup"));
+  assert.ok(!events.some((event) => event.startsWith("nginx.")));
+});
+
 test("operation evidence is create-only and an existing operation has host effects zero", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fixed-host-collision-"));
   const value = input(root);
@@ -260,4 +299,266 @@ test("operation evidence is create-only and an existing operation has host effec
   );
   assert.deepEqual(events, []);
   assert.equal(await readFile(value.operationDirectory, "utf8"), "owned-file");
+});
+
+test("terminal adapters are delegated exactly once with fixed instance URLs and inherited lock", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-adapters-"));
+  const inputValue = input(root);
+  const underlyingEvents = [];
+  const base = effects(underlyingEvents);
+  const calls = [];
+  const adapters = {
+    startJourneyComposeCandidates: async (value) => {
+      calls.push(["start", value]);
+      return base.startStandby();
+    },
+    runJourneyCandidateCanary: async (value) => {
+      calls.push(["canary", value]);
+      return base.runCanary();
+    },
+    observeJourneyCandidateReadiness: async (value) => {
+      calls.push(["observe", value]);
+      return base.observeCandidate();
+    },
+    admitJourneyReleaseCandidate: async (value) => {
+      calls.push(["admit", value]);
+      return base.admitCandidate();
+    },
+    activateJourneyBackend: async (value) => {
+      calls.push([`activate:${value.instanceIdentity}`, value]);
+      return value.instanceIdentity === "backend-standby"
+        ? base.activateStandby()
+        : base.activateCanonical();
+    },
+  };
+  const host = {
+    acquireDeployLock: base.acquireDeployLock,
+    verifyInputs: base.verifyInputs,
+    switchNginx: base.switchNginx,
+    drainAndRecreateCanonical: base.drainAndRecreateCanonical,
+    removeStandby: base.removeStandby,
+    cleanupStandby: base.cleanupStandby,
+  };
+  const delegated = createFixedHostJourneyActivationEffects({
+    config: {
+      bindingPath: "/inputs/binding.json",
+      descriptorBindingPath: "/inputs/descriptor-binding.json",
+      tuplePath: "/inputs/tuple.json",
+      descriptorPath: "/inputs/descriptor.json",
+      composeEnvPath: "/inputs/compose.env",
+      backendEnvPath: "/inputs/backend.env",
+      projectName: "easysubway",
+      serviceToken: "t".repeat(32),
+      currentPublicKeyPem: "public-key-fixture",
+      canary: {
+        canaryRequestIdentity: "candidate-canary-1",
+        requestId: "01J9VV0K000000000000000000",
+        originStationId: "origin",
+        destinationStationId: "destination",
+        mobilityProfile: "STANDARD",
+        constraintMode: "NONE",
+        maxTransfers: 3,
+        alternativeCount: 1,
+      },
+    },
+    adapters,
+    host,
+  });
+
+  await runFixedHostJourneyActivation(inputValue, delegated);
+
+  assert.deepEqual(calls.map(([name]) => name), [
+    "start", "canary", "observe", "admit",
+    "activate:backend-standby", "activate:backend",
+  ]);
+  assert.equal(calls[0][1].operationId, inputValue.operationId);
+  assert.equal(calls[0][1].trafficGeneration, 17);
+  assert.equal(typeof calls[0][1].deployLockRunner, "function");
+  assert.equal(calls[1][1].baseUrl, "http://127.0.0.1:8082");
+  assert.equal(calls[1][1].candidateGeneration, 9);
+  assert.equal(calls[4][1].baseUrl, "http://127.0.0.1:8082");
+  assert.equal(calls[5][1].baseUrl, "http://127.0.0.1:8080");
+  assert.equal(calls[4][1].trafficGeneration, 17);
+  assert.equal(calls[5][1].trafficGeneration, 17);
+});
+
+test("Nginx render changes only three canonical proxy targets and rejects drift", () => {
+  const source = Buffer.from([
+    "location = /api/v2/routes/search {",
+    "  proxy_pass http://127.0.0.1:8081;",
+    "}",
+    "location = /actuator/health/readiness {",
+    "  proxy_pass http://127.0.0.1:8080;",
+    "}",
+    "location = /actuator/health/liveness {",
+    "  proxy_pass http://127.0.0.1:8080;",
+    "}",
+    "location / {",
+    "  proxy_pass http://127.0.0.1:8080;",
+    "}",
+    "",
+  ].join("\n"));
+
+  const standby = renderFixedHostNginxConfig(source, 8080, 8082);
+  assert.equal(standby.toString("utf8").match(/127\.0\.0\.1:8082/g)?.length, 3);
+  assert.match(standby.toString("utf8"), /127\.0\.0\.1:8081/);
+  assert.deepEqual(renderFixedHostNginxConfig(standby, 8082, 8080), source);
+  assert.throws(() => renderFixedHostNginxConfig(source, 8082, 8080));
+  assert.throws(() => renderFixedHostNginxConfig(Buffer.from("proxy_pass http://127.0.0.1:8080;\n"), 8080, 8082));
+});
+
+test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compose operations", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-concrete-"));
+  const immutableInput = path.join(root, "tuple.json");
+  const composeEnvPath = path.join(root, "compose.env");
+  const backendEnvPath = path.join(root, "backend.env");
+  const nginxConfigPath = path.join(root, "easysubway.conf");
+  const baseComposePath = path.join(root, "docker-compose.yml");
+  const candidateComposePath = path.join(root, "docker-compose.candidate.yml");
+  await Promise.all([
+    writeFile(immutableInput, "immutable\n"),
+    writeFile(composeEnvPath, "COMPOSE_PROJECT_NAME=easysubway\n"),
+    writeFile(backendEnvPath, "SPRING_PROFILES_ACTIVE=prod\n"),
+    writeFile(baseComposePath, "services: {}\n"),
+    writeFile(candidateComposePath, "services: {}\n"),
+    writeFile(nginxConfigPath, Buffer.from([
+      "location = /api/v2/routes/search { proxy_pass http://127.0.0.1:8081; }",
+      "location = /actuator/health/readiness { proxy_pass http://127.0.0.1:8080; }",
+      "location = /actuator/health/liveness { proxy_pass http://127.0.0.1:8080; }",
+      "location / { proxy_pass http://127.0.0.1:8080; }",
+      "",
+    ].join("\n"))),
+  ]);
+  const commands = [];
+  const commandRunner = async (request) => {
+    commands.push([request.command, ...request.args]);
+    if (request.command === "docker" && request.args[0] === "inspect") {
+      return {
+        status: 0,
+        signal: null,
+        timedOut: false,
+        stdout: `${JSON.stringify({
+          Running: false,
+          OOMKilled: false,
+          ExitCode: 143,
+          Error: "",
+          FinishedAt: "2026-08-13T05:00:00.000000000Z",
+        })}\n`,
+        stderr: "",
+      };
+    }
+    if (request.command === "docker" && request.args.includes("ps")) {
+      return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    }
+    return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+  };
+  const lockEvents = [];
+  const host = await createFixedHostJourneyActivationHost({
+    inputPaths: [immutableInput, composeEnvPath, backendEnvPath],
+    nginxConfigPath,
+    composeEnvPath,
+    backendEnvPath,
+    baseComposePath,
+    candidateComposePath,
+    projectName: "easysubway",
+    ambientEnvironment: { PATH: process.env.PATH },
+    commandRunner,
+    deployLockRunner: async ({ lockPath }) => ({
+      verify: async () => lockEvents.push(`verify:${lockPath}`),
+      close: async () => lockEvents.push(`close:${lockPath}`),
+    }),
+    nowNs: (() => {
+      const values = [0n, 1_000_000_000n];
+      return () => values.shift() ?? 1_000_000_000n;
+    })(),
+  });
+
+  const lock = await host.acquireDeployLock({
+    lockPath: "/opt/easysubway/deploy.lock",
+    operationId: digest("7"),
+  });
+  await lock.verify();
+  await host.verifyInputs();
+  const standbySwitch = await host.switchNginx({
+    input: input(root), fromPort: 8080, toPort: 8082,
+  });
+  assert.equal(standbySwitch.nginxTestPassed, true);
+  assert.equal(standbySwitch.reloadCompleted, true);
+  assert.equal((await readFile(nginxConfigPath, "utf8")).match(/127\.0\.0\.1:8082/g)?.length, 3);
+  const termination = await host.drainAndRecreateCanonical({ input: input(root) });
+  assert.deepEqual({
+    signal: termination.signal,
+    stopGracePeriodSeconds: termination.stopGracePeriodSeconds,
+    oldProcessExited: termination.oldProcessExited,
+    withinBudget: termination.withinBudget,
+  }, {
+    signal: "SIGTERM",
+    stopGracePeriodSeconds: 30,
+    oldProcessExited: true,
+    withinBudget: true,
+  });
+  const canonicalSwitch = await host.switchNginx({
+    input: input(root), fromPort: 8082, toPort: 8080,
+  });
+  assert.equal(canonicalSwitch.toPort, 8080);
+  assert.equal((await readFile(nginxConfigPath, "utf8")).match(/127\.0\.0\.1:8080/g)?.length, 3);
+  assert.equal((await host.removeStandby()).standbyRemoved, true);
+  await lock.close();
+  await host.close();
+
+  assert.deepEqual(commands, [
+    ["nginx", "-t"],
+    ["nginx", "-s", "reload"],
+    ["docker", "compose", "--project-name", "easysubway", "--env-file", composeEnvPath,
+      "-f", baseComposePath, "-f", candidateComposePath, "--profile", "journey-candidate",
+      "stop", "--timeout", "30", "backend"],
+    ["docker", "inspect", "--format", "{{json .State}}", "easysubway-backend"],
+    ["docker", "compose", "--project-name", "easysubway", "--env-file", composeEnvPath,
+      "-f", baseComposePath, "-f", candidateComposePath, "--profile", "journey-candidate",
+      "up", "--detach", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "backend"],
+    ["nginx", "-t"],
+    ["nginx", "-s", "reload"],
+    ["docker", "compose", "--project-name", "easysubway", "--env-file", composeEnvPath,
+      "-f", baseComposePath, "-f", candidateComposePath, "--profile", "journey-candidate",
+      "rm", "--force", "--stop", "backend-standby"],
+    ["docker", "compose", "--project-name", "easysubway", "--env-file", composeEnvPath,
+      "-f", baseComposePath, "-f", candidateComposePath, "--profile", "journey-candidate",
+      "ps", "--all", "--quiet", "backend-standby"],
+  ]);
+  assert.deepEqual(lockEvents, [
+    "verify:/opt/easysubway/deploy.lock",
+    "verify:/opt/easysubway/deploy.lock",
+    "close:/opt/easysubway/deploy.lock",
+  ]);
+});
+
+test("concrete host rejects immutable input drift before another effect", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-drift-"));
+  const immutableInput = path.join(root, "tuple.json");
+  const composeEnvPath = path.join(root, "compose.env");
+  const backendEnvPath = path.join(root, "backend.env");
+  const nginxConfigPath = path.join(root, "easysubway.conf");
+  const baseComposePath = path.join(root, "docker-compose.yml");
+  const candidateComposePath = path.join(root, "docker-compose.candidate.yml");
+  for (const pathname of [immutableInput, composeEnvPath, backendEnvPath, nginxConfigPath,
+    baseComposePath, candidateComposePath]) {
+    await writeFile(pathname, "original\n");
+  }
+  const host = await createFixedHostJourneyActivationHost({
+    inputPaths: [immutableInput],
+    nginxConfigPath,
+    composeEnvPath,
+    backendEnvPath,
+    baseComposePath,
+    candidateComposePath,
+    projectName: "easysubway",
+    ambientEnvironment: {},
+    commandRunner: async () => {
+      throw new Error("must not run");
+    },
+    deployLockRunner: async () => ({ verify: async () => {}, close: async () => {} }),
+  });
+  await writeFile(immutableInput, "modified\n");
+  await assert.rejects(host.verifyInputs(), /changed/);
+  await host.close();
 });
