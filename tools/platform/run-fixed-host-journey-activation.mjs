@@ -583,13 +583,17 @@ export async function runFixedHostJourneyActivation(
         // The original failure remains authoritative; failed evidence records cleanup uncertainty.
       }
     }
-    await writeFailureReceipt(
-      input,
-      failure,
-      phase,
-      failureCommitted,
-      failureNow(),
-    ).catch(() => {});
+    try {
+      await writeFailureReceipt(
+        input,
+        failure,
+        phase,
+        failureCommitted,
+        failureNow(),
+      );
+    } catch {
+      // Failure evidence is best effort; the activation failure remains authoritative.
+    }
     throw failure;
   } finally {
     await lock?.close().catch(() => {});

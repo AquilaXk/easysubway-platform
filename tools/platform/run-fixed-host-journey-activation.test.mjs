@@ -255,6 +255,17 @@ test("precommit failure cleans standby and never calls Nginx or canonical effect
   assert.notEqual(failure.failedAt, input(root).generatedAt);
   assert.equal(failure.successReceiptCreated, false);
   assert.deepEqual(Object.values(failure.fallbackZero), [0, 0, 0, 0]);
+
+  const clockFailureRoot = await mkdtemp(path.join(tmpdir(), "fixed-host-clock-failure-"));
+  await assert.rejects(
+    runFixedHostJourneyActivation(
+      input(clockFailureRoot),
+      effects([], "candidate.admit"),
+      { failureNow: () => { throw new Error("clock failure"); } },
+    ),
+    (error) => error instanceof FixedHostJourneyActivationError &&
+      error.code === "FIXED_HOST_PRECOMMIT_FAILED",
+  );
 });
 
 test("post-switch failure leaves admitted standby serving and emits no success receipt", async () => {
