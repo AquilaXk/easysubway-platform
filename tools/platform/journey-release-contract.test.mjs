@@ -117,9 +117,15 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assert.deepEqual(receipt.properties.orchestrator.enum, ["COMPOSE", "KUBERNETES"]);
   assert.equal(receipt.properties.tuple.$ref, "journey-release-tuple.schema.json");
   assertClosed(receipt.properties.candidate, ["instanceCount", "spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"]);
-  assert.equal(receipt.properties.candidate.properties.instanceCount.type, "integer");
-  assert.equal(receipt.properties.candidate.properties.instanceCount.minimum, 2);
-  for (const name of ["spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"]) {
+  assert.deepEqual(receipt.properties.candidate.properties.instanceCount, {
+    type: "integer",
+    const: 1,
+  });
+  assert.deepEqual(receipt.properties.candidate.properties.spansMultipleFailureDomains, {
+    type: "boolean",
+    const: false,
+  });
+  for (const name of ["allReady", "allInstancesMatchTuple", "canaryPassed"]) {
     assert.equal(receipt.properties.candidate.properties[name].type, "boolean");
     assert.equal(receipt.properties.candidate.properties[name].const, true);
   }
