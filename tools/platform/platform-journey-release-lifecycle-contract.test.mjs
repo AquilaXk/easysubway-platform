@@ -78,7 +78,8 @@ test("closed schema accepts only the exact lifecycle contract", () => {
     (value) => { value.issueRef.issueNumber = 17; },
     (value) => { value.sourceFreeInput.sourceTreeReadCount = 1; },
     (value) => { value.orchestratorBinding.failureSelectsAlternate = true; },
-    (value) => { value.candidate.minimumInstanceCount = 1; },
+    (value) => { value.candidate.minimumInstanceCount = 2; },
+    (value) => { value.candidate.maximumInstanceCount = 2; },
     (value) => { value.candidate.stateMachine.successTransitions.reverse(); },
     (value) => { value.activeState.commitLinearizationPointCount = 2; },
     (value) => { value.activeState.requiredServingEqualityFields.pop(); },
@@ -149,8 +150,9 @@ test("candidate state machine and active commit keep mixed traffic at zero", () 
   assert.deepEqual(contract.candidate, {
     ownership: "TASK_OWNED_IMMUTABLE",
     productionTrafficBeforeActiveServing: 0,
-    minimumInstanceCount: 2,
-    distinctFailureDomainsRequired: true,
+    minimumInstanceCount: 1,
+    maximumInstanceCount: 1,
+    distinctFailureDomainsRequired: false,
     requiredSteps: [
       "VALIDATE_EXACT_RELEASE_TUPLE",
       "START_EVERY_TARGET_INSTANCE",
