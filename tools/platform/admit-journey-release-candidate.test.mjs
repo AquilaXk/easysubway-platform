@@ -64,6 +64,10 @@ test("rejects missing or additional candidate instances", async () => {
     (value) => {
       value.instances[1].failureDomainIdentity = value.instances[0].failureDomainIdentity;
     },
+    (value) => {
+      value.instances[1].readinessEvidenceDigest =
+        value.instances[0].readinessEvidenceDigest;
+    },
     (value) => { value.instances.reverse(); },
   ];
 
