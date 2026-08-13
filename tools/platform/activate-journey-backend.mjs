@@ -23,7 +23,7 @@ const ADMISSION_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "orchestrator", "tupleSha256",
   "backendImageDigest", "backendConfigDigest", "journeyContractDigest",
   "serverRouteBundleDigest", "deploymentRevision", "environmentIdentity",
-  "bindingSha256", "observationsSha256", "handoffSha256", "instanceCount",
+  "bindingSha256", "observationsSha256", "descriptorSha256", "instanceCount",
   "failureDomainCount", "canaryEvidenceDigest", "candidateGeneration",
   "candidateAdmissionSha256",
 ]);
@@ -198,7 +198,7 @@ function validateAdmission(bytes) {
       admission.serverRouteBundleDigest, admission.bindingSha256,
       admission.observationsSha256, admission.canaryEvidenceDigest,
       admission.candidateAdmissionSha256].every((value) => matches(value, DIGEST)) ||
-    !matches(admission.handoffSha256, SHA256) ||
+    !matches(admission.descriptorSha256, SHA256) ||
     !matches(admission.deploymentRevision, REVISION) ||
     !matches(admission.environmentIdentity, ENVIRONMENT_IDENTITY) ||
     admission.instanceCount !== 1 || admission.failureDomainCount !== 1 ||

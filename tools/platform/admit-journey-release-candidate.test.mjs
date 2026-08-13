@@ -277,13 +277,13 @@ function validTuple() {
 
 function validBinding(tuple) {
   return {
-    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V2",
     artifactKind: "journey-release-candidate-binding",
     orchestrator: "COMPOSE",
     tupleSha256: tuple.tupleSha256,
     deploymentRevision: tuple.deploymentRevision,
     environmentIdentity: tuple.environmentIdentity,
-    handoffSha256: "f".repeat(64),
+    descriptorSha256: "f".repeat(64),
     serverRouteBundleDigest: tuple.serverRouteBundleDigest,
   };
 }
@@ -341,7 +341,7 @@ function expectedAdmission(fixture) {
     environmentIdentity: fixture.tuple.environmentIdentity,
     bindingSha256: sha256(fixture.bindingBody),
     observationsSha256: sha256(fixture.observationsBody),
-    handoffSha256: fixture.binding.handoffSha256,
+    descriptorSha256: fixture.binding.descriptorSha256,
     instanceCount: fixture.observations.instances.length,
     failureDomainCount: new Set(
       fixture.observations.instances.map((instance) => instance.failureDomainIdentity),

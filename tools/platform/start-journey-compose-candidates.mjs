@@ -37,7 +37,7 @@ const DOCKER_OPERATIONAL_ENV_KEYS = Object.freeze([
 ]);
 const BINDING_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "orchestrator", "tupleSha256",
-  "deploymentRevision", "environmentIdentity", "handoffSha256",
+  "deploymentRevision", "environmentIdentity", "descriptorSha256",
   "serverRouteBundleDigest",
 ]);
 const DESCRIPTOR_BINDING_FIELDS = Object.freeze([
@@ -139,6 +139,9 @@ export async function startJourneyComposeCandidates({
       descriptorBindingInput.bytes,
       tuple,
     );
+    if (binding.descriptorSha256 !== descriptorBinding.descriptorSha256) {
+      throw failure("CANDIDATE_START_IDENTITY", 2);
+    }
     const descriptorFacts = validateDescriptor(
       descriptorInput.bytes,
       descriptorBinding,
@@ -645,10 +648,10 @@ function validateBinding(bytes, tuple) {
   const binding = parseJson(bytes);
   if (
     !isExactObject(binding, BINDING_FIELDS) ||
-    binding.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V1" ||
+    binding.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V2" ||
     binding.artifactKind !== "journey-release-candidate-binding" ||
     binding.orchestrator !== "COMPOSE" ||
-    !matches(binding.handoffSha256, SHA256) ||
+    !matches(binding.descriptorSha256, SHA256) ||
     binding.tupleSha256 !== tuple.tupleSha256 ||
     binding.deploymentRevision !== tuple.deploymentRevision ||
     binding.environmentIdentity !== tuple.environmentIdentity ||

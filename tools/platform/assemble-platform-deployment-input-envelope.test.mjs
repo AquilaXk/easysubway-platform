@@ -21,10 +21,6 @@ const ENVELOPE_SCHEMA = new URL(
   "../../contracts/release/platform-deployment-input-envelope.schema.json",
   import.meta.url,
 );
-const ACQUISITION_CONTRACT = new URL(
-  "../../contracts/release/server-route-bundle-object-acquisition-contract.json",
-  import.meta.url,
-);
 const LIFECYCLE_CONTRACT = new URL(
   "../../contracts/release/platform-journey-release-lifecycle-contract.json",
   import.meta.url,
@@ -81,14 +77,12 @@ test("exact producer identities assemble one closed canonical COMPOSE envelope",
     repository: "AquilaXk/easysubway-data",
     producerGitSha: "c".repeat(40),
     descriptorSha256: "5".repeat(64),
-    handoffSha256: "6".repeat(64),
     serverRouteBundleDigest: BUNDLE_DIGEST,
   });
   assert.equal(parsed.release.tupleSha256, fixture.tuple.tupleSha256);
   assert.equal(parsed.release.candidateBindingSha256, await fileDigest(fixture.input.candidateBindingPath));
   assert.equal(parsed.release.descriptorBindingSha256, await fileDigest(fixture.input.descriptorBindingPath));
   assert.deepEqual(parsed.policies, {
-    bundleAcquisitionContractSha256: await fileDigest(fixture.input.acquisitionContractPath),
     lifecycleContractSha256: await fileDigest(fixture.input.lifecycleContractPath),
     activationReceiptSchemaSha256: await fileDigest(fixture.input.activationReceiptSchemaPath),
     runtimeInputInventorySha256: await fileDigest(fixture.input.runtimeInputInventoryPath),
@@ -167,8 +161,8 @@ test("candidate and descriptor bindings must match one COMPOSE tuple", async (t)
 
 test("binding digest and revision fields reject coercible non-string values", async (t) => {
   const cases = [
-    ["candidate handoff digest", "candidateBindingPath", (value) => {
-      value.handoffSha256 = [value.handoffSha256];
+    ["candidate descriptor digest", "candidateBindingPath", (value) => {
+      value.descriptorSha256 = [value.descriptorSha256];
     }],
     ["descriptor digest", "descriptorBindingPath", (value) => {
       value.descriptorSha256 = [value.descriptorSha256];
@@ -308,13 +302,13 @@ async function createFixture(t) {
   });
   await writePretty(paths.tuplePath, tuple);
   await writeCompact(paths.candidateBindingPath, {
-    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V2",
     artifactKind: "journey-release-candidate-binding",
     orchestrator: "COMPOSE",
     tupleSha256: tuple.tupleSha256,
     deploymentRevision: BACKEND_REVISION,
     environmentIdentity: "production",
-    handoffSha256: "6".repeat(64),
+    descriptorSha256: "5".repeat(64),
     serverRouteBundleDigest: BUNDLE_DIGEST,
   });
   await writeCompact(paths.descriptorBindingPath, {
@@ -341,7 +335,6 @@ async function createFixture(t) {
     input: {
       ...paths,
       credentialInventoryPath: CREDENTIAL_INVENTORY,
-      acquisitionContractPath: ACQUISITION_CONTRACT,
       lifecycleContractPath: LIFECYCLE_CONTRACT,
       activationReceiptSchemaPath: ACTIVATION_SCHEMA,
       runtimeInputInventoryPath: RUNTIME_INVENTORY,
@@ -358,7 +351,6 @@ function cliArguments(input) {
     "--candidate-binding", input.candidateBindingPath,
     "--descriptor-binding", input.descriptorBindingPath,
     "--backend-component-manifest", input.backendComponentManifestPath,
-    "--acquisition-contract", input.acquisitionContractPath.pathname,
     "--lifecycle-contract", input.lifecycleContractPath.pathname,
     "--activation-receipt-schema", input.activationReceiptSchemaPath.pathname,
     "--runtime-input-inventory", input.runtimeInputInventoryPath.pathname,

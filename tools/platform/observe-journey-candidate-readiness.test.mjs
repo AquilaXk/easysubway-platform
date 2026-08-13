@@ -191,13 +191,13 @@ async function createFixture() {
   const tuple = validTuple();
   const tupleBody = canonical(tuple);
   const binding = {
-    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V1",
+    schemaVersion: "JOURNEY_RELEASE_CANDIDATE_BINDING_V2",
     artifactKind: "journey-release-candidate-binding",
     orchestrator: "COMPOSE",
     tupleSha256: tuple.tupleSha256,
     deploymentRevision: tuple.deploymentRevision,
     environmentIdentity: tuple.environmentIdentity,
-    handoffSha256: "f".repeat(64),
+    descriptorSha256: "f".repeat(64),
     serverRouteBundleDigest: tuple.serverRouteBundleDigest,
   };
   const runtime = {

@@ -21,7 +21,7 @@ const SHA256_REFERENCE = /^sha256:[a-f0-9]{64}$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9._:-]{1,255}$/;
 const BINDING_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "orchestrator", "tupleSha256",
-  "deploymentRevision", "environmentIdentity", "handoffSha256",
+  "deploymentRevision", "environmentIdentity", "descriptorSha256",
   "serverRouteBundleDigest",
 ]);
 const RUNTIME_FIELDS = Object.freeze([
@@ -213,11 +213,11 @@ function validateBinding(bytes, tuple) {
   const binding = parseJson(bytes, "CANDIDATE_OBSERVATION_INPUT");
   if (
     !isExactObject(binding, BINDING_FIELDS) ||
-    binding.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V1" ||
+    binding.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V2" ||
     binding.artifactKind !== "journey-release-candidate-binding" ||
     binding.orchestrator !== "COMPOSE" ||
     !SHA256_REFERENCE.test(binding.tupleSha256) ||
-    !SHA256.test(binding.handoffSha256) ||
+    !SHA256.test(binding.descriptorSha256) ||
     !SHA256_REFERENCE.test(binding.serverRouteBundleDigest) ||
     binding.tupleSha256 !== tuple.tupleSha256 ||
     binding.deploymentRevision !== tuple.deploymentRevision ||

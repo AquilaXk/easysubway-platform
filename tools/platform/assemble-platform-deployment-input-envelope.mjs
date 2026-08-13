@@ -32,7 +32,6 @@ const INPUTS = Object.freeze([
   ["candidateBindingPath", "compact"],
   ["descriptorBindingPath", "compact"],
   ["backendComponentManifestPath", "pretty"],
-  ["acquisitionContractPath", "json"],
   ["lifecycleContractPath", "json"],
   ["activationReceiptSchemaPath", "json"],
   ["runtimeInputInventoryPath", "json"],
@@ -67,7 +66,6 @@ export async function assemblePlatformDeploymentInputEnvelope(input) {
   const candidate = parseCanonical(snapshots.get("candidateBindingPath"), "compact");
   const descriptor = parseCanonical(snapshots.get("descriptorBindingPath"), "compact");
   const component = parseCanonical(snapshots.get("backendComponentManifestPath"), "pretty");
-  const acquisition = parseCanonical(snapshots.get("acquisitionContractPath"), "json");
   const lifecycle = parseCanonical(snapshots.get("lifecycleContractPath"), "json");
   const activationSchema = parseCanonical(snapshots.get("activationReceiptSchemaPath"), "json");
   const runtimeInventory = parseCanonical(snapshots.get("runtimeInputInventoryPath"), "json");
@@ -76,7 +74,7 @@ export async function assemblePlatformDeploymentInputEnvelope(input) {
   validatePlatformReceipt(receipt, platformRevision);
   validateBackendComponent(component, tuple);
   validateReleaseBindings(candidate, descriptor, tuple);
-  validatePolicies(acquisition, lifecycle, activationSchema, runtimeInventory);
+  validatePolicies(lifecycle, activationSchema, runtimeInventory);
 
   await input.beforeInputVerification?.();
   for (const [field] of INPUTS) {
@@ -115,7 +113,6 @@ export async function assemblePlatformDeploymentInputEnvelope(input) {
       repository: DATA_REPOSITORY,
       producerGitSha: descriptor.producerGitSha,
       descriptorSha256: descriptor.descriptorSha256,
-      handoffSha256: candidate.handoffSha256,
       serverRouteBundleDigest: tuple.serverRouteBundleDigest,
     },
     release: {
@@ -124,7 +121,6 @@ export async function assemblePlatformDeploymentInputEnvelope(input) {
       descriptorBindingSha256: digest(snapshots.get("descriptorBindingPath").bytes),
     },
     policies: {
-      bundleAcquisitionContractSha256: digest(snapshots.get("acquisitionContractPath").bytes),
       lifecycleContractSha256: digest(snapshots.get("lifecycleContractPath").bytes),
       activationReceiptSchemaSha256: digest(snapshots.get("activationReceiptSchemaPath").bytes),
       runtimeInputInventorySha256: digest(snapshots.get("runtimeInputInventoryPath").bytes),
@@ -244,7 +240,11 @@ function validateCredentialInventory(value) {
     value.builtInToken.permissions.contents !== "read" ||
     value.builtInToken.permissions.packages !== "read" ||
     !sameArray(value.environmentSecretReferences, [
-      "DATA_GO_KR_SERVICE_KEY", "EASYSUBWAY_ENV", "EASYSUBWAY_SEOUL_TOPIS_SERVICE_KEY",
+      "DATA_GO_KR_SERVICE_KEY", "EASYSUBWAY_ENV",
+      "EASYSUBWAY_JOURNEY_CURRENT_PUBLIC_KEY_PEM",
+      "EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN",
+      "EASYSUBWAY_RELEASE_ARTIFACTS_READ_TOKEN",
+      "EASYSUBWAY_SEOUL_TOPIS_SERVICE_KEY",
     ]) ||
     !sameArray(value.repositoryVariableReferences, [
       "DEPLOY_COMPOSE_PROJECT", "DEPLOY_PUBLIC_API_BASE_URL", "DEPLOY_ROOT",
@@ -319,16 +319,16 @@ function validateReleaseBindings(candidate, descriptor, tuple) {
   if (
     !sameKeys(candidate, [
       "schemaVersion", "artifactKind", "orchestrator", "tupleSha256",
-      "deploymentRevision", "environmentIdentity", "handoffSha256",
+      "deploymentRevision", "environmentIdentity", "descriptorSha256",
       "serverRouteBundleDigest",
     ]) ||
-    candidate.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V1" ||
+    candidate.schemaVersion !== "JOURNEY_RELEASE_CANDIDATE_BINDING_V2" ||
     candidate.artifactKind !== "journey-release-candidate-binding" ||
     candidate.orchestrator !== "COMPOSE" ||
     candidate.tupleSha256 !== tuple.tupleSha256 ||
     candidate.deploymentRevision !== tuple.deploymentRevision ||
     candidate.environmentIdentity !== tuple.environmentIdentity ||
-    !matchesString(candidate.handoffSha256, RAW_DIGEST) ||
+    !matchesString(candidate.descriptorSha256, RAW_DIGEST) ||
     candidate.serverRouteBundleDigest !== tuple.serverRouteBundleDigest ||
     !sameKeys(descriptor, [
       "schemaVersion", "artifactKind", "descriptorSha256", "producerGitSha",
@@ -339,19 +339,15 @@ function validateReleaseBindings(candidate, descriptor, tuple) {
     !matchesString(descriptor.descriptorSha256, RAW_DIGEST) ||
     !matchesString(descriptor.producerGitSha, REVISION) ||
     descriptor.tupleSha256 !== tuple.tupleSha256 ||
-    descriptor.serverRouteBundleDigest !== tuple.serverRouteBundleDigest
+    descriptor.serverRouteBundleDigest !== tuple.serverRouteBundleDigest ||
+    candidate.descriptorSha256 !== descriptor.descriptorSha256
   ) {
     throw failure("DEPLOYMENT_ENVELOPE_RELEASE_MISMATCH", 2);
   }
 }
 
-function validatePolicies(acquisition, lifecycle, activationSchema, runtimeInventory) {
+function validatePolicies(lifecycle, activationSchema, runtimeInventory) {
   if (
-    acquisition.schemaVersion !== 1 ||
-    acquisition.artifactKind !== "server-route-bundle-object-acquisition-contract-v1" ||
-    !isObject(acquisition.producer) ||
-    acquisition.producer.repository !== DATA_REPOSITORY ||
-    !matchesString(acquisition.producer.gitSha, REVISION) ||
     lifecycle.schemaVersion !== "PLATFORM_JOURNEY_RELEASE_LIFECYCLE_CONTRACT_V2" ||
     lifecycle.artifactKind !== "platform-journey-release-lifecycle-contract" ||
     activationSchema.properties?.schemaVersion?.const !== "PLATFORM_ACTIVATION_RECEIPT_V2" ||
@@ -434,7 +430,6 @@ function parseCliArguments(args) {
     ["--candidate-binding", "candidateBindingPath"],
     ["--descriptor-binding", "descriptorBindingPath"],
     ["--backend-component-manifest", "backendComponentManifestPath"],
-    ["--acquisition-contract", "acquisitionContractPath"],
     ["--lifecycle-contract", "lifecycleContractPath"],
     ["--activation-receipt-schema", "activationReceiptSchemaPath"],
     ["--runtime-input-inventory", "runtimeInputInventoryPath"],

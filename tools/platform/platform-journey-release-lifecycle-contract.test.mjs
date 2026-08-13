@@ -83,10 +83,11 @@ test("source-free inputs and one inherited COMPOSE deploy lock forbid substituti
       path: "contracts/release/journey-release-tuple.schema.json",
       schemaVersion: "JOURNEY_RELEASE_TUPLE_V1",
     },
-    serverRouteBundleObjectAcquisition: {
-      path: "contracts/release/server-route-bundle-object-acquisition-contract.json",
-      schemaVersion: 1,
-      artifactKind: "server-route-bundle-object-acquisition-contract-v1",
+    serverRouteBundlePublicationDescriptor: {
+      repository: "AquilaXk/easysubway-data",
+      path: "contracts/datapack/server-route-bundle-publication-descriptor.schema.json",
+      schemaVersion: 2,
+      artifactKind: "server-route-bundle-publication-descriptor",
     },
     activationReceiptFoundation: {
       path: "contracts/release/platform-activation-receipt.schema.json",
