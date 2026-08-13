@@ -3,7 +3,8 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
+import { lstat, link, mkdir, open, rename, unlink } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -68,6 +69,9 @@ export async function createFixedHostJourneyActivationHost({
   commandRunner = runHostCommand,
   deployLockRunner = acquireFixedHostDeployLock,
   nowNs = process.hrtime.bigint,
+  directorySync = syncDirectory,
+  nginxTargetProbe = probeFixedHostNginxTarget,
+  serviceToken = process.env.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN,
 }) {
   const paths = [
     nginxConfigPath,
@@ -83,7 +87,9 @@ export async function createFixedHostJourneyActivationHost({
     !isObject(ambientEnvironment) ||
     typeof commandRunner !== "function" ||
     typeof deployLockRunner !== "function" ||
-    typeof nowNs !== "function"
+    typeof nowNs !== "function" ||
+    typeof directorySync !== "function" ||
+    typeof nginxTargetProbe !== "function"
   ) {
     throw typed("FIXED_HOST_USAGE", undefined, 2);
   }
@@ -156,7 +162,12 @@ export async function createFixedHostJourneyActivationHost({
     async verifyInputs() {
       for (const input of inputs) await input.verify();
     },
-    async switchNginx({ input, fromPort, toPort }) {
+    async switchNginx({ input, fromPort, toPort, activation }) {
+      if (!isObject(activation) ||
+        !["backend", "backend-standby"].includes(activation.instanceIdentity) ||
+        !matches(activation.activeReadinessEvidenceDigest, DIGEST)) {
+        throw typed("FIXED_HOST_USAGE", undefined, 2);
+      }
       const current = await openRegularFile(nginxConfigPath);
       let installed = false;
       let reloadAttempted = false;
@@ -171,11 +182,20 @@ export async function createFixedHostJourneyActivationHost({
           replacement,
           current.mode,
           `${input.operationId}.candidate`,
+          directorySync,
         );
         installed = true;
         await invoke("nginx", ["-t"], 10_000);
         reloadAttempted = true;
         await invoke("nginx", ["-s", "reload"], 10_000);
+        await nginxTargetProbe({
+          expectedPort: toPort,
+          instanceIdentity: activation.instanceIdentity,
+          evidenceDigest: activation.activeReadinessEvidenceDigest,
+          tupleSha256: input.tuple.tupleSha256,
+          trafficGeneration: input.trafficGeneration,
+          serviceToken,
+        });
         return withEvidence({
           fromPort,
           toPort,
@@ -184,16 +204,27 @@ export async function createFixedHostJourneyActivationHost({
           reloadCompleted: true,
         });
       } catch (error) {
+        installed ||= error?.targetReplaced === true;
         if (installed) {
-          await atomicReplace(
-            nginxConfigPath,
-            current.bytes,
-            current.mode,
-            `${input.operationId}.restore`,
-          ).catch(() => {});
-          if (reloadAttempted) {
-            await invoke("nginx", ["-t"], 10_000).catch(() => {});
-            await invoke("nginx", ["-s", "reload"], 10_000).catch(() => {});
+          try {
+            await atomicReplace(
+              nginxConfigPath,
+              current.bytes,
+              current.mode,
+              `${input.operationId}.restore`,
+              directorySync,
+            );
+            if (reloadAttempted) {
+              await invoke("nginx", ["-t"], 10_000);
+              await invoke("nginx", ["-s", "reload"], 10_000);
+              await nginxTargetProbe({
+                expectedPort: fromPort,
+                instanceIdentity: fromPort === 8080 ? "backend" : "backend-standby",
+                serviceToken,
+              });
+            }
+          } catch (rollbackError) {
+            throw trafficStateIndeterminate(error, rollbackError);
           }
         }
         throw error;
@@ -436,6 +467,7 @@ export async function runFixedHostJourneyActivation(input, effects) {
         input,
         fromPort: 8080,
         toPort: 8082,
+        activation: standbyActivation,
       })),
       8080,
       8082,
@@ -484,6 +516,7 @@ export async function runFixedHostJourneyActivation(input, effects) {
         input,
         fromPort: 8082,
         toPort: 8080,
+        activation: canonicalActivation,
       })),
       8082,
       8080,
@@ -534,15 +567,16 @@ export async function runFixedHostJourneyActivation(input, effects) {
       throw typed("FIXED_HOST_RECEIPT_FAILED", error);
     }
   } catch (error) {
-    const failure = normalizeFailure(error, committed);
-    if (!committed && candidateStarted) {
+    const failureCommitted = committed || error?.trafficCommitted === true;
+    const failure = normalizeFailure(error, failureCommitted);
+    if (!failureCommitted && candidateStarted) {
       try {
         await effects.cleanupStandby({ input, phase });
       } catch {
         // The original failure remains authoritative; failed evidence records cleanup uncertainty.
       }
     }
-    await writeFailureReceipt(input, failure, phase, committed).catch(() => {});
+    await writeFailureReceipt(input, failure, phase, failureCommitted).catch(() => {});
     throw failure;
   } finally {
     await lock?.close().catch(() => {});
@@ -642,11 +676,18 @@ async function openRegularFile(pathname) {
   }
 }
 
-async function atomicReplace(target, bytes, mode, suffix) {
+async function atomicReplace(
+  target,
+  bytes,
+  mode,
+  suffix,
+  syncDirectoryImpl = syncDirectory,
+) {
   const candidate = `${target}.${createHash("sha256")
     .update(suffix, "utf8")
     .digest("hex")}.tmp`;
   let handle;
+  let targetReplaced = false;
   try {
     handle = await open(
       candidate,
@@ -661,17 +702,31 @@ async function atomicReplace(target, bytes, mode, suffix) {
     await handle.close();
     handle = undefined;
     await rename(candidate, target);
-    const directory = await open(path.dirname(target), constants.O_RDONLY);
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close().catch(() => {});
-    }
+    targetReplaced = true;
+    await syncDirectoryImpl(path.dirname(target));
   } catch (error) {
     await handle?.close().catch(() => {});
     await unlink(candidate).catch(() => {});
+    if (isObject(error)) error.targetReplaced = targetReplaced;
     throw error;
   }
+}
+
+async function syncDirectory(directoryPath) {
+  const directory = await open(directoryPath, constants.O_RDONLY);
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close().catch(() => {});
+  }
+}
+
+function trafficStateIndeterminate(cause, rollbackError) {
+  const error = new Error("Nginx traffic target could not be verified", {
+    cause: new AggregateError([cause, rollbackError]),
+  });
+  error.trafficCommitted = true;
+  return error;
 }
 
 function parseStoppedContainerState(stdout) {
@@ -693,6 +748,113 @@ function parseStoppedContainerState(stdout) {
     throw new Error("canonical process did not exit through graceful SIGTERM");
   }
   return state;
+}
+
+export function probeFixedHostNginxTarget({
+  expectedPort,
+  instanceIdentity,
+  evidenceDigest,
+  tupleSha256,
+  trafficGeneration,
+  serviceToken,
+  requestImpl = httpsRequest,
+}) {
+  if (
+    ![[8080, "backend"], [8082, "backend-standby"]].some(
+      ([port, identity]) => port === expectedPort && identity === instanceIdentity,
+    ) ||
+    (evidenceDigest !== undefined && !matches(evidenceDigest, DIGEST)) ||
+    (tupleSha256 !== undefined && !matches(tupleSha256, DIGEST)) ||
+    (trafficGeneration !== undefined && !positiveInteger(trafficGeneration)) ||
+    typeof serviceToken !== "string" || serviceToken.length < 32 ||
+    serviceToken.length > 512 ||
+    [...serviceToken].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint < 0x21 || codePoint >= 0x7f;
+    }) ||
+    typeof requestImpl !== "function"
+  ) {
+    return Promise.reject(new Error("Nginx target probe input is invalid"));
+  }
+  return new Promise((resolveProbe, rejectProbe) => {
+    const request = requestImpl({
+      host: "127.0.0.1",
+      port: 443,
+      servername: "easysubway-api.aquilaxk.site",
+      agent: false,
+      method: "GET",
+      path: "/internal/v1/journey/readiness/active",
+      headers: {
+        Host: "easysubway-api.aquilaxk.site",
+        Accept: "application/json",
+        Authorization: `Bearer ${serviceToken}`,
+      },
+    });
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      request.destroy();
+      rejectProbe(new Error("Nginx active target verification failed"));
+    };
+    request.setTimeout(5_000, fail);
+    request.once("error", fail);
+    request.once("response", (response) => {
+      const chunks = [];
+      let length = 0;
+      response.on("data", (chunk) => {
+        length += chunk.length;
+        if (length > MAX_COMMAND_OUTPUT_BYTES) {
+          response.destroy();
+          fail();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("error", fail);
+      response.once("end", () => {
+        if (settled) return;
+        let value;
+        try {
+          value = JSON.parse(Buffer.concat(chunks, length).toString("utf8"));
+        } catch {
+          fail();
+          return;
+        }
+        const contentType = String(response.headers["content-type"] ?? "")
+          .toLowerCase()
+          .split(";", 1)[0]
+          .trim();
+        const cacheDirectives = new Set(
+          String(response.headers["cache-control"] ?? "")
+            .toLowerCase()
+            .split(",")
+            .map((entry) => entry.trim()),
+        );
+        if (
+          response.statusCode !== 200 ||
+          contentType !== "application/json" ||
+          !cacheDirectives.has("no-store") ||
+          !isObject(value) ||
+          value.instanceId !== instanceIdentity ||
+          value.servingReady !== true ||
+          value.draining !== false ||
+          (evidenceDigest !== undefined &&
+            value.evidenceSha256 !== evidenceDigest.slice("sha256:".length)) ||
+          (tupleSha256 !== undefined &&
+            value.releaseTupleSha256 !== tupleSha256.slice("sha256:".length)) ||
+          (trafficGeneration !== undefined &&
+            value.trafficGeneration !== trafficGeneration)
+        ) {
+          fail();
+          return;
+        }
+        settled = true;
+        resolveProbe();
+      });
+    });
+    request.end();
+  });
 }
 
 async function invokeHostCommand(runner, request) {
@@ -1210,35 +1372,77 @@ async function writeFailureReceipt(input, error, phase, committed) {
   );
 }
 
-async function writeEvidence(directory, filename, value, style) {
+export async function publishCreateOnlyEvidence(
+  directory,
+  filename,
+  value,
+  style,
+  {
+    openFile = open,
+    linkFile = link,
+    unlinkFile = unlink,
+    syncDirectoryImpl = syncDirectory,
+  } = {},
+) {
   const target = path.join(directory, filename);
   const bytes = Buffer.from(style === "compact"
     ? `${JSON.stringify(value)}\n`
     : `${JSON.stringify(value, null, 2)}\n`);
+  const candidate = path.join(
+    directory,
+    `.${filename}.${createHash("sha256").update(bytes).digest("hex")}.tmp`,
+  );
   let handle;
+  let candidateOwned = false;
+  let published = false;
   try {
-    handle = await open(
-      target,
+    handle = await openFile(
+      candidate,
       constants.O_WRONLY |
         constants.O_CREAT |
         constants.O_EXCL |
         constants.O_NOFOLLOW,
       0o600,
     );
+    candidateOwned = true;
     await handle.writeFile(bytes);
     await handle.sync();
     const identity = await handle.stat();
     if (!identity.isFile() || identity.size !== bytes.length) {
       throw new Error("evidence identity mismatch");
     }
-  } finally {
+    await handle.close();
+    handle = undefined;
+    await linkFile(candidate, target);
+    published = true;
+    await syncDirectoryImpl(directory);
+    await unlinkFile(candidate).catch(() => {});
+    return target;
+  } catch (error) {
     await handle?.close().catch(() => {});
+    if (published) {
+      try {
+        await unlinkFile(target);
+        published = false;
+        await syncDirectoryImpl(directory);
+      } catch {
+        if (published) return target;
+      }
+    }
+    if (candidateOwned) await unlinkFile(candidate).catch(() => {});
+    throw error;
   }
-  return target;
 }
 
+const writeEvidence = publishCreateOnlyEvidence;
+
 function normalizeFailure(error, committed) {
-  if (error instanceof FixedHostJourneyActivationError) return error;
+  if (error instanceof FixedHostJourneyActivationError) {
+    if (committed && error.code === "FIXED_HOST_PRECOMMIT_FAILED") {
+      return typed("FIXED_HOST_POSTSWITCH_FAILED", error);
+    }
+    return error;
+  }
   return typed(
     committed ? "FIXED_HOST_POSTSWITCH_FAILED" : "FIXED_HOST_PRECOMMIT_FAILED",
     error,

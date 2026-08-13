@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import {
+  access,
+  mkdtemp,
+  open as openFileSystem,
+  readFile,
+  readdir,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import {
@@ -11,6 +20,7 @@ import {
   renderFixedHostNginxConfig,
   runFixedHostJourneyActivation,
 } from "./run-fixed-host-journey-activation.mjs";
+import * as fixedHostRuntime from "./run-fixed-host-journey-activation.mjs";
 
 const digest = (value) => `sha256:${value.repeat(64)}`;
 
@@ -266,6 +276,50 @@ test("post-switch failure leaves admitted standby serving and emits no success r
   assert.equal(failure.successReceiptCreated, false);
 });
 
+test("an indeterminate first Nginx switch preserves standby and is postswitch failure", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-indeterminate-"));
+  const events = [];
+  const injected = effects(events);
+  injected.switchNginx = async () => {
+    events.push("nginx.indeterminate");
+    const error = new Error("reload state unknown");
+    error.trafficCommitted = true;
+    throw error;
+  };
+
+  await assert.rejects(
+    runFixedHostJourneyActivation(input(root), injected),
+    (error) => error instanceof FixedHostJourneyActivationError &&
+      error.code === "FIXED_HOST_POSTSWITCH_FAILED",
+  );
+
+  assert.ok(!events.includes("standby.cleanup"));
+  const failure = JSON.parse(
+    await readFile(path.join(root, "operation", "failed-operation.json"), "utf8"),
+  );
+  assert.equal(failure.trafficCommitted, true);
+  assert.equal(failure.admittedStandbyMayRemainServing, true);
+});
+
+test("typed precommit errors are remapped after the first traffic commit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-typed-phase-"));
+  const events = [];
+  const injected = effects(events);
+  const originalSwitch = injected.switchNginx;
+  injected.switchNginx = async (request) => {
+    if (request.fromPort === 8082) {
+      throw new FixedHostJourneyActivationError("FIXED_HOST_PRECOMMIT_FAILED");
+    }
+    return originalSwitch(request);
+  };
+
+  await assert.rejects(
+    runFixedHostJourneyActivation(input(root), injected),
+    (error) => error instanceof FixedHostJourneyActivationError &&
+      error.code === "FIXED_HOST_POSTSWITCH_FAILED",
+  );
+});
+
 test("cross-stage identity drift fails before traffic commit", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "fixed-host-identity-drift-"));
   const events = [];
@@ -430,6 +484,7 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     ].join("\n"))),
   ]);
   const commands = [];
+  const probes = [];
   const commandRunner = async (request) => {
     commands.push([request.command, ...request.args]);
     if (request.command === "docker" && request.args[0] === "inspect") {
@@ -467,6 +522,7 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
       verify: async () => lockEvents.push(`verify:${lockPath}`),
       close: async () => lockEvents.push(`close:${lockPath}`),
     }),
+    nginxTargetProbe: async (request) => probes.push(request),
     nowNs: (() => {
       const values = [0n, 1_000_000_000n];
       return () => values.shift() ?? 1_000_000_000n;
@@ -480,7 +536,13 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
   await lock.verify();
   await host.verifyInputs();
   const standbySwitch = await host.switchNginx({
-    input: input(root), fromPort: 8080, toPort: 8082,
+    input: input(root),
+    fromPort: 8080,
+    toPort: 8082,
+    activation: {
+      instanceIdentity: "backend-standby",
+      activeReadinessEvidenceDigest: digest("8"),
+    },
   });
   assert.equal(standbySwitch.nginxTestPassed, true);
   assert.equal(standbySwitch.reloadCompleted, true);
@@ -498,7 +560,13 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     withinBudget: true,
   });
   const canonicalSwitch = await host.switchNginx({
-    input: input(root), fromPort: 8082, toPort: 8080,
+    input: input(root),
+    fromPort: 8082,
+    toPort: 8080,
+    activation: {
+      instanceIdentity: "backend",
+      activeReadinessEvidenceDigest: digest("e"),
+    },
   });
   assert.equal(canonicalSwitch.toPort, 8080);
   assert.equal((await readFile(nginxConfigPath, "utf8")).match(/127\.0\.0\.1:8080/g)?.length, 3);
@@ -530,6 +598,147 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     "verify:/opt/easysubway/deploy.lock",
     "close:/opt/easysubway/deploy.lock",
   ]);
+  assert.deepEqual(probes.map(({ expectedPort, instanceIdentity, evidenceDigest }) =>
+    [expectedPort, instanceIdentity, evidenceDigest]), [
+    [8082, "backend-standby", digest("8")],
+    [8080, "backend", digest("e")],
+  ]);
+});
+
+test("directory sync failure after Nginx rename restores canonical bytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-nginx-sync-"));
+  const immutableInput = path.join(root, "tuple.json");
+  const composeEnvPath = path.join(root, "compose.env");
+  const backendEnvPath = path.join(root, "backend.env");
+  const nginxConfigPath = path.join(root, "easysubway.conf");
+  const baseComposePath = path.join(root, "docker-compose.yml");
+  const candidateComposePath = path.join(root, "docker-compose.candidate.yml");
+  const canonical = Buffer.from([
+    "proxy_pass http://127.0.0.1:8080;",
+    "proxy_pass http://127.0.0.1:8080;",
+    "proxy_pass http://127.0.0.1:8080;",
+    "",
+  ].join("\n"));
+  for (const pathname of [immutableInput, composeEnvPath, backendEnvPath,
+    baseComposePath, candidateComposePath]) {
+    await writeFile(pathname, "original\n");
+  }
+  await writeFile(nginxConfigPath, canonical);
+  let syncCount = 0;
+  const host = await createFixedHostJourneyActivationHost({
+    inputPaths: [immutableInput],
+    nginxConfigPath,
+    composeEnvPath,
+    backendEnvPath,
+    baseComposePath,
+    candidateComposePath,
+    projectName: "easysubway",
+    ambientEnvironment: {},
+    commandRunner: async () => ({
+      status: 0, signal: null, timedOut: false, stdout: "", stderr: "",
+    }),
+    deployLockRunner: async () => ({ verify: async () => {}, close: async () => {} }),
+    directorySync: async () => {
+      syncCount += 1;
+      if (syncCount === 1) throw new Error("injected directory sync failure");
+    },
+    nginxTargetProbe: async () => {},
+  });
+
+  await assert.rejects(host.switchNginx({
+    input: input(root),
+    fromPort: 8080,
+    toPort: 8082,
+    activation: {
+      instanceIdentity: "backend-standby",
+      activeReadinessEvidenceDigest: digest("8"),
+    },
+  }));
+  assert.deepEqual(await readFile(nginxConfigPath), canonical);
+  await host.close();
+});
+
+test("failed evidence sync never publishes a final receipt path", async () => {
+  assert.equal(typeof fixedHostRuntime.publishCreateOnlyEvidence, "function");
+  const root = await mkdtemp(path.join(tmpdir(), "fixed-host-evidence-sync-"));
+  const openFile = async (...args) => {
+    const handle = await openFileSystem(...args);
+    return {
+      writeFile: (...values) => handle.writeFile(...values),
+      sync: async () => {
+        throw new Error("injected evidence sync failure");
+      },
+      stat: (...values) => handle.stat(...values),
+      close: (...values) => handle.close(...values),
+    };
+  };
+
+  await assert.rejects(fixedHostRuntime.publishCreateOnlyEvidence(
+    root,
+    "activation-receipt.json",
+    { outcome: "ACTIVE_SERVING" },
+    "pretty",
+    { openFile },
+  ));
+  await missing(path.join(root, "activation-receipt.json"));
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("production Nginx probe verifies loopback TLS active identity and evidence", async () => {
+  let requestOptions;
+  const responseBody = {
+    instanceId: "backend-standby",
+    releaseTupleSha256: "f".repeat(64),
+    trafficGeneration: 17,
+    servingReady: true,
+    draining: false,
+    evidenceSha256: "8".repeat(64),
+  };
+  const requestImpl = (options) => {
+    requestOptions = options;
+    const request = new EventEmitter();
+    request.setTimeout = () => {};
+    request.destroy = () => {};
+    request.end = () => queueMicrotask(() => {
+      const response = new PassThrough();
+      response.statusCode = 200;
+      response.headers = {
+        "content-type": "application/json; charset=UTF-8",
+        "cache-control": "private, no-store",
+      };
+      request.emit("response", response);
+      response.end(JSON.stringify(responseBody));
+    });
+    return request;
+  };
+
+  await fixedHostRuntime.probeFixedHostNginxTarget({
+    expectedPort: 8082,
+    instanceIdentity: "backend-standby",
+    evidenceDigest: digest("8"),
+    tupleSha256: digest("f"),
+    trafficGeneration: 17,
+    serviceToken: "t".repeat(32),
+    requestImpl,
+  });
+
+  assert.deepEqual({
+    host: requestOptions.host,
+    port: requestOptions.port,
+    servername: requestOptions.servername,
+    method: requestOptions.method,
+    path: requestOptions.path,
+    agent: requestOptions.agent,
+    hostHeader: requestOptions.headers.Host,
+  }, {
+    host: "127.0.0.1",
+    port: 443,
+    servername: "easysubway-api.aquilaxk.site",
+    method: "GET",
+    path: "/internal/v1/journey/readiness/active",
+    agent: false,
+    hostHeader: "easysubway-api.aquilaxk.site",
+  });
 });
 
 test("concrete host rejects immutable input drift before another effect", async () => {
