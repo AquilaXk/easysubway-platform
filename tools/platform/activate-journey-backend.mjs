@@ -136,7 +136,7 @@ function validateInvocation(values) {
     values.serviceToken.length > 512 ||
     [...values.serviceToken].some((character) => {
       const codePoint = character.codePointAt(0);
-      return codePoint < 0x21 || codePoint === 0x7f;
+      return codePoint < 0x21 || codePoint >= 0x7f;
     })
   ) {
     throw failure("JOURNEY_ACTIVATION_SECRET", 2);

@@ -91,6 +91,9 @@ test("invalid admission, invocation, host, and secret fail before network", asyn
     ["invalid instance", fixture.path, { instanceIdentity: "bad instance" }, "JOURNEY_ACTIVATION_USAGE"],
     ["zero traffic", fixture.path, { trafficGeneration: 0 }, "JOURNEY_ACTIVATION_USAGE"],
     ["short token", fixture.path, { serviceToken: "short" }, "JOURNEY_ACTIVATION_SECRET"],
+    ["non-ASCII token", fixture.path, {
+      serviceToken: `${"a".repeat(31)}界`,
+    }, "JOURNEY_ACTIVATION_SECRET"],
   ];
 
   for (const [name, admissionPath, change, code] of cases) {
