@@ -20,15 +20,16 @@ const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const COMPOSE_TIMEOUT_MS = 120_000;
 const FORCE_KILL_GRACE_MS = 1000;
+const SHARED_LOCK_ACQUIRE_TIMEOUT_MS = 5000;
+const DEFAULT_DEPLOY_ROOT = "/opt/easysubway";
+const SHARED_LOCK_HOLDER_ARGUMENT = "--hold-shared-deploy-lock";
+const SHARED_LOCK_READY = "EASYSUBWAY_STANDBY_LOCKED\n";
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9._:-]{1,255}$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
-const SERVICES = Object.freeze([
-  "backend-journey-candidate-a",
-  "backend-journey-candidate-b",
-]);
+const SERVICES = Object.freeze(["backend-standby"]);
 const DOCKER_OPERATIONAL_ENV_KEYS = Object.freeze([
   "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
   "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY",
@@ -86,6 +87,7 @@ export async function startJourneyComposeCandidates({
   ambientEnvironment = process.env,
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
+  deployLockRunner = acquireSharedDeployLock,
 }) {
   validateInvocation({
     bindingPath,
@@ -102,12 +104,19 @@ export async function startJourneyComposeCandidates({
     ambientEnvironment,
     inspectDescriptor,
     composeRunner,
+    deployLockRunner,
   });
 
-  const operationLock = await CandidateStartLock.acquire(projectName, operationId);
+  const deployLock = await openSharedDeployLock(
+    deployLockRunner,
+    sharedDeployLockPath(ambientEnvironment),
+    ambientEnvironment,
+  );
+  let operationLock;
   const inputs = [];
   let executionEnvironment;
   try {
+    operationLock = await CandidateStartLock.acquire(projectName, operationId);
     inputs.push(...await openStableInputs([
       bindingPath,
       descriptorBindingPath,
@@ -139,6 +148,7 @@ export async function startJourneyComposeCandidates({
     if (sha256Reference(backendEnvInput.bytes) !== tuple.backendConfigDigest) {
       throw failure("CANDIDATE_START_IDENTITY", 2);
     }
+    validateCandidateComposeEnvironment(composeEnvInput.bytes);
     executionEnvironment = await materializeEnvironmentFiles(
       composeEnvInput.bytes,
       backendEnvInput.bytes,
@@ -163,6 +173,7 @@ export async function startJourneyComposeCandidates({
       "--profile", "journey-candidate",
     ];
 
+    await deployLock.verify();
     await verifyExecutionInputs(inputs, executionEnvironment);
     const existing = await invokeCompose(composeRunner, {
       command: "docker",
@@ -174,6 +185,7 @@ export async function startJourneyComposeCandidates({
     if (existing.stdout.trim().length > 0) throw failure("CANDIDATE_START_EXISTS", 2);
 
     try {
+      await deployLock.verify();
       await verifyExecutionInputs(inputs, executionEnvironment);
       const result = await invokeCompose(composeRunner, {
         command: "docker",
@@ -186,9 +198,15 @@ export async function startJourneyComposeCandidates({
         timeoutMs: COMPOSE_TIMEOUT_MS,
       });
       if (!successful(result)) throw failure(composeFailureCode(result));
+      await deployLock.verify();
       await verifyExecutionInputs(inputs, executionEnvironment);
     } catch (error) {
-      await cleanupCandidates(composeRunner, prefix, env);
+      try {
+        await deployLock.verify();
+        await cleanupCandidates(composeRunner, prefix, env);
+      } catch {
+        // Never touch the shared standby after losing the deploy lock.
+      }
       if (error instanceof CandidateStartError) throw error;
       throw failure("CANDIDATE_START_COMPOSE");
     }
@@ -197,7 +215,8 @@ export async function startJourneyComposeCandidates({
   } finally {
     await executionEnvironment?.close();
     for (const input of inputs.reverse()) await input.close();
-    await operationLock.close();
+    await operationLock?.close();
+    await deployLock.close();
   }
 }
 
@@ -221,6 +240,7 @@ function validateInvocation(values) {
     values.trafficGeneration < 1 ||
     typeof values.inspectDescriptor !== "function" ||
     typeof values.composeRunner !== "function" ||
+    typeof values.deployLockRunner !== "function" ||
     values.ambientEnvironment === null ||
     typeof values.ambientEnvironment !== "object" ||
     Array.isArray(values.ambientEnvironment)
@@ -228,6 +248,158 @@ function validateInvocation(values) {
     throw failure("CANDIDATE_START_USAGE", 2);
   }
   validateSecrets(values.serviceToken, values.currentPublicKeyPem);
+}
+
+function validateCandidateComposeEnvironment(bytes) {
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw failure("CANDIDATE_START_IDENTITY", 2);
+  }
+  const assignments = new Map([
+    ["EASYSUBWAY_BACKEND_BIND", []],
+    ["EASYSUBWAY_BACKEND_STANDBY_PORT", []],
+  ]);
+  const targetAssignment = /^\s*(?:export\s+)?(EASYSUBWAY_BACKEND_BIND|EASYSUBWAY_BACKEND_STANDBY_PORT)\s*=/;
+  for (const line of text.split("\n")) {
+    if (line.trimStart().startsWith("#")) continue;
+    const match = line.match(targetAssignment);
+    if (match) assignments.get(match[1]).push(line);
+  }
+  if (
+    !validOptionalAssignment(
+      assignments.get("EASYSUBWAY_BACKEND_BIND"),
+      "EASYSUBWAY_BACKEND_BIND=127.0.0.1",
+    ) ||
+    !validOptionalAssignment(
+      assignments.get("EASYSUBWAY_BACKEND_STANDBY_PORT"),
+      "EASYSUBWAY_BACKEND_STANDBY_PORT=8082",
+    )
+  ) {
+    throw failure("CANDIDATE_START_IDENTITY", 2);
+  }
+}
+
+function validOptionalAssignment(lines, expected) {
+  return lines.length === 0 || (lines.length === 1 && lines[0] === expected);
+}
+
+function sharedDeployLockPath(ambientEnvironment) {
+  const deployRoot = ambientEnvironment.DEPLOY_ROOT ?? DEFAULT_DEPLOY_ROOT;
+  if (
+    !isNonemptyString(deployRoot) ||
+    resolve(deployRoot) !== deployRoot ||
+    deployRoot === "/"
+  ) {
+    throw failure("CANDIDATE_START_USAGE", 2);
+  }
+  return join(deployRoot, "deploy.lock");
+}
+
+async function openSharedDeployLock(runner, lockPath, ambientEnvironment) {
+  try {
+    const lock = await runner({ lockPath, ambientEnvironment });
+    if (
+      lock === null ||
+      typeof lock !== "object" ||
+      typeof lock.verify !== "function" ||
+      typeof lock.close !== "function"
+    ) {
+      throw new Error("invalid deploy lock");
+    }
+    await lock.verify();
+    return lock;
+  } catch {
+    throw failure("CANDIDATE_START_LOCKED", 2);
+  }
+}
+
+function acquireSharedDeployLock({ lockPath, ambientEnvironment }) {
+  return new Promise((resolveLock, rejectLock) => {
+    const child = spawn(
+      "/usr/bin/flock",
+      [
+        "--nonblock",
+        "--exclusive",
+        lockPath,
+        process.execPath,
+        fileURLToPath(import.meta.url),
+        SHARED_LOCK_HOLDER_ARGUMENT,
+      ],
+      {
+        env: dockerOperationalEnvironment(ambientEnvironment),
+        shell: false,
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+    const lock = new SharedDeployLock(child);
+    let output = "";
+    let settled = false;
+    const timer = setTimeout(() => fail(), SHARED_LOCK_ACQUIRE_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      if (settled) return;
+      output += chunk.toString("utf8");
+      if (!SHARED_LOCK_READY.startsWith(output)) {
+        fail();
+        return;
+      }
+      if (output === SHARED_LOCK_READY) {
+        settled = true;
+        clearTimeout(timer);
+        resolveLock(lock);
+      }
+    });
+    child.once("error", fail);
+    child.once("close", () => {
+      if (!settled) fail();
+    });
+
+    function fail() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdin.destroy();
+      child.kill("SIGTERM");
+      rejectLock(new Error("shared deploy lock unavailable"));
+    }
+  });
+}
+
+class SharedDeployLock {
+  constructor(child) {
+    this.child = child;
+    this.active = true;
+    this.closed = new Promise((resolveClosed) => {
+      child.once("close", () => {
+        this.active = false;
+        resolveClosed();
+      });
+    });
+  }
+
+  async verify() {
+    if (!this.active || this.child.exitCode !== null || this.child.signalCode !== null) {
+      throw failure("CANDIDATE_START_LOCKED", 2);
+    }
+  }
+
+  async close() {
+    if (!this.active) return;
+    this.child.stdin.end();
+    const closed = await Promise.race([
+      this.closed.then(() => true),
+      new Promise((resolveClosed) => setTimeout(
+        () => resolveClosed(false),
+        FORCE_KILL_GRACE_MS,
+      )),
+    ]);
+    if (!closed && this.active) {
+      this.child.kill("SIGKILL");
+      await this.closed;
+    }
+  }
 }
 
 function validateSecrets(serviceToken, currentPublicKeyPem) {
@@ -655,14 +827,9 @@ function candidateRuntime() {
     orchestrator: "COMPOSE",
     instances: [
       {
-        instanceIdentity: "candidate-01",
-        failureDomainIdentity: "compose-candidate-a",
-        baseUrl: "http://127.0.0.1:18081",
-      },
-      {
-        instanceIdentity: "candidate-02",
-        failureDomainIdentity: "compose-candidate-b",
-        baseUrl: "http://127.0.0.1:18082",
+        instanceIdentity: "backend-standby",
+        failureDomainIdentity: "oci-host-easysubway-a1",
+        baseUrl: "http://127.0.0.1:8082",
       },
     ],
   };
@@ -821,8 +988,26 @@ async function main() {
   process.stdout.write(formatCandidateRuntime(runtime));
 }
 
+async function holdSharedDeployLock() {
+  process.stdout.write(SHARED_LOCK_READY);
+  process.stdin.resume();
+  await new Promise((resolveEnd) => {
+    let ended = false;
+    const finish = () => {
+      if (ended) return;
+      ended = true;
+      resolveEnd();
+    };
+    process.stdin.once("end", finish);
+    process.stdin.once("close", finish);
+  });
+}
+
 if (isMainModule()) {
-  main().catch((error) => {
+  const lockHolder = process.argv.length === 3 &&
+    process.argv[2] === SHARED_LOCK_HOLDER_ARGUMENT;
+  const entrypoint = lockHolder ? holdSharedDeployLock : main;
+  entrypoint().catch((error) => {
     const typed = error instanceof CandidateStartError
       ? error
       : failure("CANDIDATE_START_COMPOSE");

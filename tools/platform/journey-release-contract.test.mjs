@@ -119,11 +119,11 @@ test("activation receipt rejects non-ready, mixed, fallback, and non-GitHub evid
   assertClosed(receipt.properties.candidate, ["instanceCount", "spansMultipleFailureDomains", "allReady", "allInstancesMatchTuple", "canaryPassed"]);
   assert.deepEqual(receipt.properties.candidate.properties.instanceCount, {
     type: "integer",
-    const: 2,
+    const: 1,
   });
   assert.deepEqual(receipt.properties.candidate.properties.spansMultipleFailureDomains, {
     type: "boolean",
-    const: true,
+    const: false,
   });
   for (const name of ["allReady", "allInstancesMatchTuple", "canaryPassed"]) {
     assert.equal(receipt.properties.candidate.properties[name].type, "boolean");

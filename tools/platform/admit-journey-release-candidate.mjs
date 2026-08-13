@@ -321,20 +321,7 @@ function admit({
   const failureDomains = new Set(
     observations.instances.map((instance) => instance.failureDomainIdentity),
   );
-  const instanceIdentities = new Set(
-    observations.instances.map((instance) => instance.instanceIdentity),
-  );
-  const readinessEvidenceDigests = new Set(
-    observations.instances.map((instance) => instance.readinessEvidenceDigest),
-  );
-  if (
-    observations.instances.length !== 2 ||
-    instanceIdentities.size !== 2 ||
-    failureDomains.size !== 2 ||
-    readinessEvidenceDigests.size !== 2 ||
-    observations.instances[0].instanceIdentity >=
-      observations.instances[1].instanceIdentity
-  ) {
+  if (observations.instances.length !== 1) {
     throw admissionFailure("CANDIDATE_ADMISSION_TOPOLOGY_INVALID");
   }
 
