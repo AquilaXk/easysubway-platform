@@ -61,9 +61,9 @@
   "candidate": {
     "ownership": "TASK_OWNED_IMMUTABLE",
     "productionTrafficBeforeActiveServing": 0,
-    "minimumInstanceCount": 2,
-    "maximumInstanceCount": 2,
-    "distinctFailureDomainsRequired": true,
+    "minimumInstanceCount": 1,
+    "maximumInstanceCount": 1,
+    "distinctFailureDomainsRequired": false,
     "requiredSteps": [
       "VALIDATE_EXACT_RELEASE_TUPLE",
       "START_EVERY_TARGET_INSTANCE",

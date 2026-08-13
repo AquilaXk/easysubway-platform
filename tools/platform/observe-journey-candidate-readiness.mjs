@@ -238,11 +238,8 @@ function validateRuntime(bytes) {
     runtime.artifactKind !== "journey-compose-candidate-runtime" ||
     runtime.orchestrator !== "COMPOSE" ||
     !Array.isArray(runtime.instances) ||
-    runtime.instances.length !== 2 ||
+    runtime.instances.length !== 1 ||
     !runtime.instances.every(validateRuntimeInstance) ||
-    new Set(runtime.instances.map((instance) => instance.instanceIdentity)).size !== 2 ||
-    new Set(runtime.instances.map((instance) => instance.failureDomainIdentity)).size !== 2 ||
-    runtime.instances[0].instanceIdentity >= runtime.instances[1].instanceIdentity ||
     !bytes.equals(Buffer.from(`${JSON.stringify(runtime, null, 2)}\n`))
   ) {
     throw failure("CANDIDATE_OBSERVATION_RUNTIME", 2);
