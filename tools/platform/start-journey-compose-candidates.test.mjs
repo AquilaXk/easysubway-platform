@@ -102,6 +102,12 @@ test("exact immutable inputs start only the existing inactive standby and emit o
   for (const secret of [TOKEN, PUBLIC_KEY_PEM, fixture.input.backendEnvPath]) {
     assert.equal(serialized.includes(secret), false);
   }
+  assert.equal(fixture.deployLockState.requests.length, 1);
+  assert.equal(
+    fixture.deployLockState.requests[0].lockPath,
+    fixture.input.deployLockPath,
+  );
+  assert.equal(fixture.deployLockState.closeCount, 1);
 });
 
 test("invalid identity, secret, key and existing runtime fail before candidate start", async () => {
@@ -117,6 +123,18 @@ test("invalid identity, secret, key and existing runtime fail before candidate s
     }, "CANDIDATE_START_IDENTITY"],
     ["backend config digest mismatch", async (fixture) => {
       await writeFile(fixture.input.backendEnvPath, "EASYSUBWAY_OTHER_CONFIG=changed\n");
+    }, "CANDIDATE_START_IDENTITY"],
+    ["non-loopback backend bind", async (fixture) => {
+      await writeFile(
+        fixture.input.composeEnvPath,
+        "EASYSUBWAY_POSTGRES_DB=easysubway\nEASYSUBWAY_BACKEND_BIND=0.0.0.0\n",
+      );
+    }, "CANDIDATE_START_IDENTITY"],
+    ["overridden standby port", async (fixture) => {
+      await writeFile(
+        fixture.input.composeEnvPath,
+        "EASYSUBWAY_POSTGRES_DB=easysubway\nEASYSUBWAY_BACKEND_BIND=127.0.0.1\nEASYSUBWAY_BACKEND_STANDBY_PORT=18082\n",
+      );
     }, "CANDIDATE_START_IDENTITY"],
     ["short token", async (fixture) => { fixture.serviceToken = "short"; },
       "CANDIDATE_START_SECRET"],
@@ -162,6 +180,25 @@ test("invalid identity, secret, key and existing runtime fail before candidate s
     (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_EXISTS",
   );
   assert.equal(calls.length, 1);
+
+  const deployOverlap = await createFixture();
+  let overlapAttempts = 0;
+  await assert.rejects(
+    startJourneyComposeCandidates({
+      ...deployOverlap.input,
+      serviceToken: TOKEN,
+      currentPublicKeyPem: PUBLIC_KEY_PEM,
+      inspectDescriptor: deployOverlap.inspectDescriptor,
+      deployLockRunner: async () => {
+        throw new Error("deploy already owns backend-standby");
+      },
+      composeRunner: async () => {
+        overlapAttempts += 1;
+      },
+    }),
+    (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_LOCKED",
+  );
+  assert.equal(overlapAttempts, 0);
 
   const first = await createFixture();
   const second = await createFixture();
@@ -322,8 +359,10 @@ test("candidate overlay reuses only base standby and keeps active traffic and se
 
 async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), "journey-compose-start-"));
-  const composeEnvText = "EASYSUBWAY_POSTGRES_DB=easysubway\n";
+  const composeEnvText =
+    "EASYSUBWAY_POSTGRES_DB=easysubway\nEASYSUBWAY_BACKEND_BIND=127.0.0.1\n";
   const backendEnvText = "EASYSUBWAY_DATASOURCE_USERNAME=private\n";
+  const deployLockState = { requests: [], verifyCount: 0, closeCount: 0 };
   const tuple = validTuple({
     backendConfigDigest: `sha256:${sha256(backendEnvText)}`,
   });
@@ -368,6 +407,7 @@ async function createFixture() {
     descriptorPath: join(root, "descriptor.json"),
     composeEnvPath: join(root, "compose.env"),
     backendEnvPath: join(root, "backend.env"),
+    deployLockPath: join(root, "deploy.lock"),
   };
   await Promise.all([
     writeFile(paths.bindingPath, `${JSON.stringify(binding)}\n`),
@@ -388,6 +428,7 @@ async function createFixture() {
     publicBaseUrl,
     composeEnvText,
     backendEnvText,
+    deployLockState,
     serviceToken: TOKEN,
     currentPublicKeyPem: PUBLIC_KEY_PEM,
     inspectDescriptor: () => ({
@@ -400,6 +441,20 @@ async function createFixture() {
       projectName: "easysubway-production",
       operationId: digest("8"),
       trafficGeneration: 17,
+      deployLockRunner: async (request) => {
+        deployLockState.requests.push(request);
+        let active = true;
+        return {
+          async verify() {
+            deployLockState.verifyCount += 1;
+            if (!active) throw new Error("deploy lock released");
+          },
+          async close() {
+            active = false;
+            deployLockState.closeCount += 1;
+          },
+        };
+      },
     },
   };
 }
