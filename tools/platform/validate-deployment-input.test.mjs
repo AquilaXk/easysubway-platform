@@ -60,6 +60,10 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     "infra/nginx/route-v2-proxy-headers.conf.template",
     "infra/nginx/host-route-v2-proxy.conf",
     "infra/nginx/host-easysubway.conf.template",
+    ".github/workflows/source-free-journey-deploy.yml",
+    "tools/platform/prepare-source-free-fixed-host-deployment.mjs",
+    "tools/platform/run-fixed-host-journey-activation.mjs",
+    "infra/docker-compose.journey-candidate.yml",
   ];
   const entries = [
     ["cd.backend-image-digest", ".github/workflows/cd.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend_image:", "EASYSUBWAY_BACKEND_IMAGE:", "backend_image must be an immutable EasySubway backend digest"]],
@@ -82,13 +86,18 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     ["nginx.host.route-v2-proxy", "infra/nginx/host-route-v2-proxy.conf", "LEGACY_NOT_JOURNEY_V3", ["CF-Connecting-IP $remote_addr", "real_ip_header CF-Connecting-IP"]],
     ["nginx.host.route-v2-endpoints", "infra/nginx/host-easysubway.conf.template", "LEGACY_NOT_JOURNEY_V3", ["/api/v2/routes/session", "/api/v2/routes/search", "__ROUTE_V2_ACTION__"]],
     ["nginx.host.readiness-proxy", "infra/nginx/host-easysubway.conf.template", "TARGET_JOURNEY_V3_REQUIRED", ["/actuator/health/readiness", "proxy_pass http://127.0.0.1:__BACKEND_PORT__;"]],
+    ["source-free.workflow.artifact-identities", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend_artifact_id:", "data_artifact_id:", "skip-decompress: true"]],
+    ["source-free.workflow.closed-modes", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["--mode PREVIEW", "--mode DEPLOY", "prepare-source-free-fixed-host-deployment.mjs", "run-fixed-host-journey-activation.mjs"]],
+    ["source-free.prepare.exact-producer-inputs", "tools/platform/prepare-source-free-fixed-host-deployment.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["backend-component-manifest.json", "journey-v3-contract-bundle-v2-receipt.json", "server-route-bundle-publication-descriptor.json"]],
+    ["source-free.runner.fixed-host-lifecycle", "tools/platform/run-fixed-host-journey-activation.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["switchNginx", "drainAndRecreateCanonical", "removeStandby", "writeFailureReceipt", "activation-receipt.json", "reserveOperationDirectory"]],
+    ["source-free.compose.exact-journey-environment", "infra/docker-compose.journey-candidate.yml", "TARGET_JOURNEY_V3_REQUIRED", ["EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend", "EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby"]],
   ];
   assert.deepEqual(Object.keys(inventory), ["schemaVersion", "artifactKind", "sourcePaths", "entries"]);
   assert.equal(inventory.schemaVersion, 1);
   assert.equal(inventory.artifactKind, "platform-deployment-runtime-input-inventory-v1");
   assert.deepEqual(inventory.sourcePaths, sourcePaths);
-  assert.equal(inventory.entries.length, 20);
-  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 4);
+  assert.equal(inventory.entries.length, 25);
+  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 9);
   assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "LEGACY_NOT_JOURNEY_V3").length, 16);
   assert.deepEqual(inventory.entries.map(({ id, sourcePath, journeyV3Disposition, evidenceTokens }) => [id, sourcePath, journeyV3Disposition, evidenceTokens]), entries);
 
