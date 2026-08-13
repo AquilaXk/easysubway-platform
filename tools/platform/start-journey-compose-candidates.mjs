@@ -12,7 +12,6 @@ import {
   inspectServerRouteBundlePublicationDescriptor,
 } from "./acquire-server-route-bundle.mjs";
 import {
-  CandidateBindingError,
   validateJourneyReleaseTupleBytes,
 } from "./bind-journey-release-candidate.mjs";
 
@@ -97,16 +96,14 @@ export async function startJourneyComposeCandidates({
 
   const inputs = [];
   try {
-    for (const path of [
+    inputs.push(...await openStableInputs([
       bindingPath,
       descriptorBindingPath,
       tuplePath,
       descriptorPath,
       composeEnvPath,
       backendEnvPath,
-    ]) {
-      inputs.push(await openStableInput(path));
-    }
+    ]));
     const [bindingInput, descriptorBindingInput, tupleInput, descriptorInput] = inputs;
     const tuple = validateTuple(tupleInput.bytes);
     const binding = validateBinding(bindingInput.bytes, tuple);
@@ -229,68 +226,89 @@ function validateSecrets(serviceToken, currentPublicKeyPem) {
   }
 }
 
-async function openStableInput(path) {
-  const absolutePath = resolve(path);
-  let handle;
+async function openStableInputs(paths) {
+  const loaded = [];
   try {
-    handle = await open(
-      absolutePath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const identity = await handle.stat({ bigint: true });
-    if (!identity.isFile() || identity.size < 1n || identity.size > BigInt(MAX_INPUT_BYTES)) {
-      throw failure("CANDIDATE_START_INPUT", 2);
+    for (const path of paths) {
+      const absolutePath = resolve(path);
+      const handle = await open(
+        absolutePath,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      let identity;
+      let bytes;
+      try {
+        identity = await handle.stat({ bigint: true });
+        if (!validInputIdentity(identity)) {
+          throw failure("CANDIDATE_START_INPUT", 2);
+        }
+        bytes = await handle.readFile();
+      } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
+      }
+      const input = new StableInput(handle, absolutePath, identity, bytes);
+      loaded.push(input);
+      await input.verify();
     }
-    const bytes = await handle.readFile();
-    if (BigInt(bytes.length) !== identity.size) {
-      throw failure("CANDIDATE_START_INPUT_UNSTABLE");
-    }
-    await requireStableInput(handle, absolutePath, identity);
-    return {
-      bytes,
-      verify: () => requireStableInput(handle, absolutePath, identity),
-      close: () => handle.close().catch(() => {}),
-    };
+    return loaded;
   } catch (error) {
-    await handle?.close().catch(() => {});
+    for (const input of loaded.reverse()) await input.close();
     if (error instanceof CandidateStartError) throw error;
     throw failure("CANDIDATE_START_INPUT", 2);
   }
 }
 
-async function requireStableInput(handle, path, expected) {
-  let descriptor;
-  let entry;
-  try {
-    descriptor = await handle.stat({ bigint: true });
-    entry = await lstat(path, { bigint: true });
-  } catch {
-    throw failure("CANDIDATE_START_INPUT_UNSTABLE");
+class StableInput {
+  constructor(handle, path, identity, bytes) {
+    this.handle = handle;
+    this.path = path;
+    this.identity = identity;
+    this.bytes = bytes;
   }
-  if (
-    !descriptor.isFile() ||
-    !entry.isFile() ||
-    entry.isSymbolicLink() ||
-    !sameIdentity(expected, descriptor) ||
-    !sameIdentity(expected, entry)
-  ) {
-    throw failure("CANDIDATE_START_INPUT_UNSTABLE");
+
+  async verify() {
+    let currentDescriptor;
+    let currentEntry;
+    try {
+      currentDescriptor = await this.handle.stat({ bigint: true });
+      currentEntry = await lstat(this.path, { bigint: true });
+    } catch {
+      throw failure("CANDIDATE_START_INPUT_UNSTABLE");
+    }
+    if (
+      BigInt(this.bytes.length) !== this.identity.size ||
+      currentEntry.isSymbolicLink() ||
+      !validInputIdentity(currentDescriptor) ||
+      !validInputIdentity(currentEntry) ||
+      !identitiesMatch(this.identity, currentDescriptor, currentEntry)
+    ) {
+      throw failure("CANDIDATE_START_INPUT_UNSTABLE");
+    }
+  }
+
+  close() {
+    return this.handle.close().catch(() => {});
   }
 }
 
-function sameIdentity(left, right) {
-  return ["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"]
-    .every((field) => left[field] === right[field]);
+function validInputIdentity(identity) {
+  return identity.isFile() &&
+    identity.size > 0n &&
+    identity.size <= BigInt(MAX_INPUT_BYTES);
+}
+
+function identitiesMatch(reference, ...candidates) {
+  const fields = ["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"];
+  return candidates.every((candidate) =>
+    fields.every((field) => candidate[field] === reference[field]));
 }
 
 function validateTuple(bytes) {
   try {
     return validateJourneyReleaseTupleBytes(bytes);
-  } catch (error) {
-    if (error instanceof CandidateBindingError) {
-      throw failure("CANDIDATE_START_IDENTITY", 2);
-    }
-    throw error;
+  } catch {
+    throw failure("CANDIDATE_START_IDENTITY", 2);
   }
 }
 
