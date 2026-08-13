@@ -318,20 +318,10 @@ function admit({
   observations,
   observationsBytes,
 }) {
-  const instanceIdentities = observations.instances.map(
-    (instance) => instance.instanceIdentity,
-  );
   const failureDomains = new Set(
     observations.instances.map((instance) => instance.failureDomainIdentity),
   );
-  if (
-    observations.instances.length < 2 ||
-    new Set(instanceIdentities).size !== instanceIdentities.length ||
-    !instanceIdentities.every(
-      (identity, index) => index === 0 || instanceIdentities[index - 1] < identity,
-    ) ||
-    failureDomains.size < 2
-  ) {
+  if (observations.instances.length !== 1) {
     throw admissionFailure("CANDIDATE_ADMISSION_TOPOLOGY_INVALID");
   }
 
