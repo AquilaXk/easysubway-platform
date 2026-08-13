@@ -330,10 +330,10 @@ function validateActiveReadiness(value, admission, instanceIdentity, command, ob
 
 function activeEvidenceSha256(value) {
   const values = ACTIVE_FIELDS.slice(0, -1).flatMap((field) => [field, value[field]]);
-  const canonical = values.map((entry) => {
-    const text = String(entry);
-    return `${Buffer.byteLength(text, "utf8")}:${text}`;
-  }).join("");
+  const canonical = values.reduce((result, entry) => {
+    const text = `${entry}`;
+    return `${result}${Buffer.byteLength(text, "utf8")}:${text}`;
+  }, "");
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
