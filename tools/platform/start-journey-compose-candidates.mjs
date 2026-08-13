@@ -25,10 +25,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9._:-]{1,255}$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
-const SERVICES = Object.freeze([
-  "backend-journey-candidate-a",
-  "backend-journey-candidate-b",
-]);
+const SERVICES = Object.freeze(["backend-standby"]);
 const DOCKER_OPERATIONAL_ENV_KEYS = Object.freeze([
   "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
   "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY",
@@ -655,14 +652,9 @@ function candidateRuntime() {
     orchestrator: "COMPOSE",
     instances: [
       {
-        instanceIdentity: "candidate-01",
-        failureDomainIdentity: "compose-candidate-a",
-        baseUrl: "http://127.0.0.1:18081",
-      },
-      {
-        instanceIdentity: "candidate-02",
-        failureDomainIdentity: "compose-candidate-b",
-        baseUrl: "http://127.0.0.1:18082",
+        instanceIdentity: "backend-standby",
+        failureDomainIdentity: "oci-host-easysubway-a1",
+        baseUrl: "http://127.0.0.1:8082",
       },
     ],
   };

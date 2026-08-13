@@ -1,21 +1,3 @@
-x-journey-candidate-common: &journey-candidate-common
-  profiles:
-    - journey-candidate
-  image: ${EASYSUBWAY_BACKEND_IMAGE:?set exact immutable backend image}
-  restart: "no"
-  stop_grace_period: 30s
-  user: "10001:10001"
-  read_only: true
-  tmpfs:
-    - /tmp:rw,nosuid,nodev,noexec
-    - /opt/easysubway/logs:rw,nosuid,nodev,noexec
-  cap_drop:
-    - ALL
-  security_opt:
-    - no-new-privileges:true
-  env_file:
-    - ${EASYSUBWAY_BACKEND_ENV_FILE:?set backend env file}
-
 x-journey-candidate-environment: &journey-candidate-environment
   SPRING_PROFILES_ACTIVE: prod
   EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
@@ -34,20 +16,9 @@ x-journey-candidate-environment: &journey-candidate-environment
   EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: ${EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION:?set traffic generation}
 
 services:
-  backend-journey-candidate-a:
-    <<: *journey-candidate-common
-    container_name: easysubway-backend-journey-candidate-a
+  backend-standby:
+    profiles:
+      - journey-candidate
     environment:
       <<: *journey-candidate-environment
-      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-01
-    ports:
-      - "127.0.0.1:18081:8080"
-
-  backend-journey-candidate-b:
-    <<: *journey-candidate-common
-    container_name: easysubway-backend-journey-candidate-b
-    environment:
-      <<: *journey-candidate-environment
-      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-02
-    ports:
-      - "127.0.0.1:18082:8080"
+      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby

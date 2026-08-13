@@ -16,11 +16,12 @@ const {
 
 const SCRIPT = new URL("./start-journey-compose-candidates.mjs", import.meta.url);
 const OVERLAY = new URL("../../infra/docker-compose.journey-candidate.yml", import.meta.url);
+const BASE_COMPOSE = new URL("../../infra/docker-compose.yml", import.meta.url);
 const TOKEN = "candidate-readiness-token-0123456789abcdef";
 const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const PUBLIC_KEY_PEM = publicKey.export({ type: "spki", format: "pem" });
 
-test("exact immutable inputs start only two named candidates and emit observer runtime", async () => {
+test("exact immutable inputs start only the existing inactive standby and emit one-host runtime", async () => {
   const fixture = await createFixture();
   const calls = [];
   const runtime = await startJourneyComposeCandidates({
@@ -55,13 +56,13 @@ test("exact immutable inputs start only two named candidates and emit observer r
   });
 
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0].args.slice(-5), [
+  assert.deepEqual(calls[0].args.slice(-4), [
     "ps", "--all", "--quiet",
-    "backend-journey-candidate-a", "backend-journey-candidate-b",
+    "backend-standby",
   ]);
-  assert.deepEqual(calls[1].args.slice(-8), [
+  assert.deepEqual(calls[1].args.slice(-7), [
     "up", "--detach", "--no-deps", "--no-build", "--pull", "never",
-    "backend-journey-candidate-a", "backend-journey-candidate-b",
+    "backend-standby",
   ]);
   for (const call of calls) {
     assert.equal(call.command, "docker");
@@ -90,14 +91,9 @@ test("exact immutable inputs start only two named candidates and emit observer r
     orchestrator: "COMPOSE",
     instances: [
       {
-        instanceIdentity: "candidate-01",
-        failureDomainIdentity: "compose-candidate-a",
-        baseUrl: "http://127.0.0.1:18081",
-      },
-      {
-        instanceIdentity: "candidate-02",
-        failureDomainIdentity: "compose-candidate-b",
-        baseUrl: "http://127.0.0.1:18082",
+        instanceIdentity: "backend-standby",
+        failureDomainIdentity: "oci-host-easysubway-a1",
+        baseUrl: "http://127.0.0.1:8082",
       },
     ],
   });
@@ -243,9 +239,9 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
       },
     );
     assert.equal(calls.length, 3, name);
-    assert.deepEqual(calls[2].args.slice(-5), [
+    assert.deepEqual(calls[2].args.slice(-4), [
       "rm", "--force", "--stop",
-      "backend-journey-candidate-a", "backend-journey-candidate-b",
+      "backend-standby",
     ]);
     assert.equal(cleanupUsedVerifiedCopy, true, name);
   }
@@ -292,24 +288,20 @@ test("failed or timed-out start performs only exact candidate cleanup and expose
   assert.ok(Date.now() - timeoutStartedAt < 1000);
 });
 
-test("candidate overlay and CLI keep public traffic, canonical services and secrets out", async () => {
+test("candidate overlay reuses only base standby and keeps active traffic and secrets out", async () => {
   const overlay = await readFile(OVERLAY, "utf8");
-  assert.match(overlay, /^x-journey-candidate-common: &journey-candidate-common/);
-  assert.match(overlay, /x-journey-candidate-environment: &journey-candidate-environment/);
-  assert.match(overlay, /\nservices:\n  backend-journey-candidate-a:/);
-  assert.match(overlay, /\n  backend-journey-candidate-b:/);
-  assert.equal((overlay.match(/<<: \*journey-candidate-common/g) ?? []).length, 2);
-  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 2);
-  assert.equal((overlay.match(/profiles:\n    - journey-candidate/g) ?? []).length, 1);
-  assert.equal((overlay.match(/restart: "no"/g) ?? []).length, 1);
-  assert.equal((overlay.match(/user: "10001:10001"/g) ?? []).length, 1);
-  assert.equal((overlay.match(/read_only: true/g) ?? []).length, 1);
-  assert.equal((overlay.match(/no-new-privileges:true/g) ?? []).length, 1);
-  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-01/);
-  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: candidate-02/);
-  assert.match(overlay, /127\.0\.0\.1:18081:8080/);
-  assert.match(overlay, /127\.0\.0\.1:18082:8080/);
-  for (const forbidden of ["backend-standby", "route-v2-gateway", "nginx", "KUBERNETES"] ) {
+  const baseCompose = await readFile(BASE_COMPOSE, "utf8");
+  assert.match(overlay, /^x-journey-candidate-environment: &journey-candidate-environment/);
+  assert.match(overlay, /\nservices:\n  backend-standby:/);
+  assert.equal((overlay.match(/<<: \*journey-candidate-environment/g) ?? []).length, 1);
+  assert.equal((overlay.match(/profiles:\n      - journey-candidate/g) ?? []).length, 1);
+  assert.match(overlay, /EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby/);
+  assert.match(baseCompose, /\n  backend-standby:/);
+  assert.match(baseCompose, /EASYSUBWAY_BACKEND_STANDBY_PORT:-8082}:8080/);
+  for (const forbidden of [
+    "backend-journey-candidate-a", "backend-journey-candidate-b", "18081", "18082",
+    "route-v2-gateway", "nginx", "KUBERNETES", "\n  backend:",
+  ]) {
     assert.equal(overlay.includes(forbidden), false, forbidden);
   }
 
