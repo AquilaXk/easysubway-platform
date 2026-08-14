@@ -86,22 +86,6 @@
     },
     {
       "scanner": "CHECKOV",
-      "ruleId": "CKV_OCI_2",
-      "rootId": "oci-always-free-a1-flex",
-      "path": "infra/terraform/oci/always-free-a1-flex/storage.tf",
-      "resourceAddress": "oci_core_volume.data[0]",
-      "resourceIdentitySource": "RESOURCE",
-      "disposition": "ACCEPTED_BOUNDED_RISK",
-      "reason": "현재 approved backup/restore architecture와 retention·cost·monitoring contract가 없음",
-      "impact": "volume loss/corruption 시 재구성 불가능한 Docker data가 RPO/RTO 보장 없이 손실될 수 있음",
-      "ownerIssueUrl": "https://github.com/AquilaXk/easysubway-platform/issues/48",
-      "ownerIssueTitle": "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소",
-      "ownerIssueState": "OPEN",
-      "removalCondition": "approved backup policy·RPO/RTO·retention/cost·monitoring/alert owner·restore rehearsal, CKV_OCI_2 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
-    },
-    {
-      "scanner": "CHECKOV",
       "ruleId": "CKV_OCI_3",
       "rootId": "oci-always-free-a1-flex",
       "path": "infra/terraform/oci/always-free-a1-flex/storage.tf",

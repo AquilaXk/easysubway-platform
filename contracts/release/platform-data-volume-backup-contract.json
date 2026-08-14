@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "artifactKind": "platform-data-volume-backup-contract-v1",
+  "target": {
+    "terraformAddress": "oci_core_volume.data[0]",
+    "mountPath": "/var/lib/easysubway-data",
+    "dockerDataRoot": "/var/lib/easysubway-data/docker",
+    "authoritativeData": ["POSTGRESQL", "PRIVATE_OBJECT_STORAGE"],
+    "rebuildableData": ["CONTAINER_IMAGES", "CONTAINER_RUNTIME_STATE", "APPLICATION_LOGS", "OBSERVABILITY_STATE"]
+  },
+  "policy": {
+    "backupType": "INCREMENTAL",
+    "period": "ONE_DAY",
+    "hourOfDay": 3,
+    "offsetType": "STRUCTURED",
+    "timeZone": "REGIONAL_DATA_CENTER_TIME",
+    "retentionSeconds": 345600,
+    "maxRetainedBackups": 4,
+    "freeTierCombinedBackupLimit": 5,
+    "destinationRegion": null,
+    "encryption": "OCI_PROVIDER_MANAGED"
+  },
+  "objectives": {
+    "maximumRpoHours": 28,
+    "maximumRestoreRtoHours": 4
+  },
+  "alert": {
+    "owner": "AquilaXk",
+    "eventType": "com.oraclecloud.blockvolumes.createvolumebackup.end",
+    "status": "operationFailed",
+    "protocol": "EMAIL",
+    "endpointSource": "var.data_volume_backup_alert_email",
+    "requiredSubscriptionState": "ACTIVE"
+  },
+  "restore": {
+    "source": "LATEST_AVAILABLE_EXACT_POLICY_BACKUP",
+    "target": "NEW_VOLUME",
+    "attachment": "READ_ONLY",
+    "productionOverwrite": false,
+    "requiredMarkers": ["PG_VERSION", ".minio.sys"],
+    "receipt": "SANITIZED_CREATE_ONLY",
+    "cleanup": "DETACH_AND_DELETE_REHEARSAL_VOLUME"
+  },
+  "excluded": [
+    "BOOT_VOLUME_BACKUP",
+    "SECOND_BACKUP_POLICY",
+    "CROSS_REGION_COPY",
+    "CUSTOMER_MANAGED_KEY",
+    "PITR",
+    "SECOND_SERVER"
+  ]
+}
