@@ -98,6 +98,7 @@ apps/mobile/ios/DerivedData/
 **/.terraform/
 **/.terraform.lock.hcl
 !infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl
+!infra/terraform/oci/data-volume-backup-control/.terraform.lock.hcl
 **/*.tfstate
 **/*.tfstate.*
 **/*.tfplan

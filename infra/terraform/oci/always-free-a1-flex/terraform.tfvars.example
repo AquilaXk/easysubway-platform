@@ -28,8 +28,6 @@ data_volume_size_in_gbs        = 50
 data_volume_vpus_per_gb        = 0
 data_volume_device             = "/dev/oracleoci/oraclevdb"
 data_volume_mount_path         = "/var/lib/easysubway-data"
-data_volume_backup_alert_email = "owner@example.com"
-
 datapack_bucket_name               = "easysubway-datapacks"
 datapack_object_prefix             = ""
 datapack_bucket_public_access_type = "ObjectReadWithoutList"

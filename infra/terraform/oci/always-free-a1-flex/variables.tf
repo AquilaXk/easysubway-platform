@@ -311,19 +311,6 @@ variable "data_volume_mount_path" {
   }
 }
 
-variable "data_volume_backup_alert_email" {
-  description = "Owner email endpoint for data volume backup failure notifications."
-  type        = string
-  default     = null
-  nullable    = true
-  sensitive   = true
-
-  validation {
-    condition     = !var.create_data_volume || can(regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", try(trimspace(var.data_volume_backup_alert_email), "")))
-    error_message = "data_volume_backup_alert_email must be a valid email address."
-  }
-}
-
 variable "freeform_tags" {
   description = "Additional free-form tags for created OCI resources."
   type        = map(string)

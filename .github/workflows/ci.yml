@@ -103,6 +103,13 @@ jobs:
           terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color
           terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color
           git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl
+          backup_tf_data_dir="${RUNNER_TEMP}/terraform-data/data-volume-backup-control"
+          rm -rf "${backup_tf_data_dir}"
+          mkdir -p "${backup_tf_data_dir}"
+          export TF_DATA_DIR="${backup_tf_data_dir}"
+          terraform -chdir=infra/terraform/oci/data-volume-backup-control init -backend=false -input=false -lockfile=readonly -no-color
+          terraform -chdir=infra/terraform/oci/data-volume-backup-control validate -no-color
+          git diff --exit-code -- infra/terraform/oci/data-volume-backup-control/.terraform.lock.hcl
 
       - name: Pull pinned Terraform static-analysis scanner images
         shell: bash

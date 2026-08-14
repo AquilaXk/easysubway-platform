@@ -3,6 +3,9 @@
   "artifactKind": "platform-data-volume-backup-contract-v1",
   "target": {
     "terraformAddress": "oci_core_volume.data[0]",
+    "controlRoot": "infra/terraform/oci/data-volume-backup-control",
+    "controlVolumeInput": "var.data_volume_ocid",
+    "stateDisposition": "OWNER_LOCAL_EXTERNAL",
     "mountPath": "/var/lib/easysubway-data",
     "dockerDataRoot": "/var/lib/easysubway-data/docker",
     "authoritativeData": ["POSTGRESQL", "PRIVATE_OBJECT_STORAGE"],
@@ -30,7 +33,9 @@
     "status": "operationFailed",
     "protocol": "EMAIL",
     "endpointSource": "var.data_volume_backup_alert_email",
-    "requiredWhen": "CREATE_DATA_VOLUME_TRUE",
+    "activationInput": "var.enable_backup_failure_event_rule",
+    "defaultEventRuleEnabled": false,
+    "requiredWhen": "ACTIVE_EVENT_RULE_APPLY",
     "requiredSubscriptionState": "ACTIVE"
   },
   "restore": {
