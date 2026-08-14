@@ -62,7 +62,7 @@ variable "data_volume_backup_slack_webhook_url" {
   sensitive   = true
 
   validation {
-    condition     = can(regex("^https://hooks\\.slack\\.com/services/[^/?#]+/[^/?#]+/[^/?#]+$", trimspace(var.data_volume_backup_slack_webhook_url)))
+    condition     = can(regex("^https://hooks\\.slack\\.com/services/[^/?#\\s]+/[^/?#\\s]+/[^/?#\\s]+$", trimspace(var.data_volume_backup_slack_webhook_url)))
     error_message = "data_volume_backup_slack_webhook_url must be a canonical Slack incoming-webhook URL without query parameters."
   }
 }

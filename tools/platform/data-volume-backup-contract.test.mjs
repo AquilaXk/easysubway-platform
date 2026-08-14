@@ -139,6 +139,7 @@ test("standalone Terraform root owns one existing-volume policy and exact failur
   assert.match(variableBlock, /sensitive\s*=\s*true/);
   assert.match(variableBlock, /trimspace\(var\.data_volume_backup_slack_webhook_url\)/);
   assert.match(variableBlock, /hooks\\\\\.slack\\\\\.com\/services/);
+  assert.ok(variableBlock.includes("[^/?#\\\\s]+"), "Slack webhook path segments must reject whitespace");
   assert.doesNotMatch(variables, /data_volume_backup_alert_email/);
   const activationBlock = variables.match(/variable "enable_backup_failure_event_rule" \{[\s\S]*?\n\}/)?.[0];
   assert.ok(activationBlock, "enable_backup_failure_event_rule variable must exist");
