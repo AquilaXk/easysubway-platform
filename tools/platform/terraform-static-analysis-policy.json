@@ -91,13 +91,13 @@
       "path": "infra/terraform/oci/always-free-a1-flex/storage.tf",
       "resourceAddress": "oci_core_volume.data[0]",
       "resourceIdentitySource": "RESOURCE",
-      "disposition": "ACCEPTED_BOUNDED_RISK",
-      "reason": "현재 approved backup/restore architecture와 retention·cost·monitoring contract가 없음",
-      "impact": "volume loss/corruption 시 재구성 불가능한 Docker data가 RPO/RTO 보장 없이 손실될 수 있음",
+      "disposition": "NOT_APPLICABLE_WITH_REASON",
+      "reason": "pinned Checkov 3.3.9는 deprecated oci_core_volume.backup_policy_id만 검사하고 Oracle 권장 oci_core_volume_backup_policy_assignment graph를 인식하지 못함",
+      "impact": "scanner 단독 결과는 exact assignment 존재를 분류하지 못하므로 deterministic one-volume/one-policy contract와 Terraform validate evidence가 필요함",
       "ownerIssueUrl": "https://github.com/AquilaXk/easysubway-platform/issues/48",
       "ownerIssueTitle": "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소",
       "ownerIssueState": "OPEN",
-      "removalCondition": "approved backup policy·RPO/RTO·retention/cost·monitoring/alert owner·restore rehearsal, CKV_OCI_2 0, policy decision 삭제",
+      "removalCondition": "Checkov가 oci_core_volume_backup_policy_assignment asset_id/policy_id graph를 인식하면 CKV_OCI_2 decision 삭제",
       "expiresAt": "2026-11-07"
     },
     {

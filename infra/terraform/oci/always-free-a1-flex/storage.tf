@@ -20,3 +20,27 @@ resource "oci_core_volume_attachment" "data" {
   is_shareable    = false
   volume_id       = oci_core_volume.data[0].id
 }
+
+resource "oci_core_volume_backup_policy" "data" {
+  count = var.create_data_volume ? 1 : 0
+
+  compartment_id = var.compartment_ocid
+  display_name   = "${var.name_prefix}-data-daily"
+  freeform_tags  = local.common_tags
+
+  schedules {
+    backup_type       = "INCREMENTAL"
+    period            = "ONE_DAY"
+    retention_seconds = 345600
+    hour_of_day       = 3
+    offset_type       = "STRUCTURED"
+    time_zone         = "REGIONAL_DATA_CENTER_TIME"
+  }
+}
+
+resource "oci_core_volume_backup_policy_assignment" "data" {
+  count = var.create_data_volume ? 1 : 0
+
+  asset_id  = oci_core_volume.data[0].id
+  policy_id = oci_core_volume_backup_policy.data[0].id
+}
