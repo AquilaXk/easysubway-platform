@@ -123,8 +123,8 @@ async function reserveOperationDirectory(directory) {
 async function executeK3sActivation(input, effects, state) {
   const verifiedInputs = await effects.verifyInputs({ input });
   const runtime = await effects.verifyRuntime({ input });
-  const candidate = await effects.applyCandidate({ input, runtime });
   state.candidateApplied = true;
+  const candidate = await effects.applyCandidate({ input, runtime });
   state.portForward = await effects.openCandidatePortForward({ input, candidate });
   const baseUrl = state.portForward.baseUrl;
   const canary = await effects.runCandidateCanary({ input, candidate, baseUrl });
@@ -170,10 +170,20 @@ async function executeK3sActivation(input, effects, state) {
 }
 
 async function recordActivationFailure({ input, effects, failureNow, state, cause }) {
+  let cleanupError;
   if (!state.trafficCommitStarted && state.candidateApplied) {
-    await effects.cleanupCandidate({ input }).catch(() => {});
+    try {
+      await effects.cleanupCandidate({ input });
+    } catch (error) {
+      cleanupError = error;
+    }
   }
-  await state.portForward?.close().catch(() => {});
+  try {
+    await state.portForward?.close();
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (cleanupError) throw typed("K3S_RECEIPT_FAILED", cleanupError);
   const postSwitch = state.trafficCommitStarted;
   const code = postSwitch ? "K3S_POSTSWITCH_FAILED" : "K3S_PRECOMMIT_FAILED";
   let failedAt;
@@ -470,62 +480,31 @@ export function createK3sJourneyActivationEffects({
       replacement.metadata.labels = rendered.activationPlan.activeServiceTemplate.metadata.labels;
       replacement.metadata.annotations = releaseAnnotations(request);
       replacement.spec.selector = rendered.activationPlan.selectorPatch;
-      const committed = parseJson(Buffer.from((await kubectl([
-        "replace", "-f", "-", "-o", "json",
-      ], { input: jsonBytes(replacement) })).stdout));
-      if (!RESOURCE_VERSION.test(committed.metadata?.resourceVersion ?? "") ||
-        committed.metadata.resourceVersion === preparedActiveService.resourceVersion ||
-        !sameObject(committed.spec?.selector, rendered.activationPlan.selectorPatch)) {
-        throw new Error("active Service CAS result is invalid");
-      }
-      return {
+      return commitServiceCasWithReconciliation({
+        replace: async () => parseJson(Buffer.from((await kubectl([
+          "replace", "-f", "-", "-o", "json"],
+        { input: jsonBytes(replacement) })).stdout)),
+        readCurrent: async () => parseJson(Buffer.from((await kubectl([
+          "get", "service", rendered.activationPlan.activeServiceName,
+          "--namespace", NAMESPACE, "-o", "json"])).stdout)),
         previousResourceVersion: preparedActiveService.resourceVersion,
-        committedResourceVersion: committed.metadata.resourceVersion,
-        selector: committed.spec.selector,
-        evidenceDigest: evidence([
-          preparedActiveService.resourceVersion,
-          committed.metadata.resourceVersion,
-          JSON.stringify(committed.spec.selector),
-        ]),
-      };
+        selector: rendered.activationPlan.selectorPatch, annotations: replacement.metadata.annotations,
+      });
     },
     async verifyActiveEndpoint({ candidate }) {
-      const [podsResult, slicesResult] = await Promise.all([
-        kubectl([
-          "get", "pods", "--namespace", NAMESPACE,
-          "-l", `easysubway.io/candidate-token=${candidate.candidateToken}`,
-          "-o", "json",
-        ]),
-        kubectl([
-          "get", "endpointslices", "--namespace", NAMESPACE,
-          "-l", "kubernetes.io/service-name=journey-active", "-o", "json",
-        ]),
-      ]);
-      const pods = parseJson(Buffer.from(podsResult.stdout));
-      const slices = parseJson(Buffer.from(slicesResult.stdout));
-      const readyPods = (pods.items ?? []).filter((pod) =>
-        pod.status?.phase === "Running" &&
-        pod.metadata?.annotations?.["easysubway.io/tuple-sha256"] ===
-          request.releaseTuple.tupleSha256 &&
-        pod.status?.conditions?.some((condition) =>
-          condition.type === "Ready" && condition.status === "True"));
-      const readyAddresses = (slices.items ?? []).flatMap((slice) =>
-        (slice.endpoints ?? []).filter((endpoint) =>
-          endpoint.conditions?.ready === true).flatMap((endpoint) => endpoint.addresses ?? []));
-      if (readyPods.length !== 1 || readyAddresses.length !== 1 ||
-        readyPods[0].status.podIP !== readyAddresses[0]) {
-        throw new Error("active Service endpoint is not the admitted candidate");
-      }
-      return {
-        readyAddress: readyAddresses[0],
-        nodePort: 32080,
+      return waitForActiveEndpoint({
+        readSnapshot: async () => {
+          const [pods, slices] = await Promise.all([
+            kubectl(["get", "pods", "--namespace", NAMESPACE,
+              "-l", `easysubway.io/candidate-token=${candidate.candidateToken}`, "-o", "json"]),
+            kubectl(["get", "endpointslices", "--namespace", NAMESPACE,
+              "-l", "kubernetes.io/service-name=journey-active", "-o", "json"]),
+          ]);
+          return { pods: parseJson(Buffer.from(pods.stdout)),
+            slices: parseJson(Buffer.from(slices.stdout)) };
+        },
         tupleSha256: request.releaseTuple.tupleSha256,
-        evidenceDigest: evidence([
-          readyPods[0].metadata.uid,
-          readyAddresses[0],
-          request.releaseTuple.tupleSha256,
-        ]),
-      };
+      });
     },
     async switchNginx() {
       const current = Buffer.from((await commandRunner("sudo", [
@@ -559,18 +538,26 @@ export function createK3sJourneyActivationEffects({
         ], { timeoutMs: 35_000 });
         oldWorkloadCount += 1;
       }
-      await commandRunner("docker", [
+      const composePrefix = [
         "compose", "--project-name", request.projectName,
         "--env-file", request.composeEnvPath,
         "-f", request.baseComposePath,
         "-f", request.candidateComposePath,
         "--profile", "journey-candidate",
-        "stop", "--timeout", "30", "backend", "backend-standby",
-      ], {
-        timeoutMs: 35_000,
+      ];
+      const composeOptions = {
         env: { ...process.env, EASYSUBWAY_BACKEND_ENV_FILE: request.backendEnvPath },
-      });
-      oldWorkloadCount += 2;
+      };
+      const running = parseRunningComposeServices((await commandRunner("docker", [
+        ...composePrefix, "ps", "--services", "--status", "running",
+        "backend", "backend-standby",
+      ], composeOptions)).stdout);
+      if (running.length > 0) {
+        await commandRunner("docker", [
+          ...composePrefix, "stop", "--timeout", "30", ...running,
+        ], { ...composeOptions, timeoutMs: 35_000 });
+      }
+      oldWorkloadCount += running.length;
       return {
         signal: "SIGTERM",
         stopGracePeriodSeconds: 30,
@@ -1032,6 +1019,79 @@ function evidence(parts) {
   return digest(Buffer.from(`${parts.join("\n")}\n`, "utf8"));
 }
 
+export async function commitServiceCasWithReconciliation({
+  replace, readCurrent, previousResourceVersion, selector, annotations,
+}) {
+  let committed;
+  try {
+    committed = await replace();
+    requireCommittedService(committed, previousResourceVersion, selector, annotations);
+  } catch (error) {
+    try {
+      const reconciled = await readCurrent();
+      requireCommittedService(reconciled, previousResourceVersion, selector, annotations);
+      committed = reconciled;
+    } catch {
+      throw error;
+    }
+  }
+  return {
+    previousResourceVersion,
+    committedResourceVersion: committed.metadata.resourceVersion,
+    selector: committed.spec.selector,
+    evidenceDigest: evidence([previousResourceVersion,
+      committed.metadata.resourceVersion, JSON.stringify(committed.spec.selector)]),
+  };
+}
+
+function requireCommittedService(service, previousResourceVersion, selector, annotations) {
+  if (!RESOURCE_VERSION.test(service?.metadata?.resourceVersion ?? "") ||
+    service.metadata.resourceVersion === previousResourceVersion ||
+    !sameObject(service.spec?.selector, selector) ||
+    !containsObject(service.metadata?.annotations, annotations)) {
+    throw new Error("active Service CAS result is invalid");
+  }
+}
+
+export async function waitForActiveEndpoint({
+  readSnapshot, tupleSha256, attempts = 30,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+}) {
+  if (typeof readSnapshot !== "function" || typeof wait !== "function" || !DIGEST.test(tupleSha256) ||
+    !Number.isSafeInteger(attempts) || attempts < 1) {
+    throw new Error("active endpoint poll configuration is invalid");
+  }
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const { pods, slices } = await readSnapshot();
+    const readyPods = (pods.items ?? []).filter((pod) => pod.status?.phase === "Running" &&
+      pod.metadata?.annotations?.["easysubway.io/tuple-sha256"] === tupleSha256 &&
+      pod.status?.conditions?.some((condition) =>
+        condition.type === "Ready" && condition.status === "True"));
+    const addresses = (slices.items ?? []).flatMap((slice) => (slice.endpoints ?? [])
+      .filter((endpoint) => endpoint.conditions?.ready === true)
+        .flatMap((endpoint) => endpoint.addresses ?? []));
+    if (readyPods.length === 1 && addresses.length === 1 &&
+      readyPods[0].status.podIP === addresses[0]) {
+      return {
+        readyAddress: addresses[0], nodePort: 32080, tupleSha256,
+        evidenceDigest: evidence([readyPods[0].metadata.uid, addresses[0], tupleSha256]),
+      };
+    }
+    if (attempt < attempts) await wait(1_000);
+  }
+  throw new Error("active Service endpoint did not reconcile to the admitted candidate");
+}
+
+export function parseRunningComposeServices(output) {
+  if (typeof output !== "string") throw new Error("Compose service output is invalid");
+  const services = output.split(/\r?\n/).filter((value) => value.length > 0);
+  const allowed = new Set(["backend", "backend-standby"]);
+  if (new Set(services).size !== services.length || services.some((service) => !allowed.has(service))) {
+    throw new Error("Compose running service identity is invalid");
+  }
+  return services;
+}
+
 function sameObject(left, right) {
   if (!left || !right || typeof left !== "object" || typeof right !== "object") {
     return false;
@@ -1040,6 +1100,11 @@ function sameObject(left, right) {
   const rightKeys = Object.keys(right).sort((first, second) => first.localeCompare(second));
   return leftKeys.length === rightKeys.length &&
     leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+}
+
+function containsObject(actual, expected) {
+  return actual && expected && Object.entries(expected)
+    .every(([key, value]) => actual[key] === value);
 }
 
 export function renderK3sNginxConfig(current) {

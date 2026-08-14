@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  commitServiceCasWithReconciliation,
   K3sJourneyActivationError,
+  parseRunningComposeServices,
   renderK3sNginxConfig,
   runK3sJourneyActivation,
+  waitForActiveEndpoint,
 } from "./run-k3s-journey-activation.mjs";
 import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
 const digest = (value) => `sha256:${value.repeat(64)}`;
@@ -45,10 +48,11 @@ function request(root) {
   };
 }
 function effects(events, failAt) {
+  const fails = (name) => Array.isArray(failAt) ? failAt.includes(name) : name === failAt;
   const proof = (value, fields = {}) => ({ ...fields, evidenceDigest: digest(value) });
   const step = (name, result) => async () => {
     events.push(name);
-    if (name === failAt) throw new Error(`injected ${name}`);
+    if (fails(name)) throw new Error(`injected ${name}`);
     return structuredClone(result);
   };
   return {
@@ -60,7 +64,7 @@ function effects(events, failAt) {
     })),
     openCandidatePortForward: async () => {
       events.push("candidate.port-forward.open");
-      if (failAt === "candidate.port-forward.open") throw new Error(failAt);
+      if (fails("candidate.port-forward.open")) throw new Error("candidate.port-forward.open");
       return proof("3", {
         baseUrl: "http://127.0.0.1:38113",
         close: async () => events.push("candidate.port-forward.close"),
@@ -228,6 +232,25 @@ test("Nginx cutover changes exactly three backend targets and preserves other ro
     "proxy_pass http://127.0.0.1:8080;\n",
   )));
 });
+test("post-CAS helpers wait for reconciliation, recover ambiguous commit and count running Compose services", async () => {
+  let reads = 0;
+  const endpoint = await waitForActiveEndpoint({
+    readSnapshot: async () => ({
+      pods: { items: [{ metadata: { uid: "pod-23", annotations: { "easysubway.io/tuple-sha256": digest("f") } }, status: { phase: "Running", podIP: "10.42.0.23", conditions: [{ type: "Ready", status: "True" }] } }] },
+      slices: { items: reads++ === 0 ? [] : [{ endpoints: [{ addresses: ["10.42.0.23"], conditions: { ready: true } }] }] },
+    }),
+    tupleSha256: digest("f"), attempts: 2, wait: async () => {},
+  });
+  assert.equal(endpoint.readyAddress, "10.42.0.23"); assert.equal(reads, 2);
+  const cas = await commitServiceCasWithReconciliation({
+    replace: async () => { throw new Error("response lost"); },
+    readCurrent: async () => ({ metadata: { resourceVersion: "818", annotations: { release: "23" } }, spec: { selector: { release: "23" } } }),
+    previousResourceVersion: "817", selector: { release: "23" }, annotations: { release: "23" },
+  });
+  assert.equal(cas.committedResourceVersion, "818");
+  assert.deepEqual(parseRunningComposeServices("backend\nbackend-standby\n"), ["backend", "backend-standby"]);
+  assert.deepEqual(parseRunningComposeServices(""), []);
+});
 test("precommit failure cleans only candidate and leaves active traffic surfaces untouched", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-precommit-"));
   const events = [];
@@ -240,7 +263,6 @@ test("precommit failure cleans only candidate and leaves active traffic surfaces
     (error) => error instanceof K3sJourneyActivationError &&
       error.code === "K3S_PRECOMMIT_FAILED",
   );
-
   assert.ok(events.includes("candidate.cleanup"));
   assert.ok(events.includes("candidate.port-forward.close"));
   assert.ok(!events.some((event) => event.startsWith("active-service.")));
@@ -260,11 +282,20 @@ test("precommit failure cleans only candidate and leaves active traffic surfaces
   assert.equal(failure.successReceiptCreated, false);
   await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
 });
-
+test("partial candidate apply is cleanup-owned and cleanup failure stops terminal receipt", async () => {
+  const partialRoot = await mkdtemp(path.join(tmpdir(), "k3s-partial-apply-"));
+  const partialEvents = [];
+  await assert.rejects(runK3sJourneyActivation(request(partialRoot), effects(partialEvents, "candidate.apply")),
+    (error) => error.code === "K3S_PRECOMMIT_FAILED");
+  assert.ok(partialEvents.includes("candidate.cleanup"));
+  const cleanupRoot = await mkdtemp(path.join(tmpdir(), "k3s-cleanup-failure-"));
+  await assert.rejects(runK3sJourneyActivation(request(cleanupRoot), effects([], ["candidate.observe", "candidate.cleanup"])),
+    (error) => error.code === "K3S_RECEIPT_FAILED");
+  await missing(path.join(cleanupRoot, "operation", "k3s-activation-failure.json"));
+});
 test("post-switch failure records typed failure and never rolls traffic back", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-postswitch-"));
   const events = [];
-
   await assert.rejects(
     runK3sJourneyActivation(
       request(root),
@@ -274,7 +305,6 @@ test("post-switch failure records typed failure and never rolls traffic back", a
     (error) => error instanceof K3sJourneyActivationError &&
       error.code === "K3S_POSTSWITCH_FAILED",
   );
-
   assert.ok(events.includes("active-service.cas"));
   assert.ok(events.includes("nginx.switch"));
   assert.ok(!events.includes("candidate.cleanup"));
@@ -290,7 +320,6 @@ test("post-switch failure records typed failure and never rolls traffic back", a
   assert.equal(failure.successReceiptCreated, false);
   await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
 });
-
 test("contract and workflow keep K3s activation source-free, protected and Compose-runner-free", async () => {
   const contract = JSON.parse(await readFile(
     new URL("../../contracts/release/platform-k3s-activation-contract.json", import.meta.url),
@@ -300,7 +329,6 @@ test("contract and workflow keep K3s activation source-free, protected and Compo
     new URL("../../.github/workflows/source-free-journey-k3s-deploy.yml", import.meta.url),
     "utf8",
   );
-
   assert.equal(contract.schemaVersion, "PLATFORM_K3S_ACTIVATION_CONTRACT_V1");
   assert.equal(contract.trafficCommit.linearizationPoint, "SERVICE_RESOURCE_VERSION_CAS");
   assert.equal(contract.rollback.policy, "FORBIDDEN");

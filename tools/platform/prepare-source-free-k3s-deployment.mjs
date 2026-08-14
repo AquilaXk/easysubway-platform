@@ -1,14 +1,11 @@
 #!/usr/bin/env node
-
 import { createHash } from "node:crypto";
 import { constants, realpathSync } from "node:fs";
 import { lstat, open, readFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
 import { validateJourneyReleaseTupleBytes } from "./bind-journey-release-candidate.mjs";
-
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIRECTORY, "../..");
 const RUNTIME_CONTRACT_PATH = path.join(
@@ -38,7 +35,6 @@ const ERROR_MESSAGES = Object.freeze({
   K3S_PREPARE_INPUT: "source-free K3s immutable input validation failed",
   K3S_PREPARE_OUTPUT: "source-free K3s request preparation failed",
 });
-
 export class SourceFreeK3sPreparationError extends Error {
   constructor(code, exitCode, options) {
     super(ERROR_MESSAGES[code] ?? "source-free K3s preparation failed", options);
@@ -47,14 +43,12 @@ export class SourceFreeK3sPreparationError extends Error {
     this.exitCode = exitCode;
   }
 }
-
 export async function prepareSourceFreeK3sDeployment(input) {
   validateInvocation(input);
   try {
     const fixedBytes = await readStableRegularFile(input.fixedHostRequestPath);
     const fixedRequest = JSON.parse(fixedBytes.toString("utf8"));
     validateFixedRequest(fixedRequest);
-
     const [tupleBytes, bindingBytes, descriptorBindingBytes, backendEnvBytes,
       runtimeContractBytes] = await Promise.all([
       readStableRegularFile(fixedRequest.tuplePath),
@@ -144,7 +138,6 @@ export async function prepareSourceFreeK3sDeployment(input) {
     );
   }
 }
-
 function validateInvocation(input) {
   if (!input || typeof input !== "object" ||
     !["PREVIEW", "DEPLOY"].includes(input.mode) ||
@@ -157,7 +150,6 @@ function validateInvocation(input) {
     throw new SourceFreeK3sPreparationError("K3S_PREPARE_USAGE", 2);
   }
 }
-
 function validateFixedRequest(request) {
   if (!exactObject(request, FIXED_REQUEST_FIELDS) ||
     request.schemaVersion !== "PLATFORM_FIXED_HOST_ACTIVATION_REQUEST_V1" ||
@@ -176,7 +168,6 @@ function validateFixedRequest(request) {
     throw new Error("fixed-host source-free request is invalid");
   }
 }
-
 export async function readStableRegularFile(pathname) {
   const before = await lstat(pathname, { bigint: true });
   if (!before.isFile() || before.isSymbolicLink() || before.size < 1n ||
@@ -192,7 +183,6 @@ export async function readStableRegularFile(pathname) {
   }
   return bytes;
 }
-
 async function writeCreateOnly(pathname, value) {
   let handle;
   try {
@@ -207,7 +197,6 @@ async function writeCreateOnly(pathname, value) {
     await handle?.close();
   }
 }
-
 function parseCli(args) {
   if (args.length !== CLI_OPTIONS.size * 2) {
     throw new SourceFreeK3sPreparationError("K3S_PREPARE_USAGE", 2);
@@ -223,29 +212,23 @@ function parseCli(args) {
   }
   return result;
 }
-
 function parseJson(bytes) {
   return JSON.parse(bytes.toString("utf8"));
 }
-
 export function jsonBytes(value) {
   return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
-
 export function digest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
-
 export function exactObject(value, fields) {
   return value !== null && !Array.isArray(value) && typeof value === "object" &&
     Object.keys(value).length === fields.length &&
     fields.every((field) => Object.hasOwn(value, field));
 }
-
 export function absolutePath(value) {
   return typeof value === "string" && path.isAbsolute(value) && value.length > 1;
 }
-
 function privateIpv4(value) {
   if (typeof value !== "string" || !isIPv4(value)) return false;
   const octets = value.split(".").map(Number);
@@ -253,7 +236,6 @@ function privateIpv4(value) {
     (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
     (octets[0] === 192 && octets[1] === 168);
 }
-
 export function validPublicBaseUrl(value) {
   try {
     const url = new URL(value);
@@ -263,21 +245,17 @@ export function validPublicBaseUrl(value) {
     return false;
   }
 }
-
 function normalizeBaseUrl(value) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
-
 function validTimestamp(value) {
   return typeof value === "string" && value.endsWith("Z") &&
     Number.isFinite(Date.parse(value));
 }
-
 async function main() {
   const result = await prepareSourceFreeK3sDeployment(parseCli(process.argv.slice(2)));
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
-
 function isMainModule() {
   if (!process.argv[1]) return false;
   try {
@@ -287,7 +265,6 @@ function isMainModule() {
     return fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
   }
 }
-
 if (isMainModule()) {
   try {
     await main();
