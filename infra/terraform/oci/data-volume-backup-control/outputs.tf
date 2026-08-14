@@ -7,7 +7,11 @@ output "backup_policy_assignment_id" {
 }
 
 output "event_rule_id" {
-  value = oci_events_rule.data_volume_backup_failed.id
+  value = one(oci_events_rule.data_volume_backup_failed[*].id)
+}
+
+output "event_rule_enabled" {
+  value = var.enable_backup_failure_event_rule
 }
 
 output "notification_topic_id" {

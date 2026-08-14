@@ -66,3 +66,10 @@ variable "data_volume_backup_alert_email" {
     error_message = "data_volume_backup_alert_email must be a valid email address."
   }
 }
+
+variable "enable_backup_failure_event_rule" {
+  description = "Create the failure event rule only after the email subscription is ACTIVE."
+  type        = bool
+  default     = false
+  nullable    = false
+}

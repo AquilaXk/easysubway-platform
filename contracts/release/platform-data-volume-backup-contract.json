@@ -33,7 +33,9 @@
     "status": "operationFailed",
     "protocol": "EMAIL",
     "endpointSource": "var.data_volume_backup_alert_email",
-    "requiredWhen": "CONTROL_ROOT_APPLY",
+    "activationInput": "var.enable_backup_failure_event_rule",
+    "defaultEventRuleEnabled": false,
+    "requiredWhen": "ACTIVE_EVENT_RULE_APPLY",
     "requiredSubscriptionState": "ACTIVE"
   },
   "restore": {

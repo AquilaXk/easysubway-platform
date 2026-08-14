@@ -50,7 +50,9 @@ test("data volume backup contract is closed to the single-host startup decision"
       status: "operationFailed",
       protocol: "EMAIL",
       endpointSource: "var.data_volume_backup_alert_email",
-      requiredWhen: "CONTROL_ROOT_APPLY",
+      activationInput: "var.enable_backup_failure_event_rule",
+      defaultEventRuleEnabled: false,
+      requiredWhen: "ACTIVE_EVENT_RULE_APPLY",
       requiredSubscriptionState: "ACTIVE",
     },
     restore: {
@@ -114,6 +116,9 @@ test("standalone Terraform root owns one existing-volume policy and exact failur
   assert.equal(occurrences(resources, /resource "oci_events_rule" "data_volume_backup_failed"/g), 1);
   assert.match(resources, /protocol\s*=\s*"EMAIL"/);
   assert.match(resources, /endpoint\s*=\s*var\.data_volume_backup_alert_email/);
+  assert.match(resources, /count\s*=\s*var\.enable_backup_failure_event_rule\s*\?\s*1\s*:\s*0/);
+  assert.match(resources, /condition\s*=\s*oci_ons_subscription\.data_volume_backup\.state\s*==\s*"ACTIVE"/);
+  assert.match(resources, /error_message\s*=\s*"data volume backup alert subscription must be ACTIVE before enabling the event rule\."/);
   assert.match(resources, /event_types\s*=\s*\[\s*"com\.oraclecloud\.blockvolumes\.createvolumebackup\.end"\s*\]/s);
   assert.match(resources, /status\s*=\s*\["operationFailed"\]/);
   assert.match(resources, /volumeId\s*=\s*\[var\.data_volume_ocid\]/);
@@ -126,14 +131,19 @@ test("standalone Terraform root owns one existing-volume policy and exact failur
   assert.match(variableBlock, /type\s*=\s*string/);
   assert.match(variableBlock, /sensitive\s*=\s*true/);
   assert.match(variableBlock, /trimspace\(var\.data_volume_backup_alert_email\)/);
+  const activationBlock = variables.match(/variable "enable_backup_failure_event_rule" \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(activationBlock, "enable_backup_failure_event_rule variable must exist");
+  assert.match(activationBlock, /type\s*=\s*bool/);
+  assert.match(activationBlock, /default\s*=\s*false/);
   for (const name of ["compartment_ocid", "config_file_profile", "data_volume_ocid", "name_prefix", "region"]) {
     assert.match(variables, new RegExp(`variable "${name}"`));
   }
   assert.equal(variables.includes(String.raw`regex("^ocid1\\.(compartment|tenancy)\\."`), true);
   assert.equal(variables.includes(String.raw`regex("^ocid1\\.volume\\."`), true);
-  for (const name of ["backup_policy_id", "backup_policy_assignment_id", "event_rule_id", "notification_topic_id", "subscription_id", "subscription_state"]) {
+  for (const name of ["backup_policy_id", "backup_policy_assignment_id", "event_rule_enabled", "event_rule_id", "notification_topic_id", "subscription_id", "subscription_state"]) {
     assert.match(outputs, new RegExp(`output "${name}"`));
   }
+  assert.match(outputs, /value\s*=\s*one\(oci_events_rule\.data_volume_backup_failed\[\*\]\.id\)/);
 });
 
 test("CI and static-risk policy bind CKV_OCI_2 to the recommended assignment scanner exception", () => {

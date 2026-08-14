@@ -42,6 +42,8 @@ resource "oci_ons_subscription" "data_volume_backup" {
 }
 
 resource "oci_events_rule" "data_volume_backup_failed" {
+  count = var.enable_backup_failure_event_rule ? 1 : 0
+
   compartment_id = var.compartment_ocid
   display_name   = "${var.name_prefix}-data-backup-failed"
   description    = "Notify the owner when the scheduled data volume backup fails."
@@ -63,6 +65,13 @@ resource "oci_events_rule" "data_volume_backup_failed" {
       action_type = "ONS"
       is_enabled  = true
       topic_id    = oci_ons_notification_topic.data_volume_backup.id
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = oci_ons_subscription.data_volume_backup.state == "ACTIVE"
+      error_message = "data volume backup alert subscription must be ACTIVE before enabling the event rule."
     }
   }
 }
