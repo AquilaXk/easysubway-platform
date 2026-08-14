@@ -1,0 +1,10 @@
+write-kubeconfig-mode: "0600"
+secrets-encryption: true
+disable:
+  - traefik
+  - servicelb
+  - metrics-server
+  - local-storage
+kube-proxy-arg:
+  - proxy-mode=iptables
+  - nodeport-addresses=127.0.0.0/8
