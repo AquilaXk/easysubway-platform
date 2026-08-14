@@ -314,11 +314,12 @@ variable "data_volume_mount_path" {
 variable "data_volume_backup_alert_email" {
   description = "Owner email endpoint for data volume backup failure notifications."
   type        = string
-  nullable    = false
+  default     = null
+  nullable    = true
   sensitive   = true
 
   validation {
-    condition     = can(regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", trimspace(var.data_volume_backup_alert_email)))
+    condition     = !var.create_data_volume || can(regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", try(trimspace(var.data_volume_backup_alert_email), "")))
     error_message = "data_volume_backup_alert_email must be a valid email address."
   }
 }

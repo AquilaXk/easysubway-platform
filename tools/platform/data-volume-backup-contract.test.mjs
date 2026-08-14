@@ -47,6 +47,7 @@ test("data volume backup contract is closed to the single-host startup decision"
       status: "operationFailed",
       protocol: "EMAIL",
       endpointSource: "var.data_volume_backup_alert_email",
+      requiredWhen: "CREATE_DATA_VOLUME_TRUE",
       requiredSubscriptionState: "ACTIVE",
     },
     restore: {
@@ -103,9 +104,11 @@ test("Terraform binds one daily incremental policy and one exact failure alert t
   const variableBlock = variables.match(/variable "data_volume_backup_alert_email" \{[\s\S]*?\n\}/)?.[0];
   assert.ok(variableBlock, "data_volume_backup_alert_email variable must exist");
   assert.match(variableBlock, /type\s*=\s*string/);
-  assert.match(variableBlock, /nullable\s*=\s*false/);
+  assert.match(variableBlock, /default\s*=\s*null/);
+  assert.match(variableBlock, /nullable\s*=\s*true/);
   assert.match(variableBlock, /sensitive\s*=\s*true/);
-  assert.doesNotMatch(variableBlock, /default\s*=/);
+  assert.match(variableBlock, /!var\.create_data_volume\s*\|\|/);
+  assert.match(variableBlock, /try\(trimspace\(var\.data_volume_backup_alert_email\),\s*""\)/);
   assert.equal(occurrences(example, /^data_volume_backup_alert_email\s*=\s*"owner@example\.com"$/gm), 1);
 });
 

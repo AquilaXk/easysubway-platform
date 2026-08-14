@@ -30,6 +30,7 @@
     "status": "operationFailed",
     "protocol": "EMAIL",
     "endpointSource": "var.data_volume_backup_alert_email",
+    "requiredWhen": "CREATE_DATA_VOLUME_TRUE",
     "requiredSubscriptionState": "ACTIVE"
   },
   "restore": {
