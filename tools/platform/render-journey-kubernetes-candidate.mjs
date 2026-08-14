@@ -333,10 +333,20 @@ function render(input) {
     digest: input.releaseTuple.backendConfigDigest,
     immutable: true,
     requiredProjection: "EXACT_VALIDATED_NON_SECRET_BACKEND_ENV",
+    internalEndpoints: {
+      postgres: {
+        protocol: "TCP",
+        host: "journey-postgres.easysubway-journey.svc",
+        port: 5432,
+      },
+      objectStorage: {
+        scheme: "HTTP",
+        host: "journey-object-storage.easysubway-journey.svc",
+        port: 9000,
+      },
+    },
     overrides: {
       SPRING_PROFILES_ACTIVE: "prod",
-      EASYSUBWAY_DATASOURCE_URL: "jdbc:postgresql://journey-postgres.easysubway-journey.svc:5432/easysubway",
-      EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: "http://journey-object-storage.easysubway-journey.svc:9000",
       EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false",
       EASYSUBWAY_JOURNEY_V3_READINESS_RELEASE_TUPLE_SHA256: digestHex(input.tupleSha256),
       EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST: input.releaseTuple.backendImageDigest,

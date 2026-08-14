@@ -95,6 +95,11 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.equal(rendered.releaseIdentity.candidateGeneration, 7);
   assert.equal(rendered.releaseIdentity.trafficGeneration, 12);
   assert.equal(rendered.configPlan.immutable, true);
+  assert.deepEqual(rendered.configPlan.internalEndpoints.objectStorage, {
+    scheme: "HTTP",
+    host: "journey-object-storage.easysubway-journey.svc",
+    port: 9000,
+  });
   assert.equal(rendered.secretPlan.immutable, true);
   assert.equal(rendered.secretPlan.requiredKeyProjection, "EXACT_VALIDATED_BACKEND_ENV_ALLOWLIST");
   assert.equal(rendered.secretPlan.serializedValueCount, 0);
@@ -179,8 +184,7 @@ test("renderer rejects malformed or mutable identity and secret-bearing input wi
 test("renderer has no provider, Kubernetes API, shell, or ambient environment side effect", () => {
   const source = readText("tools/platform/render-journey-kubernetes-candidate.mjs");
   assert.doesNotMatch(source, /\b(?:fetch|kubectl|curl|docker|gh)\b/);
-  assert.doesNotMatch(source, /node:child_process|process\.env|https:\/\//);
-  assert.doesNotMatch(source, /http:\/\/(?!journey-object-storage\.easysubway-journey\.svc:9000)/);
+  assert.doesNotMatch(source, /node:child_process|process\.env|https?:\/\//);
   assert.doesNotMatch(source, /(?:^|[,{]\s*)(?:data|stringData)\s*:/m);
 });
 
