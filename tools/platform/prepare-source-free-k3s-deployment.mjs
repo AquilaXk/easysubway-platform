@@ -16,7 +16,7 @@ const RUNTIME_CONTRACT_PATH = path.join(
   "contracts/release/platform-k3s-runtime-contract.json",
 );
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
-const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9][0-9]*$/;
+const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9]\d*$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const FIXED_REQUEST_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "operationDirectory", "operationId",
@@ -40,7 +40,7 @@ const ERROR_MESSAGES = Object.freeze({
 });
 
 export class SourceFreeK3sPreparationError extends Error {
-  constructor(code, exitCode = 1, options) {
+  constructor(code, exitCode, options) {
     super(ERROR_MESSAGES[code] ?? "source-free K3s preparation failed", options);
     this.name = "SourceFreeK3sPreparationError";
     this.code = code;
@@ -177,7 +177,7 @@ function validateFixedRequest(request) {
   }
 }
 
-async function readStableRegularFile(pathname) {
+export async function readStableRegularFile(pathname) {
   const before = await lstat(pathname, { bigint: true });
   if (!before.isFile() || before.isSymbolicLink() || before.size < 1n ||
     before.size > 4n * 1024n * 1024n) {
@@ -228,21 +228,21 @@ function parseJson(bytes) {
   return JSON.parse(bytes.toString("utf8"));
 }
 
-function jsonBytes(value) {
+export function jsonBytes(value) {
   return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function digest(bytes) {
+export function digest(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-function exactObject(value, fields) {
+export function exactObject(value, fields) {
   return value !== null && !Array.isArray(value) && typeof value === "object" &&
     Object.keys(value).length === fields.length &&
     fields.every((field) => Object.hasOwn(value, field));
 }
 
-function absolutePath(value) {
+export function absolutePath(value) {
   return typeof value === "string" && path.isAbsolute(value) && value.length > 1;
 }
 
@@ -254,7 +254,7 @@ function privateIpv4(value) {
     (octets[0] === 192 && octets[1] === 168);
 }
 
-function validPublicBaseUrl(value) {
+export function validPublicBaseUrl(value) {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && !url.username && !url.password &&
@@ -289,11 +289,13 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  main().catch((error) => {
+  try {
+    await main();
+  } catch (error) {
     const failure = error instanceof SourceFreeK3sPreparationError
       ? error
       : new SourceFreeK3sPreparationError("K3S_PREPARE_INPUT", 1, { cause: error });
     process.stderr.write(`${failure.code} ${failure.message}\n`);
     process.exitCode = failure.exitCode;
-  });
+  }
 }
