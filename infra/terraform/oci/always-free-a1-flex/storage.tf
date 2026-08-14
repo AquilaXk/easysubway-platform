@@ -25,8 +25,8 @@ resource "oci_core_volume_backup_policy" "data" {
   count = var.create_data_volume ? 1 : 0
 
   compartment_id = var.compartment_ocid
-  display_name    = "${var.name_prefix}-data-daily"
-  freeform_tags   = local.common_tags
+  display_name   = "${var.name_prefix}-data-daily"
+  freeform_tags  = local.common_tags
 
   schedules {
     backup_type       = "INCREMENTAL"

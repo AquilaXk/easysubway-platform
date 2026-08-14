@@ -28,8 +28,8 @@ resource "oci_events_rule" "data_volume_backup_failed" {
 
   condition_details {
     event_types = ["com.oraclecloud.blockvolumes.createvolumebackup.end"]
-    data        = jsonencode({
-      status            = ["operationFailed"]
+    data = jsonencode({
+      status = ["operationFailed"]
       additionalDetails = {
         volumeId = [oci_core_volume.data[0].id]
       }
