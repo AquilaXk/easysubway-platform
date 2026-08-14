@@ -86,7 +86,7 @@ test("Terraform binds one daily incremental policy and one exact failure alert t
   assert.match(storage, /time_zone\s*=\s*"REGIONAL_DATA_CENTER_TIME"/);
   assert.match(storage, /asset_id\s*=\s*oci_core_volume\.data\[0\]\.id/);
   assert.match(storage, /policy_id\s*=\s*oci_core_volume_backup_policy\.data\[0\]\.id/);
-  assert.doesNotMatch(storage, /destination_region|xrc_kms_key_id|boot_volume_backup/);
+  assert.doesNotMatch(storage, /backup_policy_id|destination_region|xrc_kms_key_id|boot_volume_backup/);
 
   assert.equal(occurrences(alerts, /resource "oci_ons_notification_topic" "data_volume_backup"/g), 1);
   assert.equal(occurrences(alerts, /resource "oci_ons_subscription" "data_volume_backup"/g), 1);
@@ -109,16 +109,22 @@ test("Terraform binds one daily incremental policy and one exact failure alert t
   assert.equal(occurrences(example, /^data_volume_backup_alert_email\s*=\s*"owner@example\.com"$/gm), 1);
 });
 
-test("CI and static-risk policy require the backup contract and remove only CKV_OCI_2", () => {
+test("CI and static-risk policy bind CKV_OCI_2 to the recommended assignment scanner exception", () => {
   const policy = JSON.parse(read("tools/platform/terraform-static-analysis-policy.json"));
   const runner = read("tools/platform/terraform-static-analysis.mjs");
   const staticTests = read("tools/platform/terraform-static-analysis.test.mjs");
   const workflow = read(".github/workflows/ci.yml");
 
-  assert.equal(policy.suppressions.some(({ ruleId }) => ruleId === "CKV_OCI_2"), false);
+  const backupDecision = policy.suppressions.filter(({ ruleId }) => ruleId === "CKV_OCI_2");
+  assert.equal(backupDecision.length, 1);
+  assert.equal(backupDecision[0].resourceAddress, "oci_core_volume.data[0]");
+  assert.equal(backupDecision[0].disposition, "NOT_APPLICABLE_WITH_REASON");
+  assert.match(backupDecision[0].reason, /deprecated oci_core_volume\.backup_policy_id/);
+  assert.match(backupDecision[0].reason, /oci_core_volume_backup_policy_assignment graph/);
+  assert.match(backupDecision[0].removalCondition, /assignment asset_id\/policy_id graph/);
   assert.equal(policy.suppressions.some(({ ruleId }) => ruleId === "CKV_OCI_3"), true);
-  assert.doesNotMatch(runner, /\["CKV_OCI_2",/);
-  assert.doesNotMatch(staticTests, /\["CKV_OCI_2",/);
+  assert.match(runner, /\["CKV_OCI_2",[^\n]+"NOT_APPLICABLE_WITH_REASON"/);
+  assert.match(staticTests, /\["CKV_OCI_2",[^\n]+"NOT_APPLICABLE_WITH_REASON"/);
   assert.match(runner, /\["CKV_OCI_3",/);
   assert.match(staticTests, /\["CKV_OCI_3",/);
   assert.equal(occurrences(workflow, /^\s*node --test tools\/platform\/data-volume-backup-contract\.test\.mjs$/gm), 1);
