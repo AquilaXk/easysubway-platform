@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants, realpathSync } from "node:fs";
 import {
   chmod,
-  lstat,
   mkdir,
   open,
-  readFile,
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runJourneyCandidateCanary } from "./run-journey-candidate-canary.mjs";
+import {
+  absolutePath,
+  digest,
+  exactObject,
+  jsonBytes,
+  readStableRegularFile,
+  validPublicBaseUrl,
+} from "./prepare-source-free-k3s-deployment.mjs";
 
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIRECTORY, "../..");
@@ -21,8 +26,8 @@ const NAMESPACE = "easysubway-journey";
 const DEPLOYER = "system:serviceaccount:easysubway-journey:journey-deployer";
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
-const RESOURCE_VERSION = /^[1-9][0-9]*$/;
-const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9][0-9]*$/;
+const RESOURCE_VERSION = /^[1-9]\d*$/;
+const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9]\d*$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const FALLBACK_ZERO = Object.freeze({
   legacyGraphSuccessCount: 0,
@@ -67,7 +72,7 @@ const ERROR_MESSAGES = Object.freeze({
 });
 
 export class K3sJourneyActivationError extends Error {
-  constructor(code, exitCode = 1, options) {
+  constructor(code, exitCode, options) {
     super(ERROR_MESSAGES[code] ?? "K3s Journey activation failed", options);
     this.name = "K3sJourneyActivationError";
     this.code = code;
@@ -83,165 +88,130 @@ export async function runK3sJourneyActivation(
   validateRequest(input);
   validateEffects(effects);
   if (typeof failureNow !== "function") throw typed("K3S_USAGE", undefined, 2);
-
+  await reserveOperationDirectory(input.operationDirectory);
+  const state = {
+    candidateApplied: false,
+    portForward: undefined,
+    trafficCommitStarted: false,
+    activeServiceMutationCount: 0,
+    nginxMutationCount: 0,
+    oldWorkloadMutationCount: 0,
+    preparedActiveService: undefined,
+    serviceCas: undefined,
+  };
   try {
-    await mkdir(input.operationDirectory, { mode: 0o700 });
-  } catch (error) {
-    throw typed("K3S_USAGE", error, error?.code === "EEXIST" ? 1 : 2);
-  }
-
-  let candidateApplied = false;
-  let portForward;
-  let trafficCommitStarted = false;
-  let activeServiceMutationCount = 0;
-  let nginxMutationCount = 0;
-  let oldWorkloadMutationCount = 0;
-  let preparedActiveService;
-  let serviceCas;
-  try {
-    const verifiedInputs = await effects.verifyInputs({ input });
-    const runtime = await effects.verifyRuntime({ input });
-    const candidate = await effects.applyCandidate({ input, runtime });
-    candidateApplied = true;
-    portForward = await effects.openCandidatePortForward({ input, candidate });
-    const canary = await effects.runCandidateCanary({
-      input,
-      candidate,
-      baseUrl: portForward.baseUrl,
-    });
-    requireFallbackZero(canary);
-    const observation = await effects.observeCandidate({
-      input,
-      candidate,
-      baseUrl: portForward.baseUrl,
-      canary,
-    });
-    const admission = await effects.admitCandidate({
-      input,
-      candidate,
-      canary,
-      observation,
-    });
-    const activation = await effects.activateCandidate({
-      input,
-      candidate,
-      baseUrl: portForward.baseUrl,
-      admission,
-    });
-
-    trafficCommitStarted = true;
-    preparedActiveService = await effects.prepareActiveService({
-      input,
-      candidate,
-      admission,
-      activation,
-    });
-    activeServiceMutationCount = preparedActiveService.activeServiceMutationCount;
-    serviceCas = await effects.commitActiveServiceCas({
-      input,
-      candidate,
-      preparedActiveService,
-      admission,
-      activation,
-    });
-    activeServiceMutationCount += 1;
-    const endpoint = await effects.verifyActiveEndpoint({
-      input,
-      candidate,
-      serviceCas,
-      activation,
-    });
-    const nginx = await effects.switchNginx({
-      input,
-      endpoint,
-      activation,
-    });
-    nginxMutationCount = 1;
-    const drain = await effects.drainOldWorkloads({
-      input,
-      candidate,
-      preparedActiveService,
-      serviceCas,
-    });
-    oldWorkloadMutationCount = drain.oldWorkloadCount;
-    const publicSmoke = await effects.runPublicSmoke({
-      input,
-      endpoint,
-      activation,
-    });
-    await effects.cleanupCandidateService({ input, candidate });
-    await portForward.close();
-    portForward = undefined;
-
-    const receipt = successReceipt({
-      input,
-      verifiedInputs,
-      runtime,
-      candidate,
-      canary,
-      observation,
-      admission,
-      activation,
-      preparedActiveService,
-      serviceCas,
-      endpoint,
-      nginx,
-      drain,
-      publicSmoke,
-      activeServiceMutationCount,
-      nginxMutationCount,
-      oldWorkloadMutationCount,
-    });
+    const values = await executeK3sActivation(input, effects, state);
+    const receipt = successReceipt({ input, ...values, ...state });
     await writeCreateOnly(
       path.join(input.operationDirectory, "k3s-activation-receipt.json"),
       receipt,
     );
     return receipt;
   } catch (cause) {
-    if (!trafficCommitStarted && candidateApplied) {
-      await effects.cleanupCandidate({ input }).catch(() => {});
-    }
-    await portForward?.close().catch(() => {});
-    const code = trafficCommitStarted
-      ? "K3S_POSTSWITCH_FAILED"
-      : "K3S_PRECOMMIT_FAILED";
-    let failedAt;
-    try {
-      failedAt = validTimestamp(failureNow());
-    } catch (clockError) {
-      throw typed("K3S_RECEIPT_FAILED", clockError);
-    }
-    const failure = {
-      schemaVersion: "PLATFORM_K3S_ACTIVATION_FAILURE_V1",
-      artifactKind: "platform-k3s-activation-failure",
-      orchestrator: "K3S",
-      phase: trafficCommitStarted ? "FAILED_POSTSWITCH" : "FAILED_PRECOMMIT",
-      operationId: input.operationId,
-      runUrl: input.runUrl,
-      failedAt,
-      releaseIdentity: releaseIdentity(input),
-      mutationCounts: {
-        activeService: trafficCommitStarted ? activeServiceMutationCount : 0,
-        nginx: trafficCommitStarted ? nginxMutationCount : 0,
-        oldWorkload: trafficCommitStarted ? oldWorkloadMutationCount : 0,
-      },
-      serviceCas: serviceCas ? publicServiceCas(serviceCas) : null,
-      rollbackAttemptCount: 0,
-      degradedSuccess: false,
-      successReceiptCreated: false,
-      fallbackZero: FALLBACK_ZERO,
-      failureCode: code,
-    };
-    try {
-      await writeCreateOnly(
-        path.join(input.operationDirectory, "k3s-activation-failure.json"),
-        failure,
-      );
-    } catch (receiptError) {
-      throw typed("K3S_RECEIPT_FAILED", receiptError);
-    }
-    throw typed(code, cause);
+    await recordActivationFailure({ input, effects, failureNow, state, cause });
   }
+}
+
+async function reserveOperationDirectory(directory) {
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    throw typed("K3S_USAGE", error, error?.code === "EEXIST" ? 1 : 2);
+  }
+}
+
+async function executeK3sActivation(input, effects, state) {
+  const verifiedInputs = await effects.verifyInputs({ input });
+  const runtime = await effects.verifyRuntime({ input });
+  const candidate = await effects.applyCandidate({ input, runtime });
+  state.candidateApplied = true;
+  state.portForward = await effects.openCandidatePortForward({ input, candidate });
+  const baseUrl = state.portForward.baseUrl;
+  const canary = await effects.runCandidateCanary({ input, candidate, baseUrl });
+  requireFallbackZero(canary);
+  const observation = await effects.observeCandidate({
+    input, candidate, baseUrl, canary,
+  });
+  const admission = await effects.admitCandidate({
+    input, candidate, canary, observation,
+  });
+  const activation = await effects.activateCandidate({
+    input, candidate, baseUrl, admission,
+  });
+  state.trafficCommitStarted = true;
+  state.preparedActiveService = await effects.prepareActiveService({
+    input, candidate, admission, activation,
+  });
+  state.activeServiceMutationCount =
+    state.preparedActiveService.activeServiceMutationCount;
+  state.serviceCas = await effects.commitActiveServiceCas({
+    input, candidate, preparedActiveService: state.preparedActiveService,
+    admission, activation,
+  });
+  state.activeServiceMutationCount += 1;
+  const endpoint = await effects.verifyActiveEndpoint({
+    input, candidate, serviceCas: state.serviceCas, activation,
+  });
+  const nginx = await effects.switchNginx({ input, endpoint, activation });
+  state.nginxMutationCount = 1;
+  const drain = await effects.drainOldWorkloads({
+    input, candidate, preparedActiveService: state.preparedActiveService,
+    serviceCas: state.serviceCas,
+  });
+  state.oldWorkloadMutationCount = drain.oldWorkloadCount;
+  const publicSmoke = await effects.runPublicSmoke({ input, endpoint, activation });
+  await effects.cleanupCandidateService({ input, candidate });
+  await state.portForward.close();
+  state.portForward = undefined;
+  return {
+    verifiedInputs, runtime, candidate, canary, observation, admission,
+    activation, endpoint, nginx, drain, publicSmoke,
+  };
+}
+
+async function recordActivationFailure({ input, effects, failureNow, state, cause }) {
+  if (!state.trafficCommitStarted && state.candidateApplied) {
+    await effects.cleanupCandidate({ input }).catch(() => {});
+  }
+  await state.portForward?.close().catch(() => {});
+  const postSwitch = state.trafficCommitStarted;
+  const code = postSwitch ? "K3S_POSTSWITCH_FAILED" : "K3S_PRECOMMIT_FAILED";
+  let failedAt;
+  try {
+    failedAt = validTimestamp(failureNow());
+  } catch (clockError) {
+    throw typed("K3S_RECEIPT_FAILED", clockError);
+  }
+  const failure = {
+    schemaVersion: "PLATFORM_K3S_ACTIVATION_FAILURE_V1",
+    artifactKind: "platform-k3s-activation-failure",
+    orchestrator: "K3S",
+    phase: postSwitch ? "FAILED_POSTSWITCH" : "FAILED_PRECOMMIT",
+    operationId: input.operationId,
+    runUrl: input.runUrl,
+    failedAt,
+    releaseIdentity: releaseIdentity(input),
+    mutationCounts: {
+      activeService: postSwitch ? state.activeServiceMutationCount : 0,
+      nginx: postSwitch ? state.nginxMutationCount : 0,
+      oldWorkload: postSwitch ? state.oldWorkloadMutationCount : 0,
+    },
+    serviceCas: state.serviceCas ? publicServiceCas(state.serviceCas) : null,
+    rollbackAttemptCount: 0,
+    degradedSuccess: false,
+    successReceiptCreated: false,
+    fallbackZero: FALLBACK_ZERO,
+    failureCode: code,
+  };
+  try {
+    await writeCreateOnly(
+      path.join(input.operationDirectory, "k3s-activation-failure.json"),
+      failure,
+    );
+  } catch (receiptError) {
+    throw typed("K3S_RECEIPT_FAILED", receiptError);
+  }
+  throw typed(code, cause);
 }
 
 export function createK3sJourneyActivationEffects({
@@ -912,7 +882,7 @@ async function openPortForward({ command, args }) {
         reject(new Error("K3s port-forward output exceeded limit"));
         return;
       }
-      const match = output.match(/Forwarding from 127\.0\.0\.1:([1-9][0-9]{0,4}) -> 8080/);
+      const match = /Forwarding from 127\.0\.0\.1:([1-9]\d{0,4}) -> 8080/.exec(output);
       if (match) {
         clearTimeout(timeout);
         resolve(Number(match[1]));
@@ -1014,22 +984,6 @@ async function runCommand(command, args, {
   });
 }
 
-async function readStableRegularFile(pathname) {
-  const before = await lstat(pathname, { bigint: true });
-  if (!before.isFile() || before.isSymbolicLink() || before.size < 1n ||
-    before.size > 4n * 1024n * 1024n) {
-    throw new Error("input must be a bounded regular file");
-  }
-  const bytes = await readFile(pathname);
-  const after = await lstat(pathname, { bigint: true });
-  if (!["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"]
-    .every((field) => before[field] === after[field]) ||
-    BigInt(bytes.length) !== before.size) {
-    throw new Error("input changed while being read");
-  }
-  return bytes;
-}
-
 function parseEnvironment(bytes) {
   const environment = {};
   const lines = bytes.toString("utf8").split(/\r?\n/);
@@ -1070,34 +1024,20 @@ async function writeBytesCreateOnly(pathname, bytes, mode) {
   await chmod(pathname, mode);
 }
 
-function jsonBytes(value) {
-  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
 function parseJson(bytes) {
   return JSON.parse(Buffer.isBuffer(bytes) ? bytes.toString("utf8") : bytes);
-}
-
-function digest(bytes) {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function evidence(parts) {
   return digest(Buffer.from(`${parts.join("\n")}\n`, "utf8"));
 }
 
-function exactObject(value, fields) {
-  return value !== null && !Array.isArray(value) && typeof value === "object" &&
-    Object.keys(value).length === fields.length &&
-    fields.every((field) => Object.hasOwn(value, field));
-}
-
 function sameObject(left, right) {
   if (!left || !right || typeof left !== "object" || typeof right !== "object") {
     return false;
   }
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
+  const leftKeys = Object.keys(left).sort((first, second) => first.localeCompare(second));
+  const rightKeys = Object.keys(right).sort((first, second) => first.localeCompare(second));
   return leftKeys.length === rightKeys.length &&
     leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
 }
@@ -1116,20 +1056,6 @@ export function renderK3sNginxConfig(current) {
   return composeTargetCount === 3
     ? Buffer.from(source.replaceAll(composeTarget, k3sTarget), "utf8")
     : Buffer.from(current);
-}
-
-function absolutePath(value) {
-  return typeof value === "string" && path.isAbsolute(value) && value.length > 1;
-}
-
-function validPublicBaseUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password &&
-      !url.search && !url.hash && (url.pathname === "" || url.pathname === "/");
-  } catch {
-    return false;
-  }
 }
 
 function validTimestamp(value) {
@@ -1180,11 +1106,13 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  main().catch((error) => {
+  try {
+    await main();
+  } catch (error) {
     const failure = error instanceof K3sJourneyActivationError
       ? error
       : typed("K3S_PRECOMMIT_FAILED", error);
     process.stderr.write(`${failure.code} ${failure.message}\n`);
     process.exitCode = failure.exitCode;
-  });
+  }
 }
