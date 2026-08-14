@@ -64,6 +64,7 @@ jobs:
           node --test tools/ci/source-free-journey-deploy-workflow.test.mjs
           node --test tools/platform/stage-journey-release-tuple.test.mjs
           node --test tools/platform/read-staged-journey-release-tuple.test.mjs
+          node --test tools/platform/single-node-k3s-foundation.test.mjs
           node --test tools/ops/post-deploy-smoke.test.mjs
 
       - name: Validate production Compose
@@ -78,6 +79,7 @@ jobs:
           bash -n infra/nginx/route-v2-entrypoint.sh
           bash -n tools/deploy/deploy-backend.sh
           bash -n tools/deploy/prepare-deployment-env.sh
+          bash -n tools/platform/bootstrap-single-node-k3s.sh
           bash -n tools/ops/data-source-raw-archive.sh
           bash -n tools/ops/facility-report-photo-backup.sh
           bash -n tools/ops/postgres-backup.sh

@@ -64,6 +64,12 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     "tools/platform/prepare-source-free-fixed-host-deployment.mjs",
     "tools/platform/run-fixed-host-journey-activation.mjs",
     "infra/docker-compose.journey-candidate.yml",
+    "contracts/release/platform-k3s-runtime-contract.json",
+    "infra/k3s/config.yaml",
+    "infra/k3s/easysubway-k3s.service",
+    "infra/k3s/deployer-rbac.json",
+    "tools/platform/bootstrap-single-node-k3s.sh",
+    "tools/platform/render-journey-kubernetes-candidate.mjs",
   ];
   const entries = [
     ["cd.backend-image-digest", ".github/workflows/cd.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend_image:", "EASYSUBWAY_BACKEND_IMAGE:", "backend_image must be an immutable EasySubway backend digest"]],
@@ -91,13 +97,19 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     ["source-free.prepare.exact-producer-inputs", "tools/platform/prepare-source-free-fixed-host-deployment.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["backend-component-manifest.json", "journey-v3-contract-bundle-v2-receipt.json", "server-route-bundle-publication-descriptor.json"]],
     ["source-free.runner.fixed-host-lifecycle", "tools/platform/run-fixed-host-journey-activation.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["switchNginx", "drainAndRecreateCanonical", "removeStandby", "writeFailureReceipt", "activation-receipt.json", "reserveOperationDirectory"]],
     ["source-free.compose.exact-journey-environment", "infra/docker-compose.journey-candidate.yml", "TARGET_JOURNEY_V3_REQUIRED", ["EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend", "EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby"]],
+    ["k3s.runtime.single-node-contract", "contracts/release/platform-k3s-runtime-contract.json", "TARGET_JOURNEY_V3_REQUIRED", ["\"version\": \"v1.36.3+k3s1\"", "\"activeServiceNodePort\": 32080", "\"multiHostHighAvailabilityClaim\": false", "\"result\": \"TYPED_NONZERO_OUTPUT_ZERO\""]],
+    ["k3s.config.loopback-nodeport", "infra/k3s/config.yaml", "TARGET_JOURNEY_V3_REQUIRED", ["secrets-encryption: true", "  - traefik", "proxy-mode=iptables", "nodeport-addresses=127.0.0.0/8"]],
+    ["k3s.service.pinned-server", "infra/k3s/easysubway-k3s.service", "TARGET_JOURNEY_V3_REQUIRED", ["ExecStart=/usr/local/bin/k3s server --config /etc/rancher/k3s/config.yaml", "Restart=on-failure", "TimeoutStopSec=45s"]],
+    ["k3s.rbac.namespace-deployer", "infra/k3s/deployer-rbac.json", "TARGET_JOURNEY_V3_REQUIRED", ["\"kind\": \"Role\"", "\"pods/portforward\"", "\"namespace\": \"easysubway-journey\""]],
+    ["k3s.bootstrap.exact-binary", "tools/platform/bootstrap-single-node-k3s.sh", "TARGET_JOURNEY_V3_REQUIRED", ["K3S_BINARY_SHA256=\"c9a209103f480f163b7c6a56f00862b4481927b284dc29a3716bb70d886691a8\"", "for attempt in $(seq 1 60)", "kubectl apply --server-side=true", "verify_runtime"]],
+    ["k3s.renderer.immutable-candidate", "tools/platform/render-journey-kubernetes-candidate.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["PLATFORM_K3S_CANDIDATE_RENDER_V1", "readOnlyRootFilesystem: true", "nodePort: 32080", "applyDuringCandidatePreparation: false"]],
   ];
   assert.deepEqual(Object.keys(inventory), ["schemaVersion", "artifactKind", "sourcePaths", "entries"]);
   assert.equal(inventory.schemaVersion, 1);
   assert.equal(inventory.artifactKind, "platform-deployment-runtime-input-inventory-v1");
   assert.deepEqual(inventory.sourcePaths, sourcePaths);
-  assert.equal(inventory.entries.length, 25);
-  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 9);
+  assert.equal(inventory.entries.length, 31);
+  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 15);
   assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "LEGACY_NOT_JOURNEY_V3").length, 16);
   assert.deepEqual(inventory.entries.map(({ id, sourcePath, journeyV3Disposition, evidenceTokens }) => [id, sourcePath, journeyV3Disposition, evidenceTokens]), entries);
 

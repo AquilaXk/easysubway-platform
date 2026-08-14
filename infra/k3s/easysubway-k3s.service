@@ -1,0 +1,22 @@
+[Unit]
+Description=EasySubway single-node K3s
+Documentation=https://docs.k3s.io/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+Environment=K3S_CONFIG_FILE=/etc/rancher/k3s/config.yaml
+ExecStart=/usr/local/bin/k3s server --config /etc/rancher/k3s/config.yaml
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+TasksMax=infinity
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=multi-user.target
