@@ -24,7 +24,7 @@ test("Terraform candidate inventory is closed, exact, and tracked", () => {
   assert.equal(Array.isArray(inventory.roots), true);
   assert.equal(Array.isArray(inventory.moduleOnlyExclusions), true);
   assert.deepEqual(inventory.moduleOnlyExclusions, []);
-  assert.equal(inventory.roots.length, 1);
+  assert.equal(inventory.roots.length, 2);
 
   const candidateDirectories = trackedTerraformDirectories();
   const classified = new Set();
@@ -69,7 +69,10 @@ test("Platform CI validates each inventory root using readonly backendless Terra
   assert.match(gitignore, /^\*\*\/\.terraform\.lock\.hcl$/m);
   assert.deepEqual(
     gitignore.split("\n").filter((line) => line.startsWith("!") && line.endsWith(".terraform.lock.hcl")),
-    ["!infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl"],
+    [
+      "!infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl",
+      "!infra/terraform/oci/data-volume-backup-control/.terraform.lock.hcl",
+    ],
   );
   assert.match(workflow, /node --test tools\/platform\/validate-terraform-root-inventory\.test\.mjs/);
   const terraformStep = workflow.match(/      - name: Validate Terraform roots\n        shell: bash\n        run: \|\n((?:          [^\n]*\n?)*)/);
@@ -83,6 +86,8 @@ test("Platform CI validates each inventory root using readonly backendless Terra
     "terraform fmt -check -recursive infra/terraform",
     "terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color",
     "terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color",
+    "terraform -chdir=infra/terraform/oci/data-volume-backup-control init -backend=false -input=false -lockfile=readonly -no-color",
+    "terraform -chdir=infra/terraform/oci/data-volume-backup-control validate -no-color",
   ]);
   const steps = [
     "set -euo pipefail",
@@ -93,12 +98,21 @@ test("Platform CI validates each inventory root using readonly backendless Terra
     "terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color",
     "terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color",
     "git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl",
+    "backup_tf_data_dir=\"${RUNNER_TEMP}/terraform-data/data-volume-backup-control\"",
+    "rm -rf \"${backup_tf_data_dir}\"",
+    "mkdir -p \"${backup_tf_data_dir}\"",
+    "export TF_DATA_DIR=\"${backup_tf_data_dir}\"",
+    "terraform -chdir=infra/terraform/oci/data-volume-backup-control init -backend=false -input=false -lockfile=readonly -no-color",
+    "terraform -chdir=infra/terraform/oci/data-volume-backup-control validate -no-color",
+    "git diff --exit-code -- infra/terraform/oci/data-volume-backup-control/.terraform.lock.hcl",
   ];
   const indexes = steps.map((step) => terraformRun.indexOf(step));
   assert.equal(indexes.every((index) => index >= 0), true);
   assert.equal(indexes.every((index, position) => position === 0 || indexes[position - 1] < index), true);
   assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color/g) ?? []).length, 1);
   assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/always-free-a1-flex validate -no-color/g) ?? []).length, 1);
+  assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/data-volume-backup-control init -backend=false -input=false -lockfile=readonly -no-color/g) ?? []).length, 1);
+  assert.equal((terraformRun.match(/terraform -chdir=infra\/terraform\/oci\/data-volume-backup-control validate -no-color/g) ?? []).length, 1);
 });
 
 test("Platform CI keeps Terraform static analysis inventory-driven and isolated", () => {

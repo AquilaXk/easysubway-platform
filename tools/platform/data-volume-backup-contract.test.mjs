@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const repository = new URL("../../", import.meta.url);
@@ -20,6 +20,9 @@ test("data volume backup contract is closed to the single-host startup decision"
     artifactKind: "platform-data-volume-backup-contract-v1",
     target: {
       terraformAddress: "oci_core_volume.data[0]",
+      controlRoot: "infra/terraform/oci/data-volume-backup-control",
+      controlVolumeInput: "var.data_volume_ocid",
+      stateDisposition: "OWNER_LOCAL_EXTERNAL",
       mountPath: "/var/lib/easysubway-data",
       dockerDataRoot: "/var/lib/easysubway-data/docker",
       authoritativeData: ["POSTGRESQL", "PRIVATE_OBJECT_STORAGE"],
@@ -47,7 +50,7 @@ test("data volume backup contract is closed to the single-host startup decision"
       status: "operationFailed",
       protocol: "EMAIL",
       endpointSource: "var.data_volume_backup_alert_email",
-      requiredWhen: "CREATE_DATA_VOLUME_TRUE",
+      requiredWhen: "CONTROL_ROOT_APPLY",
       requiredSubscriptionState: "ACTIVE",
     },
     restore: {
@@ -70,46 +73,67 @@ test("data volume backup contract is closed to the single-host startup decision"
   });
 });
 
-test("Terraform binds one daily incremental policy and one exact failure alert to the data volume", () => {
+test("standalone Terraform root owns one existing-volume policy and exact failure alert", () => {
   const storage = read("infra/terraform/oci/always-free-a1-flex/storage.tf");
-  const alerts = read("infra/terraform/oci/always-free-a1-flex/backup-alerts.tf");
-  const variables = read("infra/terraform/oci/always-free-a1-flex/variables.tf");
-  const example = read("infra/terraform/oci/always-free-a1-flex/terraform.tfvars.example");
+  const broadVariables = read("infra/terraform/oci/always-free-a1-flex/variables.tf");
+  const broadExample = read("infra/terraform/oci/always-free-a1-flex/terraform.tfvars.example");
+  const versions = read("infra/terraform/oci/data-volume-backup-control/versions.tf");
+  const providers = read("infra/terraform/oci/data-volume-backup-control/providers.tf");
+  const variables = read("infra/terraform/oci/data-volume-backup-control/variables.tf");
+  const resources = read("infra/terraform/oci/data-volume-backup-control/main.tf");
+  const outputs = read("infra/terraform/oci/data-volume-backup-control/outputs.tf");
 
-  assert.equal(occurrences(storage, /resource "oci_core_volume_backup_policy" "data"/g), 1);
-  assert.equal(occurrences(storage, /resource "oci_core_volume_backup_policy_assignment" "data"/g), 1);
-  assert.match(storage, /count\s*=\s*var\.create_data_volume \? 1 : 0/);
-  assert.match(storage, /backup_type\s*=\s*"INCREMENTAL"/);
-  assert.match(storage, /period\s*=\s*"ONE_DAY"/);
-  assert.match(storage, /retention_seconds\s*=\s*345600/);
-  assert.match(storage, /hour_of_day\s*=\s*3/);
-  assert.match(storage, /offset_type\s*=\s*"STRUCTURED"/);
-  assert.match(storage, /time_zone\s*=\s*"REGIONAL_DATA_CENTER_TIME"/);
-  assert.match(storage, /asset_id\s*=\s*oci_core_volume\.data\[0\]\.id/);
-  assert.match(storage, /policy_id\s*=\s*oci_core_volume_backup_policy\.data\[0\]\.id/);
-  assert.doesNotMatch(storage, /backup_policy_id|destination_region|xrc_kms_key_id|boot_volume_backup/);
+  assert.equal(occurrences(storage, /resource "oci_core_volume" "data"/g), 1);
+  assert.equal(occurrences(storage, /resource "oci_core_volume_attachment" "data"/g), 1);
+  assert.doesNotMatch(storage, /volume_backup_policy|backup_policy_id|destination_region|boot_volume_backup/);
+  assert.equal(existsSync(new URL("../../infra/terraform/oci/always-free-a1-flex/backup-alerts.tf", import.meta.url)), false);
+  assert.doesNotMatch(broadVariables, /data_volume_backup_alert_email/);
+  assert.doesNotMatch(broadExample, /data_volume_backup_alert_email/);
 
-  assert.equal(occurrences(alerts, /resource "oci_ons_notification_topic" "data_volume_backup"/g), 1);
-  assert.equal(occurrences(alerts, /resource "oci_ons_subscription" "data_volume_backup"/g), 1);
-  assert.equal(occurrences(alerts, /resource "oci_events_rule" "data_volume_backup_failed"/g), 1);
-  assert.match(alerts, /protocol\s*=\s*"EMAIL"/);
-  assert.match(alerts, /endpoint\s*=\s*var\.data_volume_backup_alert_email/);
-  assert.match(alerts, /event_types\s*=\s*\[\s*"com\.oraclecloud\.blockvolumes\.createvolumebackup\.end"\s*\]/s);
-  assert.match(alerts, /status\s*=\s*\["operationFailed"\]/);
-  assert.match(alerts, /volumeId\s*=\s*\[oci_core_volume\.data\[0\]\.id\]/);
-  assert.match(alerts, /action_type\s*=\s*"ONS"/);
-  assert.match(alerts, /topic_id\s*=\s*oci_ons_notification_topic\.data_volume_backup\[0\]\.id/);
-  assert.doesNotMatch(alerts, /@example\.(com|org)|https?:\/\//);
+  assert.match(versions, /backend "local" \{\}/);
+  assert.match(versions, /source\s*=\s*"oracle\/oci"/);
+  assert.match(versions, /version\s*=\s*"~> 8\.8"/);
+  assert.match(providers, /auth\s*=\s*"APIKey"/);
+  assert.match(providers, /config_file_profile\s*=\s*var\.config_file_profile/);
+  assert.match(providers, /region\s*=\s*var\.region/);
+
+  assert.equal(occurrences(resources, /resource "oci_core_volume_backup_policy" "data"/g), 1);
+  assert.equal(occurrences(resources, /resource "oci_core_volume_backup_policy_assignment" "data"/g), 1);
+  assert.match(resources, /backup_type\s*=\s*"INCREMENTAL"/);
+  assert.match(resources, /period\s*=\s*"ONE_DAY"/);
+  assert.match(resources, /retention_seconds\s*=\s*345600/);
+  assert.match(resources, /hour_of_day\s*=\s*3/);
+  assert.match(resources, /offset_type\s*=\s*"STRUCTURED"/);
+  assert.match(resources, /time_zone\s*=\s*"REGIONAL_DATA_CENTER_TIME"/);
+  assert.match(resources, /asset_id\s*=\s*var\.data_volume_ocid/);
+  assert.match(resources, /policy_id\s*=\s*oci_core_volume_backup_policy\.data\.id/);
+  assert.doesNotMatch(resources, /backup_policy_id|destination_region|xrc_kms_key_id|boot_volume_backup/);
+
+  assert.equal(occurrences(resources, /resource "oci_ons_notification_topic" "data_volume_backup"/g), 1);
+  assert.equal(occurrences(resources, /resource "oci_ons_subscription" "data_volume_backup"/g), 1);
+  assert.equal(occurrences(resources, /resource "oci_events_rule" "data_volume_backup_failed"/g), 1);
+  assert.match(resources, /protocol\s*=\s*"EMAIL"/);
+  assert.match(resources, /endpoint\s*=\s*var\.data_volume_backup_alert_email/);
+  assert.match(resources, /event_types\s*=\s*\[\s*"com\.oraclecloud\.blockvolumes\.createvolumebackup\.end"\s*\]/s);
+  assert.match(resources, /status\s*=\s*\["operationFailed"\]/);
+  assert.match(resources, /volumeId\s*=\s*\[var\.data_volume_ocid\]/);
+  assert.match(resources, /action_type\s*=\s*"ONS"/);
+  assert.match(resources, /topic_id\s*=\s*oci_ons_notification_topic\.data_volume_backup\.id/);
+  assert.doesNotMatch(resources, /@example\.(com|org)|https?:\/\//);
 
   const variableBlock = variables.match(/variable "data_volume_backup_alert_email" \{[\s\S]*?\n\}/)?.[0];
   assert.ok(variableBlock, "data_volume_backup_alert_email variable must exist");
   assert.match(variableBlock, /type\s*=\s*string/);
-  assert.match(variableBlock, /default\s*=\s*null/);
-  assert.match(variableBlock, /nullable\s*=\s*true/);
   assert.match(variableBlock, /sensitive\s*=\s*true/);
-  assert.match(variableBlock, /!var\.create_data_volume\s*\|\|/);
-  assert.match(variableBlock, /try\(trimspace\(var\.data_volume_backup_alert_email\),\s*""\)/);
-  assert.equal(occurrences(example, /^data_volume_backup_alert_email\s*=\s*"owner@example\.com"$/gm), 1);
+  assert.match(variableBlock, /trimspace\(var\.data_volume_backup_alert_email\)/);
+  for (const name of ["compartment_ocid", "config_file_profile", "data_volume_ocid", "name_prefix", "region"]) {
+    assert.match(variables, new RegExp(`variable "${name}"`));
+  }
+  assert.equal(variables.includes(String.raw`regex("^ocid1\\.(compartment|tenancy)\\."`), true);
+  assert.equal(variables.includes(String.raw`regex("^ocid1\\.volume\\."`), true);
+  for (const name of ["backup_policy_id", "backup_policy_assignment_id", "event_rule_id", "notification_topic_id", "subscription_id", "subscription_state"]) {
+    assert.match(outputs, new RegExp(`output "${name}"`));
+  }
 });
 
 test("CI and static-risk policy bind CKV_OCI_2 to the recommended assignment scanner exception", () => {
@@ -122,9 +146,10 @@ test("CI and static-risk policy bind CKV_OCI_2 to the recommended assignment sca
   assert.equal(backupDecision.length, 1);
   assert.equal(backupDecision[0].resourceAddress, "oci_core_volume.data[0]");
   assert.equal(backupDecision[0].disposition, "NOT_APPLICABLE_WITH_REASON");
-  assert.match(backupDecision[0].reason, /deprecated oci_core_volume\.backup_policy_id/);
-  assert.match(backupDecision[0].reason, /oci_core_volume_backup_policy_assignment graph/);
-  assert.match(backupDecision[0].removalCondition, /assignment asset_id\/policy_id graph/);
+  assert.match(backupDecision[0].reason, /deprecated direct backup_policy_id/);
+  assert.match(backupDecision[0].reason, /별도 Terraform state root/);
+  assert.match(backupDecision[0].impact, /deterministic two-root ownership contract와 live assignment read-back/);
+  assert.match(backupDecision[0].removalCondition, /cross-root state relationship/);
   assert.equal(policy.suppressions.some(({ ruleId }) => ruleId === "CKV_OCI_3"), true);
   assert.match(runner, /\["CKV_OCI_2",[^\n]+"NOT_APPLICABLE_WITH_REASON"/);
   assert.match(staticTests, /\["CKV_OCI_2",[^\n]+"NOT_APPLICABLE_WITH_REASON"/);

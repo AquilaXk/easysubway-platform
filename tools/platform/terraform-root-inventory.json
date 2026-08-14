@@ -19,6 +19,24 @@
       ],
       "ownerWorkflow": ".github/workflows/ci.yml",
       "ownerJob": "platform"
+    },
+    {
+      "id": "oci-data-volume-backup-control",
+      "path": "infra/terraform/oci/data-volume-backup-control",
+      "requiredTerraformVersion": ">= 1.6.0",
+      "providers": [
+        {
+          "source": "registry.terraform.io/oracle/oci",
+          "constraint": "~> 8.8"
+        }
+      ],
+      "backendDisposition": "DISABLED_FOR_CI",
+      "executionPlatforms": [
+        "darwin_arm64",
+        "linux_amd64"
+      ],
+      "ownerWorkflow": ".github/workflows/ci.yml",
+      "ownerJob": "platform"
     }
   ],
   "moduleOnlyExclusions": []
