@@ -55,15 +55,15 @@ variable "name_prefix" {
   }
 }
 
-variable "data_volume_backup_alert_email" {
-  description = "Owner email endpoint for data volume backup failure notifications."
+variable "data_volume_backup_slack_webhook_url" {
+  description = "Owner Slack incoming-webhook endpoint for data volume backup failure notifications."
   type        = string
   nullable    = false
   sensitive   = true
 
   validation {
-    condition     = can(regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", trimspace(var.data_volume_backup_alert_email)))
-    error_message = "data_volume_backup_alert_email must be a valid email address."
+    condition     = can(regex("^https://hooks\\.slack\\.com/services/[^/?#\\s]+/[^/?#\\s]+/[^/?#\\s]+$", trimspace(var.data_volume_backup_slack_webhook_url)))
+    error_message = "data_volume_backup_slack_webhook_url must be a canonical Slack incoming-webhook URL without query parameters."
   }
 }
 

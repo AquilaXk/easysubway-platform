@@ -14,7 +14,7 @@ resource "oci_core_volume_backup_policy" "data" {
   schedules {
     backup_type       = "INCREMENTAL"
     period            = "ONE_DAY"
-    retention_seconds = 345600
+    retention_seconds = 259200
     hour_of_day       = 3
     offset_type       = "STRUCTURED"
     time_zone         = "REGIONAL_DATA_CENTER_TIME"
@@ -35,8 +35,8 @@ resource "oci_ons_notification_topic" "data_volume_backup" {
 
 resource "oci_ons_subscription" "data_volume_backup" {
   compartment_id = var.compartment_ocid
-  endpoint       = var.data_volume_backup_alert_email
-  protocol       = "EMAIL"
+  endpoint       = var.data_volume_backup_slack_webhook_url
+  protocol       = "SLACK"
   topic_id       = oci_ons_notification_topic.data_volume_backup.id
   freeform_tags  = local.common_tags
 }
