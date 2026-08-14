@@ -1,0 +1,194 @@
+name: Source-free Journey K3s Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Closed execution mode"
+        required: true
+        type: choice
+        options:
+          - PREVIEW
+          - DEPLOY
+      backend_run_id:
+        description: "Exact Backend release workflow run ID"
+        required: true
+        type: string
+      backend_artifact_id:
+        description: "Exact Backend release artifact ID"
+        required: true
+        type: string
+      backend_artifact_name:
+        description: "Exact Backend release artifact name"
+        required: true
+        type: string
+      backend_archive_sha256:
+        description: "Exact Backend archive SHA-256"
+        required: true
+        type: string
+      data_run_id:
+        description: "Exact signed Data FINAL workflow run ID"
+        required: true
+        type: string
+      data_artifact_id:
+        description: "Exact signed Data FINAL artifact ID"
+        required: true
+        type: string
+      data_artifact_name:
+        description: "Exact signed Data FINAL artifact name"
+        required: true
+        type: string
+      data_archive_sha256:
+        description: "Exact signed Data FINAL archive SHA-256"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: source-free-journey-k3s-production
+  cancel-in-progress: false
+
+jobs:
+  source-free-k3s:
+    name: ${{ inputs.mode == 'DEPLOY' && 'Activate source-free Journey on K3s' || 'Validate source-free K3s request' }}
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    environment: production-deploy
+    runs-on: ${{ fromJSON(inputs.mode == 'DEPLOY' && '["self-hosted","Linux","ARM64","easysubway-production"]' || '["ubuntu-latest"]') }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Download exact Backend archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ inputs.backend_artifact_id }}
+          run-id: ${{ inputs.backend_run_id }}
+          repository: AquilaXk/easysubway-backend
+          github-token: ${{ secrets.EASYSUBWAY_RELEASE_ARTIFACTS_READ_TOKEN }}
+          path: ${{ runner.temp }}/backend-archive
+          skip-decompress: true
+
+      - name: Download exact signed Data FINAL archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ inputs.data_artifact_id }}
+          run-id: ${{ inputs.data_run_id }}
+          repository: AquilaXk/easysubway-data
+          github-token: ${{ secrets.EASYSUBWAY_RELEASE_ARTIFACTS_READ_TOKEN }}
+          path: ${{ runner.temp }}/data-archive
+          skip-decompress: true
+
+      - name: Validate immutable artifacts and prepare K3s request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.EASYSUBWAY_RELEASE_ARTIFACTS_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          EASYSUBWAY_ENV: ${{ secrets.EASYSUBWAY_ENV }}
+          MODE: ${{ inputs.mode }}
+          CONFIGURED_DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+          NODE_INTERNAL_IP: ${{ vars.PRODUCTION_NODE_INTERNAL_IP }}
+          PUBLIC_BASE_URL: ${{ vars.PRODUCTION_PUBLIC_BASE_URL }}
+          DEPLOY_COMPOSE_PROJECT: ${{ vars.DEPLOY_COMPOSE_PROJECT }}
+          BACKEND_RUN_ID: ${{ inputs.backend_run_id }}
+          BACKEND_ARTIFACT_ID: ${{ inputs.backend_artifact_id }}
+          BACKEND_ARTIFACT_NAME: ${{ inputs.backend_artifact_name }}
+          BACKEND_ARCHIVE_SHA256: ${{ inputs.backend_archive_sha256 }}
+          DATA_RUN_ID: ${{ inputs.data_run_id }}
+          DATA_ARTIFACT_ID: ${{ inputs.data_artifact_id }}
+          DATA_ARTIFACT_NAME: ${{ inputs.data_artifact_name }}
+          DATA_ARCHIVE_SHA256: ${{ inputs.data_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          backend_metadata="$(gh api "repos/AquilaXk/easysubway-backend/actions/artifacts/${BACKEND_ARTIFACT_ID}" --jq '[.name, (.workflow_run.id|tostring), (.expired|tostring)] | @tsv')"
+          data_metadata="$(gh api "repos/AquilaXk/easysubway-data/actions/artifacts/${DATA_ARTIFACT_ID}" --jq '[.name, (.workflow_run.id|tostring), (.expired|tostring)] | @tsv')"
+          backend_run_metadata="$(gh api "repos/AquilaXk/easysubway-backend/actions/runs/${BACKEND_RUN_ID}" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')"
+          data_run_metadata="$(gh api "repos/AquilaXk/easysubway-data/actions/runs/${DATA_RUN_ID}" --jq '[.path, .conclusion, .head_branch, .head_sha] | @tsv')"
+          IFS=$'\t' read -r backend_workflow backend_conclusion backend_branch backend_producer_sha <<< "${backend_run_metadata}"
+          IFS=$'\t' read -r data_workflow data_conclusion data_branch data_producer_sha <<< "${data_run_metadata}"
+          [[ "${backend_metadata}" == "${BACKEND_ARTIFACT_NAME}"$'\t'"${BACKEND_RUN_ID}"$'\tfalse' ]]
+          [[ "${data_metadata}" == "${DATA_ARTIFACT_NAME}"$'\t'"${DATA_RUN_ID}"$'\tfalse' ]]
+          [[ "${backend_workflow}" == ".github/workflows/release-artifacts.yml" && "${backend_conclusion}" == "success" && "${backend_branch}" == "main" && "${backend_producer_sha}" =~ ^[a-f0-9]{40}$ ]]
+          [[ "${data_workflow}" == ".github/workflows/datapack-release.yml" && "${data_conclusion}" == "success" && "${data_branch}" == "main" && "${data_producer_sha}" =~ ^[a-f0-9]{40}$ ]]
+          mapfile -t backend_archives < <(find "${RUNNER_TEMP}/backend-archive" -maxdepth 1 -type f -print)
+          mapfile -t data_archives < <(find "${RUNNER_TEMP}/data-archive" -maxdepth 1 -type f -print)
+          [[ "${#backend_archives[@]}" -eq 1 && "${#data_archives[@]}" -eq 1 ]]
+          [[ "$(sha256sum "${backend_archives[0]}" | cut -d ' ' -f 1)" == "${BACKEND_ARCHIVE_SHA256}" ]]
+          [[ "$(sha256sum "${data_archives[0]}" | cut -d ' ' -f 1)" == "${DATA_ARCHIVE_SHA256}" ]]
+          [[ -n "${NODE_INTERNAL_IP}" && -n "${PUBLIC_BASE_URL}" && -n "${DEPLOY_COMPOSE_PROJECT}" ]]
+
+          if [[ "${MODE}" == "PREVIEW" ]]; then
+            deploy_root="${RUNNER_TEMP}/source-free-k3s-preview"
+          else
+            [[ -n "${CONFIGURED_DEPLOY_ROOT}" ]]
+            deploy_root="${CONFIGURED_DEPLOY_ROOT}"
+          fi
+          source_free_root="${deploy_root}/source-free-inputs/source-free-k3s-${GITHUB_RUN_ID}"
+          operation_directory="${deploy_root}/release-receipts/source-free-k3s-${GITHUB_RUN_ID}"
+          mkdir -p "${RUNNER_TEMP}/backend" "${RUNNER_TEMP}/data" "${RUNNER_TEMP}/prepared" \
+            "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
+          chmod 700 "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
+          unzip -q "${backend_archives[0]}" -d "${RUNNER_TEMP}/backend"
+          unzip -q "${data_archives[0]}" -d "${RUNNER_TEMP}/data"
+          printf '%s' "${EASYSUBWAY_ENV}" > "${RUNNER_TEMP}/deployment.env"
+          chmod 600 "${RUNNER_TEMP}/deployment.env"
+          tools/deploy/prepare-deployment-env.sh \
+            "${RUNNER_TEMP}/deployment.env" \
+            tools/deploy/compose-server-env.allowlist \
+            tools/deploy/backend-app-env.allowlist \
+            "${RUNNER_TEMP}/prepared"
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
+            --repository "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${RUNNER_TEMP}/admission-receipt.json"
+          node tools/platform/prepare-source-free-fixed-host-deployment.mjs \
+            --mode "${MODE}" \
+            --backend-artifact-root "${RUNNER_TEMP}/backend" \
+            --data-artifact-root "${RUNNER_TEMP}/data" \
+            --admission-receipt "${RUNNER_TEMP}/admission-receipt.json" \
+            --compose-env "${RUNNER_TEMP}/prepared/compose.env" \
+            --backend-env "${RUNNER_TEMP}/prepared/backend.env" \
+            --deploy-root "${deploy_root}" \
+            --output-root "${source_free_root}" \
+            --operation-directory "${operation_directory}" \
+            --request-output "${RUNNER_TEMP}/fixed-host-validation-request.json" \
+            --backend-producer-sha "${backend_producer_sha}" \
+            --data-producer-sha "${data_producer_sha}" \
+            --platform-revision "${GITHUB_SHA}" \
+            --traffic-generation "${GITHUB_RUN_ID}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --project-name "${DEPLOY_COMPOSE_PROJECT}" \
+            > "${RUNNER_TEMP}/source-free-validation.json"
+          node tools/platform/prepare-source-free-k3s-deployment.mjs \
+            --mode "${MODE}" \
+            --fixed-host-request "${RUNNER_TEMP}/fixed-host-validation-request.json" \
+            --candidate-input-output "${RUNNER_TEMP}/k3s-candidate-input.json" \
+            --request-output "${RUNNER_TEMP}/k3s-activation-request.json" \
+            --node-internal-ip "${NODE_INTERNAL_IP}" \
+            --public-base-url "${PUBLIC_BASE_URL}" \
+            > "${RUNNER_TEMP}/k3s-preparation.json"
+          cat "${RUNNER_TEMP}/k3s-preparation.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Activate exact Journey release on K3s
+        if: inputs.mode == 'DEPLOY'
+        shell: bash
+        env:
+          EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN: ${{ secrets.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN }}
+        run: |
+          set -euo pipefail
+          node tools/platform/run-k3s-journey-activation.mjs \
+            --request "${RUNNER_TEMP}/k3s-activation-request.json" \
+            > "${RUNNER_TEMP}/k3s-activation-result.json"
+          cat "${RUNNER_TEMP}/k3s-activation-result.json" >> "${GITHUB_STEP_SUMMARY}"

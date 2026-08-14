@@ -1,0 +1,342 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  commitServiceCasWithReconciliation,
+  K3sJourneyActivationError,
+  parseRunningComposeServices,
+  renderK3sNginxConfig,
+  runK3sJourneyActivation,
+  waitForActiveEndpoint,
+} from "./run-k3s-journey-activation.mjs";
+import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
+const digest = (value) => `sha256:${value.repeat(64)}`;
+const sha256 = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+function request(root) {
+  return {
+    schemaVersion: "PLATFORM_SOURCE_FREE_K3S_ACTIVATION_REQUEST_V1",
+    artifactKind: "platform-source-free-k3s-activation-request",
+    operationDirectory: path.join(root, "operation"), operationId: digest("7"),
+    deployRoot: root,
+    runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/31700000000",
+    generatedAt: "2026-08-14T04:00:00.000Z",
+    runtimeContractSha256: digest("8"), candidateInputPath: path.join(root, "candidate-input.json"),
+    tuplePath: path.join(root, "journey-release-tuple.json"), bindingPath: path.join(root, "candidate-binding.json"),
+    descriptorBindingPath: path.join(root, "descriptor-binding.json"),
+    composeEnvPath: path.join(root, "compose.env"), backendEnvPath: path.join(root, "backend.env"),
+    baseComposePath: path.join(root, "docker-compose.yml"),
+    candidateComposePath: path.join(root, "docker-compose.journey-candidate.yml"),
+    projectName: "easysubway", nginxConfigPath: path.join(root, "easysubway.conf"),
+    publicBaseUrl: "https://api.easysubway.kr",
+    releaseTuple: {
+      schemaVersion: "JOURNEY_RELEASE_TUPLE_V1", artifactKind: "journey-release-tuple",
+      backendImageDigest: digest("a"), backendConfigDigest: digest("b"),
+      journeyContractDigest: digest("c"), serverRouteBundleDigest: digest("d"),
+      deploymentRevision: "e".repeat(40),
+      environmentIdentity: "production", tupleSha256: digest("f"),
+    },
+    candidateGeneration: 23, trafficGeneration: 41,
+    canary: {
+      canaryRequestIdentity: digest("1"), requestId: "deploy-canary-113",
+      originStationId: "subway-seoul-150", destinationStationId: "subway-seoul-222",
+      mobilityProfile: "WHEELCHAIR", constraintMode: "STRICT",
+      maxTransfers: 2, alternativeCount: 1,
+    },
+  };
+}
+function effects(events, failAt) {
+  const fails = (name) => Array.isArray(failAt) ? failAt.includes(name) : name === failAt;
+  const proof = (value, fields = {}) => ({ ...fields, evidenceDigest: digest(value) });
+  const step = (name, result) => async () => {
+    events.push(name);
+    if (fails(name)) throw new Error(`injected ${name}`);
+    return structuredClone(result);
+  };
+  return {
+    verifyInputs: step("inputs.verify", proof("0")),
+    verifyRuntime: step("runtime.verify", proof("1", { nodeInternalIp: "10.0.0.17" })),
+    applyCandidate: step("candidate.apply", proof("2", {
+      deploymentName: "journey-candidate-23",
+      candidateServiceName: "journey-candidate-23",
+    })),
+    openCandidatePortForward: async () => {
+      events.push("candidate.port-forward.open");
+      if (fails("candidate.port-forward.open")) throw new Error("candidate.port-forward.open");
+      return proof("3", {
+        baseUrl: "http://127.0.0.1:38113",
+        close: async () => events.push("candidate.port-forward.close"),
+      });
+    },
+    runCandidateCanary: step("candidate.canary", proof("4", {
+      passed: true,
+      legacyGraphSuccessCount: 0,
+      localRouteInvocationCount: 0,
+      staleJourneyServedCount: 0,
+      alternateEndpointSuccessCount: 0,
+    })),
+    observeCandidate: step("candidate.observe", proof("5", {
+      ready: true, tupleSha256: digest("f"),
+    })),
+    admitCandidate: step("candidate.admit", proof("6", {
+      candidateAdmissionSha256: digest("6"),
+    })),
+    activateCandidate: step("candidate.activate", proof("e", {
+      trafficGeneration: 41,
+      activeReadinessEvidenceDigest: digest("e"),
+    })),
+    prepareActiveService: step("active-service.prepare", proof("7", {
+      serviceExisted: false, resourceVersion: "817",
+      activeServiceMutationCount: 1,
+    })),
+    commitActiveServiceCas: step("active-service.cas", proof("8", {
+      previousResourceVersion: "817", committedResourceVersion: "818",
+      selector: { "easysubway.io/candidate-generation": "23" },
+    })),
+    verifyActiveEndpoint: step("active-endpoint.verify", proof("9", {
+      readyAddress: "10.42.0.23", nodePort: 32080,
+      tupleSha256: digest("f"),
+    })),
+    switchNginx: step("nginx.switch", proof("a", {
+      targetPort: 32080,
+      nginxConfigSha256: digest("a"),
+    })),
+    drainOldWorkloads: step("old-workload.drain", proof("b", {
+      signal: "SIGTERM", stopGracePeriodSeconds: 30,
+      oldWorkloadCount: 2,
+    })),
+    runPublicSmoke: step("public.smoke", proof("c", {
+      passed: true,
+      tupleSha256: digest("f"),
+    })),
+    cleanupCandidateService: step("candidate-service.cleanup", proof("d", { removed: true })),
+    cleanupCandidate: step("candidate.cleanup", undefined),
+  };
+}
+async function missing(pathname) {
+  await assert.rejects(access(pathname));
+}
+test("preparer projects validated fixed-host inputs into a distinct secret-free K3s request", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-preparation-"));
+  const backendEnvironment = "DATABASE_PASSWORD=private-test-value\nSAFE_FLAG=true\n";
+  const identity = {
+    backendImageDigest: digest("a"), backendConfigDigest: sha256(backendEnvironment),
+    journeyContractDigest: digest("c"), serverRouteBundleDigest: digest("d"),
+    deploymentRevision: "e".repeat(40), environmentIdentity: "production",
+  };
+  const tuple = {
+    schemaVersion: "JOURNEY_RELEASE_TUPLE_V1", artifactKind: "journey-release-tuple",
+    ...identity,
+    tupleSha256: sha256(`${Object.values(identity).join("\n")}\n`),
+  };
+  const paths = {
+    tuple: path.join(root, "journey-release-tuple.json"), binding: path.join(root, "candidate-binding.json"),
+    descriptorBinding: path.join(root, "descriptor-binding.json"),
+    backendEnv: path.join(root, "backend.env"), fixedRequest: path.join(root, "fixed-host-request.json"),
+    candidateInput: path.join(root, "k3s-candidate-input.json"),
+    request: path.join(root, "k3s-request.json"),
+  };
+  await Promise.all([
+    writeFile(paths.tuple, `${JSON.stringify(tuple, null, 2)}\n`),
+    writeFile(paths.binding, JSON.stringify({
+      orchestrator: "COMPOSE",
+      tupleSha256: tuple.tupleSha256,
+    })),
+    writeFile(paths.descriptorBinding, JSON.stringify({
+      tupleSha256: tuple.tupleSha256,
+    })),
+    writeFile(paths.backendEnv, backendEnvironment),
+  ]);
+  const fixedRequest = {
+    schemaVersion: "PLATFORM_FIXED_HOST_ACTIVATION_REQUEST_V1", artifactKind: "platform-fixed-host-activation-request",
+    operationDirectory: path.join(root, "receipts", "113"),
+    operationId: digest("7"),
+    deployRoot: root, runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/31700000000",
+    generatedAt: "2026-08-14T04:00:00.000Z",
+    bindingPath: paths.binding, descriptorBindingPath: paths.descriptorBinding,
+    tuplePath: paths.tuple,
+    descriptorPath: path.join(root, "descriptor.json"),
+    composeEnvPath: path.join(root, "compose.env"), backendEnvPath: paths.backendEnv,
+    projectName: "easysubway",
+    nginxConfigPath: "/etc/nginx/sites-available/easysubway",
+    baseComposePath: path.join(root, "docker-compose.yml"),
+    candidateComposePath: path.join(root, "docker-compose.journey-candidate.yml"),
+    candidateGeneration: 23, trafficGeneration: 41,
+    canary: request(root).canary,
+  };
+  await writeFile(paths.fixedRequest, `${JSON.stringify(fixedRequest, null, 2)}\n`);
+  const result = await prepareSourceFreeK3sDeployment({
+    mode: "PREVIEW",
+    fixedHostRequestPath: paths.fixedRequest,
+    candidateInputOutputPath: paths.candidateInput,
+    requestOutputPath: paths.request,
+    nodeInternalIp: "10.0.0.17",
+    publicBaseUrl: "https://api.easysubway.kr",
+  });
+  const candidateInput = JSON.parse(await readFile(paths.candidateInput, "utf8"));
+  const k3sRequest = JSON.parse(await readFile(paths.request, "utf8"));
+  assert.equal(result.orchestrator, "K3S");
+  assert.equal(result.preparationFoundation, "COMPOSE_INPUT_VALIDATION_ONLY");
+  assert.equal(result.externalMutationCount, 0);
+  assert.equal(result.fallbackInvocationCount, 0);
+  assert.equal(candidateInput.secretIdentity, sha256(backendEnvironment));
+  assert.equal(candidateInput.nodeInternalIp, "10.0.0.17");
+  assert.equal(k3sRequest.releaseTuple.tupleSha256, tuple.tupleSha256);
+  assert.equal(k3sRequest.operationDirectory, fixedRequest.operationDirectory);
+  assert.doesNotMatch(JSON.stringify(result), /private-test-value/);
+  assert.doesNotMatch(JSON.stringify(k3sRequest), /private-test-value/);
+});
+test("success linearizes traffic with Service resourceVersion CAS before Nginx and drain", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-success-"));
+  const events = [];
+  const receipt = await runK3sJourneyActivation(request(root), effects(events));
+  assert.deepEqual(events, [
+    "inputs.verify", "runtime.verify", "candidate.apply", "candidate.port-forward.open",
+    "candidate.canary", "candidate.observe", "candidate.admit", "candidate.activate",
+    "active-service.prepare", "active-service.cas", "active-endpoint.verify",
+    "nginx.switch", "old-workload.drain", "public.smoke", "candidate-service.cleanup",
+    "candidate.port-forward.close",
+  ]);
+  assert.equal(receipt.schemaVersion, "PLATFORM_K3S_ACTIVATION_RECEIPT_V1");
+  assert.equal(receipt.outcome, "ACTIVE_SERVING"); assert.equal(receipt.orchestrator, "K3S");
+  assert.equal(receipt.releaseIdentity.tupleSha256, digest("f"));
+  assert.equal(receipt.activation.serviceCas.previousResourceVersion, "817");
+  assert.equal(receipt.activation.serviceCas.committedResourceVersion, "818");
+  assert.equal(receipt.candidate.activeReadinessEvidenceDigest, digest("e"));
+  assert.equal(receipt.activation.nginx.targetPort, 32080); assert.equal(receipt.activation.drain.signal, "SIGTERM");
+  assert.deepEqual(Object.values(receipt.fallbackZero), [0, 0, 0, 0]);
+  assert.deepEqual(
+    JSON.parse(await readFile(
+      path.join(root, "operation", "k3s-activation-receipt.json"),
+      "utf8",
+    )),
+    receipt,
+  );
+  await missing(path.join(root, "operation", "k3s-activation-failure.json"));
+});
+test("Nginx cutover changes exactly three backend targets and preserves other routes", () => {
+  const current = Buffer.from([
+    "location = /api/v2/routes/search { proxy_pass http://127.0.0.1:8081; }",
+    "location = /actuator/health/readiness { proxy_pass http://127.0.0.1:8080; }",
+    "location = /actuator/health/liveness { proxy_pass http://127.0.0.1:8080; }",
+    "location / { proxy_pass http://127.0.0.1:8080; }",
+    "",
+  ].join("\n"));
+  const k3s = renderK3sNginxConfig(current);
+  assert.equal(k3s.toString("utf8").match(/127\.0\.0\.1:32080/g)?.length, 3);
+  assert.match(k3s.toString("utf8"), /127\.0\.0\.1:8081/);
+  assert.deepEqual(renderK3sNginxConfig(k3s), k3s);
+  assert.throws(() => renderK3sNginxConfig(Buffer.from(
+    "proxy_pass http://127.0.0.1:8080;\n",
+  )));
+});
+test("post-CAS helpers wait for reconciliation, recover ambiguous commit and count running Compose services", async () => {
+  let reads = 0;
+  const endpoint = await waitForActiveEndpoint({
+    readSnapshot: async () => ({
+      pods: { items: [{ metadata: { uid: "pod-23", annotations: { "easysubway.io/tuple-sha256": digest("f") } }, status: { phase: "Running", podIP: "10.42.0.23", conditions: [{ type: "Ready", status: "True" }] } }] },
+      slices: { items: reads++ === 0 ? [] : [{ endpoints: [{ addresses: ["10.42.0.23"], conditions: { ready: true } }] }] },
+    }),
+    tupleSha256: digest("f"), attempts: 2, wait: async () => {},
+  });
+  assert.equal(endpoint.readyAddress, "10.42.0.23"); assert.equal(reads, 2);
+  const cas = await commitServiceCasWithReconciliation({
+    replace: async () => { throw new Error("response lost"); },
+    readCurrent: async () => ({ metadata: { resourceVersion: "818", annotations: { release: "23" } }, spec: { selector: { release: "23" } } }),
+    previousResourceVersion: "817", selector: { release: "23" }, annotations: { release: "23" },
+  });
+  assert.equal(cas.committedResourceVersion, "818");
+  assert.deepEqual(parseRunningComposeServices("backend\nbackend-standby\n"), ["backend", "backend-standby"]);
+  assert.deepEqual(parseRunningComposeServices(""), []);
+});
+test("precommit failure cleans only candidate and leaves active traffic surfaces untouched", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-precommit-"));
+  const events = [];
+  await assert.rejects(
+    runK3sJourneyActivation(
+      request(root),
+      effects(events, "candidate.observe"),
+      { failureNow: () => "2026-08-14T04:01:00.000Z" },
+    ),
+    (error) => error instanceof K3sJourneyActivationError &&
+      error.code === "K3S_PRECOMMIT_FAILED",
+  );
+  assert.ok(events.includes("candidate.cleanup"));
+  assert.ok(events.includes("candidate.port-forward.close"));
+  assert.ok(!events.some((event) => event.startsWith("active-service.")));
+  assert.ok(!events.includes("nginx.switch"));
+  assert.ok(!events.includes("old-workload.drain"));
+  const failure = JSON.parse(await readFile(
+    path.join(root, "operation", "k3s-activation-failure.json"),
+    "utf8",
+  ));
+  assert.equal(failure.phase, "FAILED_PRECOMMIT");
+  assert.deepEqual(failure.mutationCounts, {
+    activeService: 0,
+    nginx: 0,
+    oldWorkload: 0,
+  });
+  assert.equal(failure.rollbackAttemptCount, 0);
+  assert.equal(failure.successReceiptCreated, false);
+  await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
+});
+test("partial candidate apply is cleanup-owned and cleanup failure stops terminal receipt", async () => {
+  const partialRoot = await mkdtemp(path.join(tmpdir(), "k3s-partial-apply-"));
+  const partialEvents = [];
+  await assert.rejects(runK3sJourneyActivation(request(partialRoot), effects(partialEvents, "candidate.apply")),
+    (error) => error.code === "K3S_PRECOMMIT_FAILED");
+  assert.ok(partialEvents.includes("candidate.cleanup"));
+  const cleanupRoot = await mkdtemp(path.join(tmpdir(), "k3s-cleanup-failure-"));
+  await assert.rejects(runK3sJourneyActivation(request(cleanupRoot), effects([], ["candidate.observe", "candidate.cleanup"])),
+    (error) => error.code === "K3S_RECEIPT_FAILED");
+  await missing(path.join(cleanupRoot, "operation", "k3s-activation-failure.json"));
+});
+test("post-switch failure records typed failure and never rolls traffic back", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-postswitch-"));
+  const events = [];
+  await assert.rejects(
+    runK3sJourneyActivation(
+      request(root),
+      effects(events, "public.smoke"),
+      { failureNow: () => "2026-08-14T04:02:00.000Z" },
+    ),
+    (error) => error instanceof K3sJourneyActivationError &&
+      error.code === "K3S_POSTSWITCH_FAILED",
+  );
+  assert.ok(events.includes("active-service.cas"));
+  assert.ok(events.includes("nginx.switch"));
+  assert.ok(!events.includes("candidate.cleanup"));
+  assert.ok(!events.some((event) => event.includes("rollback")));
+  const failure = JSON.parse(await readFile(
+    path.join(root, "operation", "k3s-activation-failure.json"),
+    "utf8",
+  ));
+  assert.equal(failure.phase, "FAILED_POSTSWITCH");
+  assert.equal(failure.mutationCounts.activeService, 2);
+  assert.equal(failure.rollbackAttemptCount, 0);
+  assert.equal(failure.degradedSuccess, false);
+  assert.equal(failure.successReceiptCreated, false);
+  await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
+});
+test("contract and workflow keep K3s activation source-free, protected and Compose-runner-free", async () => {
+  const contract = JSON.parse(await readFile(
+    new URL("../../contracts/release/platform-k3s-activation-contract.json", import.meta.url),
+    "utf8",
+  ));
+  const workflow = await readFile(
+    new URL("../../.github/workflows/source-free-journey-k3s-deploy.yml", import.meta.url),
+    "utf8",
+  );
+  assert.equal(contract.schemaVersion, "PLATFORM_K3S_ACTIVATION_CONTRACT_V1");
+  assert.equal(contract.trafficCommit.linearizationPoint, "SERVICE_RESOURCE_VERSION_CAS");
+  assert.equal(contract.rollback.policy, "FORBIDDEN");
+  assert.equal(contract.fallback.policy, "FORBIDDEN");
+  assert.match(workflow, /environment:\s*production-deploy/);
+  assert.match(workflow, /prepare-source-free-fixed-host-deployment\.mjs/);
+  assert.match(workflow, /prepare-source-free-k3s-deployment\.mjs/);
+  assert.match(workflow, /run-k3s-journey-activation\.mjs/);
+  assert.doesNotMatch(workflow, /run-fixed-host-journey-activation\.mjs/);
+  assert.doesNotMatch(workflow, /docker compose|docker-compose/);
+});
