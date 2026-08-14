@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "artifactKind": "platform-data-volume-backup-contract-v1",
+  "schemaVersion": 2,
+  "artifactKind": "platform-data-volume-backup-contract-v2",
   "target": {
     "terraformAddress": "oci_core_volume.data[0]",
     "controlRoot": "infra/terraform/oci/data-volume-backup-control",
@@ -17,8 +17,8 @@
     "hourOfDay": 3,
     "offsetType": "STRUCTURED",
     "timeZone": "REGIONAL_DATA_CENTER_TIME",
-    "retentionSeconds": 345600,
-    "maxRetainedBackups": 4,
+    "retentionSeconds": 259200,
+    "maxRetainedBackups": 3,
     "freeTierCombinedBackupLimit": 5,
     "destinationRegion": null,
     "encryption": "OCI_PROVIDER_MANAGED"
@@ -31,12 +31,14 @@
     "owner": "AquilaXk",
     "eventType": "com.oraclecloud.blockvolumes.createvolumebackup.end",
     "status": "operationFailed",
-    "protocol": "EMAIL",
-    "endpointSource": "var.data_volume_backup_alert_email",
+    "protocol": "SLACK",
+    "endpointSource": "var.data_volume_backup_slack_webhook_url",
     "activationInput": "var.enable_backup_failure_event_rule",
     "defaultEventRuleEnabled": false,
     "requiredWhen": "ACTIVE_EVENT_RULE_APPLY",
-    "requiredSubscriptionState": "ACTIVE"
+    "requiredSubscriptionState": "ACTIVE",
+    "freeTierDeliveryLimitPerMonth": 1000000,
+    "maximumNominalEventsPerMonth": 31
   },
   "restore": {
     "source": "LATEST_AVAILABLE_EXACT_POLICY_BACKUP",
@@ -53,6 +55,10 @@
     "CROSS_REGION_COPY",
     "CUSTOMER_MANAGED_KEY",
     "PITR",
-    "SECOND_SERVER"
+    "SECOND_SERVER",
+    "EMAIL_NOTIFICATION",
+    "SMS_NOTIFICATION",
+    "NOTIFICATION_TEST_PUBLISH",
+    "MANUAL_VOLUME_BACKUP"
   ]
 }

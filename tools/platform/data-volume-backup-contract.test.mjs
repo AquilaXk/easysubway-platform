@@ -16,8 +16,8 @@ test("data volume backup contract is closed to the single-host startup decision"
   const contract = JSON.parse(read("contracts/release/platform-data-volume-backup-contract.json"));
 
   assert.deepEqual(contract, {
-    schemaVersion: 1,
-    artifactKind: "platform-data-volume-backup-contract-v1",
+    schemaVersion: 2,
+    artifactKind: "platform-data-volume-backup-contract-v2",
     target: {
       terraformAddress: "oci_core_volume.data[0]",
       controlRoot: "infra/terraform/oci/data-volume-backup-control",
@@ -34,8 +34,8 @@ test("data volume backup contract is closed to the single-host startup decision"
       hourOfDay: 3,
       offsetType: "STRUCTURED",
       timeZone: "REGIONAL_DATA_CENTER_TIME",
-      retentionSeconds: 345600,
-      maxRetainedBackups: 4,
+      retentionSeconds: 259200,
+      maxRetainedBackups: 3,
       freeTierCombinedBackupLimit: 5,
       destinationRegion: null,
       encryption: "OCI_PROVIDER_MANAGED",
@@ -48,12 +48,14 @@ test("data volume backup contract is closed to the single-host startup decision"
       owner: "AquilaXk",
       eventType: "com.oraclecloud.blockvolumes.createvolumebackup.end",
       status: "operationFailed",
-      protocol: "EMAIL",
-      endpointSource: "var.data_volume_backup_alert_email",
+      protocol: "SLACK",
+      endpointSource: "var.data_volume_backup_slack_webhook_url",
       activationInput: "var.enable_backup_failure_event_rule",
       defaultEventRuleEnabled: false,
       requiredWhen: "ACTIVE_EVENT_RULE_APPLY",
       requiredSubscriptionState: "ACTIVE",
+      freeTierDeliveryLimitPerMonth: 1_000_000,
+      maximumNominalEventsPerMonth: 31,
     },
     restore: {
       source: "LATEST_AVAILABLE_EXACT_POLICY_BACKUP",
@@ -71,6 +73,10 @@ test("data volume backup contract is closed to the single-host startup decision"
       "CUSTOMER_MANAGED_KEY",
       "PITR",
       "SECOND_SERVER",
+      "EMAIL_NOTIFICATION",
+      "SMS_NOTIFICATION",
+      "NOTIFICATION_TEST_PUBLISH",
+      "MANUAL_VOLUME_BACKUP",
     ],
   });
 });
@@ -103,7 +109,7 @@ test("standalone Terraform root owns one existing-volume policy and exact failur
   assert.equal(occurrences(resources, /resource "oci_core_volume_backup_policy_assignment" "data"/g), 1);
   assert.match(resources, /backup_type\s*=\s*"INCREMENTAL"/);
   assert.match(resources, /period\s*=\s*"ONE_DAY"/);
-  assert.match(resources, /retention_seconds\s*=\s*345600/);
+  assert.match(resources, /retention_seconds\s*=\s*259200/);
   assert.match(resources, /hour_of_day\s*=\s*3/);
   assert.match(resources, /offset_type\s*=\s*"STRUCTURED"/);
   assert.match(resources, /time_zone\s*=\s*"REGIONAL_DATA_CENTER_TIME"/);
@@ -114,8 +120,8 @@ test("standalone Terraform root owns one existing-volume policy and exact failur
   assert.equal(occurrences(resources, /resource "oci_ons_notification_topic" "data_volume_backup"/g), 1);
   assert.equal(occurrences(resources, /resource "oci_ons_subscription" "data_volume_backup"/g), 1);
   assert.equal(occurrences(resources, /resource "oci_events_rule" "data_volume_backup_failed"/g), 1);
-  assert.match(resources, /protocol\s*=\s*"EMAIL"/);
-  assert.match(resources, /endpoint\s*=\s*var\.data_volume_backup_alert_email/);
+  assert.match(resources, /protocol\s*=\s*"SLACK"/);
+  assert.match(resources, /endpoint\s*=\s*var\.data_volume_backup_slack_webhook_url/);
   assert.match(resources, /count\s*=\s*var\.enable_backup_failure_event_rule\s*\?\s*1\s*:\s*0/);
   assert.match(resources, /condition\s*=\s*oci_ons_subscription\.data_volume_backup\.state\s*==\s*"ACTIVE"/);
   assert.match(resources, /error_message\s*=\s*"data volume backup alert subscription must be ACTIVE before enabling the event rule\."/);
@@ -124,13 +130,16 @@ test("standalone Terraform root owns one existing-volume policy and exact failur
   assert.match(resources, /volumeId\s*=\s*\[var\.data_volume_ocid\]/);
   assert.match(resources, /action_type\s*=\s*"ONS"/);
   assert.match(resources, /topic_id\s*=\s*oci_ons_notification_topic\.data_volume_backup\.id/);
-  assert.doesNotMatch(resources, /@example\.(com|org)|https?:\/\//);
+  assert.doesNotMatch(resources, /@example\.(com|org)|hooks\.slack\.com\/services\//);
+  assert.doesNotMatch(resources, /protocol\s*=\s*"(?:EMAIL|SMS)"/);
 
-  const variableBlock = variables.match(/variable "data_volume_backup_alert_email" \{[\s\S]*?\n\}/)?.[0];
-  assert.ok(variableBlock, "data_volume_backup_alert_email variable must exist");
+  const variableBlock = variables.match(/variable "data_volume_backup_slack_webhook_url" \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(variableBlock, "data_volume_backup_slack_webhook_url variable must exist");
   assert.match(variableBlock, /type\s*=\s*string/);
   assert.match(variableBlock, /sensitive\s*=\s*true/);
-  assert.match(variableBlock, /trimspace\(var\.data_volume_backup_alert_email\)/);
+  assert.match(variableBlock, /trimspace\(var\.data_volume_backup_slack_webhook_url\)/);
+  assert.match(variableBlock, /hooks\\\\\.slack\\\\\.com\/services/);
+  assert.doesNotMatch(variables, /data_volume_backup_alert_email/);
   const activationBlock = variables.match(/variable "enable_backup_failure_event_rule" \{[\s\S]*?\n\}/)?.[0];
   assert.ok(activationBlock, "enable_backup_failure_event_rule variable must exist");
   assert.match(activationBlock, /type\s*=\s*bool/);
