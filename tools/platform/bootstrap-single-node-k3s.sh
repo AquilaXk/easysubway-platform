@@ -55,6 +55,7 @@ wait_ready() {
 }
 
 verify_runtime() {
+	local namespaced_answer cluster_answer
 	verify_binary
 	verify_file "${K3S_CONFIG_SOURCE}" "${K3S_CONFIG}"
 	verify_file "${K3S_SERVICE_SOURCE}" "${K3S_SERVICE}"
@@ -64,8 +65,10 @@ verify_runtime() {
 		printf 'E_K3S_RBAC_DRIFT\n' >&2
 		exit 1
 	}
-	"${K3S_BINARY}" kubectl auth can-i --as system:serviceaccount:easysubway-journey:journey-deployer -n easysubway-journey get deployments | grep -Fqx yes
-	"${K3S_BINARY}" kubectl auth can-i --as system:serviceaccount:easysubway-journey:journey-deployer get nodes | grep -Fqx no
+	namespaced_answer="$("${K3S_BINARY}" kubectl auth can-i --as system:serviceaccount:easysubway-journey:journey-deployer -n easysubway-journey get deployments 2>/dev/null || true)"
+	[[ "${namespaced_answer}" == "yes" ]] || { printf 'E_K3S_RBAC_NAMESPACE_SCOPE\n' >&2; exit 1; }
+	cluster_answer="$("${K3S_BINARY}" kubectl auth can-i --as system:serviceaccount:easysubway-journey:journey-deployer get nodes 2>/dev/null || true)"
+	[[ "${cluster_answer}" == "no" ]] || { printf 'E_K3S_RBAC_CLUSTER_SCOPE\n' >&2; exit 1; }
 }
 
 if [[ "${mode}" == "INSTALL" ]]; then
@@ -76,11 +79,15 @@ if [[ "${mode}" == "INSTALL" ]]; then
 		printf 'E_K3S_DOWNLOAD_DIGEST\n' >&2
 		exit 1
 	}
+	if systemctl is-active --quiet easysubway-k3s.service; then
+		systemctl stop easysubway-k3s.service
+	fi
 	install -D -m 0755 "${temporary}" "${K3S_BINARY}"
 	install -D -m 0600 "${K3S_CONFIG_SOURCE}" "${K3S_CONFIG}"
 	install -D -m 0644 "${K3S_SERVICE_SOURCE}" "${K3S_SERVICE}"
 	systemctl daemon-reload
-	systemctl enable --now easysubway-k3s.service
+	systemctl enable easysubway-k3s.service
+	systemctl restart easysubway-k3s.service
 	wait_ready
 	"${K3S_BINARY}" kubectl apply --server-side=true --field-manager=easysubway-platform -f "${K3S_RBAC}"
 fi

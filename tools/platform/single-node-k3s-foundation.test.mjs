@@ -67,6 +67,15 @@ test("K3s runtime contract pins one practical single-node serving boundary", () 
   assert.doesNotMatch(bootstrap, /latest|sleep\s+[0-9]+\s*;\s*done/i);
   assert.match(bootstrap, /for attempt in \$\(seq 1 60\)/);
   assert.match(bootstrap, /--mode (?:INSTALL|VERIFY)/);
+  assert.doesNotMatch(bootstrap, /kubectl auth can-i[^\n]*\|\s*grep/);
+  assert.match(bootstrap, /E_K3S_RBAC_NAMESPACE_SCOPE/);
+  assert.match(bootstrap, /E_K3S_RBAC_CLUSTER_SCOPE/);
+  assert.ok(
+    bootstrap.indexOf("systemctl stop easysubway-k3s.service")
+      < bootstrap.indexOf('install -D -m 0755 "${temporary}" "${K3S_BINARY}"'),
+  );
+  assert.match(bootstrap, /systemctl enable easysubway-k3s\.service/);
+  assert.match(bootstrap, /systemctl restart easysubway-k3s\.service/);
   assert.match(workflow, /node --test tools\/platform\/single-node-k3s-foundation\.test\.mjs/);
   assert.match(workflow, /bash -n tools\/platform\/bootstrap-single-node-k3s\.sh/);
 });
@@ -121,6 +130,7 @@ test("renderer produces deterministic source-free candidate objects and an inact
   const pod = deployment.spec.template.spec;
   const container = pod.containers[0];
   assert.equal(deployment.spec.replicas, 1);
+  assert.equal(deployment.spec.progressDeadlineSeconds, 360);
   assert.equal(deployment.spec.strategy.type, "Recreate");
   assert.equal(pod.automountServiceAccountToken, false);
   assert.equal(pod.enableServiceLinks, false);
@@ -141,6 +151,9 @@ test("renderer produces deterministic source-free candidate objects and an inact
   for (const probe of [container.startupProbe, container.readinessProbe, container.livenessProbe]) {
     assert.equal(probe.httpGet.port, 8080);
   }
+  const startupBudgetSeconds = container.startupProbe.initialDelaySeconds
+    + (container.startupProbe.periodSeconds * container.startupProbe.failureThreshold);
+  assert.ok(startupBudgetSeconds < deployment.spec.progressDeadlineSeconds);
 
   const postgresSlice = objects.find(({ kind, metadata }) => kind === "EndpointSlice" && metadata.name === "journey-postgres-v1");
   const objectSlice = objects.find(({ kind, metadata }) => kind === "EndpointSlice" && metadata.name === "journey-object-storage-v1");
@@ -151,6 +164,10 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.type, "NodePort");
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.ports[0].nodePort, 32080);
   assert.deepEqual(rendered.activationPlan.nodePortAddresses, ["127.0.0.0/8"]);
+  assert.equal(
+    rendered.activationPlan.candidateProbeBoundary,
+    readJson("contracts/release/platform-k3s-runtime-contract.json").activationBoundary.candidateProbeBoundary,
+  );
   assert.equal(rendered.activationPlan.selectorPatch["easysubway.io/candidate-token"], rendered.releaseIdentity.candidateToken);
   assert.equal(rendered.activationPlan.applyDuringCandidatePreparation, false);
   assert.equal(first.stdout.includes("synthetic-secret-value"), false);

@@ -208,7 +208,7 @@ function deployment(input, token, deploymentName, configName, secretName) {
     spec: {
       replicas: 1,
       revisionHistoryLimit: 1,
-      progressDeadlineSeconds: 300,
+      progressDeadlineSeconds: 360,
       strategy: { type: "Recreate" },
       selector: { matchLabels: objectLabels },
       template: {
@@ -393,7 +393,7 @@ function render(input) {
     activationPlan: {
       candidateDeploymentName: deploymentName,
       candidateServiceName: serviceName,
-      candidateProbeBoundary: "TASK_OWNED_LOOPBACK_PORT_FORWARD",
+      candidateProbeBoundary: "TASK_OWNED_LOOPBACK_KUBECTL_PORT_FORWARD",
       activeServiceName: "journey-active",
       activeServiceTemplate: activeServiceTemplate(token),
       selectorPatch: labels(token),
