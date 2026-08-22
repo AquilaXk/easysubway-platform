@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const workflowUrl = new URL("../../.github/workflows/source-free-journey-deploy.yml", import.meta.url);
+const fixedHostWorkflowUrl = new URL("../../.github/workflows/source-free-journey-deploy.yml", import.meta.url);
+const k3sWorkflowUrl = new URL("../../.github/workflows/source-free-journey-k3s-deploy.yml", import.meta.url);
 const ciUrl = new URL("../../.github/workflows/ci.yml", import.meta.url);
 
-test("source-free workflow pins exact artifacts, keeps PREVIEW read-only, and reuses one fixed-host runner", () => {
-  const workflow = readFileSync(workflowUrl, "utf8");
-  const preview = jobBody(workflow, "preview", "deploy");
-  const deploy = jobBody(workflow, "deploy");
+test("fixed-host workflow is PREVIEW-only and K3s is the sole Journey DEPLOY owner", () => {
+  const workflow = readFileSync(fixedHostWorkflowUrl, "utf8");
+  const k3sWorkflow = readFileSync(k3sWorkflowUrl, "utf8");
+  const preview = jobBody(workflow, "preview");
 
   for (const input of [
     "mode:",
@@ -17,39 +18,47 @@ test("source-free workflow pins exact artifacts, keeps PREVIEW read-only, and re
     "data_run_id:", "data_artifact_id:", "data_artifact_name:",
     "data_archive_sha256:",
   ]) assert.equal(workflow.includes(input), true, input);
-  assert.match(workflow, /options:\s*\n\s*- PREVIEW\s*\n\s*- DEPLOY/);
+  assert.match(workflow, /options:\s*\n\s*- PREVIEW\s*\n\s*backend_run_id:/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /environment:\s*production-deploy/);
   assert.match(workflow, /runs-on:\s*ubuntu-latest/);
-  assert.match(workflow, /runs-on:\s*\[self-hosted, Linux, ARM64, easysubway-production\]/);
+  assert.doesNotMatch(workflow, /  deploy:\n/);
+  assert.doesNotMatch(workflow, /self-hosted/);
+  assert.doesNotMatch(workflow, /DEPLOY_ROOT/);
+  assert.doesNotMatch(workflow, /--mode DEPLOY/);
+  assert.doesNotMatch(workflow, /run-fixed-host-journey-activation\.mjs/);
   assert.match(workflow, /EASYSUBWAY_RELEASE_ARTIFACTS_READ_TOKEN/);
   assert.match(workflow, /repository:\s*AquilaXk\/easysubway-backend/);
   assert.match(workflow, /repository:\s*AquilaXk\/easysubway-data/);
-  assert.equal(count(workflow, "artifact-ids:"), 4);
-  assert.equal(count(workflow, "run-id:"), 4);
-  assert.equal(count(workflow, "skip-decompress: true"), 4);
-  assert.equal(count(workflow, "prepare-source-free-fixed-host-deployment.mjs"), 2);
-  assert.equal(count(workflow, "run-fixed-host-journey-activation.mjs"), 1);
+  assert.equal(count(workflow, "artifact-ids:"), 2);
+  assert.equal(count(workflow, "run-id:"), 2);
+  assert.equal(count(workflow, "skip-decompress: true"), 2);
+  assert.equal(count(workflow, "prepare-source-free-fixed-host-deployment.mjs"), 1);
   assert.equal(count(preview, "--mode PREVIEW"), 1);
   assert.equal(count(preview, "run-fixed-host-journey-activation.mjs"), 0);
-  assert.equal(count(deploy, "--mode DEPLOY"), 1);
-  assert.equal(count(deploy, "run-fixed-host-journey-activation.mjs"), 1);
-  assert.equal(count(deploy, "--request \"${RUNNER_TEMP}/fixed-host-request.json\""), 1);
   assert.equal(count(workflow,
-    'repos/AquilaXk/easysubway-backend/actions/runs/${BACKEND_RUN_ID}'), 2);
+    'repos/AquilaXk/easysubway-backend/actions/runs/${BACKEND_RUN_ID}'), 1);
   assert.equal(count(workflow,
-    'repos/AquilaXk/easysubway-data/actions/runs/${DATA_RUN_ID}'), 2);
-  assert.equal(count(workflow, ".github/workflows/release-artifacts.yml"), 2);
-  assert.equal(count(workflow, ".github/workflows/datapack-release.yml"), 2);
-  assert.equal(count(workflow, "--backend-producer-sha"), 2);
-  assert.equal(count(workflow, "--data-producer-sha"), 2);
-  assert.equal(count(workflow, ".conclusion"), 4);
-  assert.equal(count(workflow, ".head_branch"), 4);
-  assert.equal(count(workflow, ".head_sha"), 4);
+    'repos/AquilaXk/easysubway-data/actions/runs/${DATA_RUN_ID}'), 1);
+  assert.equal(count(workflow, ".github/workflows/release-artifacts.yml"), 1);
+  assert.equal(count(workflow, ".github/workflows/datapack-release.yml"), 1);
+  assert.equal(count(workflow, "--backend-producer-sha"), 1);
+  assert.equal(count(workflow, "--data-producer-sha"), 1);
+  assert.equal(count(workflow, ".conclusion"), 2);
+  assert.equal(count(workflow, ".head_branch"), 2);
+  assert.equal(count(workflow, ".head_sha"), 2);
+
+  assert.match(k3sWorkflow, /options:\s*\n\s*- PREVIEW\s*\n\s*- DEPLOY/);
+  assert.match(k3sWorkflow, /cancel-in-progress: false/);
+  assert.match(k3sWorkflow, /run-k3s-journey-activation\.mjs/);
+  assert.doesNotMatch(k3sWorkflow, /run-fixed-host-journey-activation\.mjs/);
+  assert.doesNotMatch(k3sWorkflow, /docker compose/);
+  assert.equal(count(`${workflow}\n${k3sWorkflow}`, "--mode DEPLOY"), 0, "only K3s MODE dispatch may own DEPLOY");
+  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 3, "K3s owns the sole DEPLOY execution branch");
 });
 
 test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or mutable artifact lookup", () => {
-  const workflow = readFileSync(workflowUrl, "utf8");
+  const workflow = readFileSync(fixedHostWorkflowUrl, "utf8");
   for (const forbidden of [
     "easysubway-data.git", "easysubway-backend.git", "AquilaXk/easysubway.git",
     "deploy-backend.sh", "route-v2", "Route V2", "raw/main", "latest",
@@ -59,7 +68,7 @@ test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or
   for (const mutableLatest of ["@latest", ":latest", "/latest"]) {
     assert.equal(workflow.includes(mutableLatest), false, mutableLatest);
   }
-  assert.equal(count(workflow, "actions/checkout@"), 2);
+  assert.equal(count(workflow, "actions/checkout@"), 1);
 });
 
 test("Platform CI owns the exact new focused contracts", () => {
@@ -78,9 +87,7 @@ function count(value, token) {
 function jobBody(workflow, name, nextName) {
   const start = workflow.indexOf(`  ${name}:\n`);
   assert.notEqual(start, -1, `${name} job must exist`);
-  const end = nextName === undefined
-    ? workflow.length
-    : workflow.indexOf(`  ${nextName}:\n`, start + 1);
-  assert.notEqual(end, -1, `${nextName} job must exist`);
+  const end = nextName === undefined ? workflow.length : workflow.indexOf(`  ${nextName}:\n`, start + 1);
+  if (nextName !== undefined) assert.notEqual(end, -1, `${nextName} job must exist`);
   return workflow.slice(start, end);
 }
