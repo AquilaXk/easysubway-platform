@@ -63,6 +63,7 @@ const OVERRIDE_KEYS = new Set([
   "EASYSUBWAY_JOURNEY_V3_READINESS_JOURNEY_CONTRACT_SHA256",
   "EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION",
   "EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID",
+  "EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN",
 ]);
 const ERROR_MESSAGES = Object.freeze({
   K3S_USAGE: "K3s Journey activation request is invalid",
@@ -336,9 +337,12 @@ export function createK3sJourneyActivationEffects({
         metadata: { name: rendered.secretPlan.name, namespace: NAMESPACE },
         immutable: true,
         type: "Opaque",
-        stringData: Object.fromEntries(
-          Object.entries(backendEnvironment).filter(([key]) => !OVERRIDE_KEYS.has(key)),
-        ),
+        stringData: {
+          ...Object.fromEntries(
+            Object.entries(backendEnvironment).filter(([key]) => !OVERRIDE_KEYS.has(key)),
+          ),
+          EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN: serviceToken,
+        },
       };
       await kubectl(["create", "-f", "-"], { input: jsonBytes(secret) });
       const objects = [
