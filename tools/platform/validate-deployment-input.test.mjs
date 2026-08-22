@@ -61,8 +61,10 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     "infra/nginx/host-route-v2-proxy.conf",
     "infra/nginx/host-easysubway.conf.template",
     ".github/workflows/source-free-journey-deploy.yml",
+    ".github/workflows/source-free-journey-k3s-deploy.yml",
     "tools/platform/prepare-source-free-fixed-host-deployment.mjs",
     "tools/platform/run-fixed-host-journey-activation.mjs",
+    "tools/platform/run-k3s-journey-activation.mjs",
     "infra/docker-compose.journey-candidate.yml",
     "contracts/release/platform-k3s-runtime-contract.json",
     "infra/k3s/config.yaml",
@@ -95,8 +97,10 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     ["source-free.workflow.artifact-identities", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend_artifact_id:", "data_artifact_id:", "skip-decompress: true"]],
     ["source-free.workflow.closed-modes", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["--mode PREVIEW", "prepare-source-free-fixed-host-deployment.mjs"]],
     ["source-free.prepare.exact-producer-inputs", "tools/platform/prepare-source-free-fixed-host-deployment.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["backend-component-manifest.json", "journey-v3-contract-bundle-v2-receipt.json", "server-route-bundle-publication-descriptor.json"]],
-    ["source-free.runner.fixed-host-lifecycle", "tools/platform/run-fixed-host-journey-activation.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["switchNginx", "drainAndRecreateCanonical", "removeStandby", "writeFailureReceipt", "activation-receipt.json", "reserveOperationDirectory"]],
+    ["source-free.runner.fixed-host-lifecycle", "tools/platform/run-fixed-host-journey-activation.mjs", "LEGACY_NOT_JOURNEY_V3", ["switchNginx", "drainAndRecreateCanonical", "removeStandby", "writeFailureReceipt", "activation-receipt.json", "reserveOperationDirectory"]],
     ["source-free.compose.exact-journey-environment", "infra/docker-compose.journey-candidate.yml", "TARGET_JOURNEY_V3_REQUIRED", ["EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend", "EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby"]],
+    ["source-free.k3s-workflow.sole-deploy-owner", ".github/workflows/source-free-journey-k3s-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["- PREVIEW", "- DEPLOY", "cancel-in-progress: false", "run-k3s-journey-activation.mjs"]],
+    ["source-free.k3s-runner.no-fallback-lifecycle", "tools/platform/run-k3s-journey-activation.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["commitActiveServiceCas", "runPublicSmoke", "rollbackAttemptCount: 0", "fallbackZero: FALLBACK_ZERO", "K3S_PRECOMMIT_FAILED", "K3S_POSTSWITCH_FAILED"]],
     ["k3s.runtime.single-node-contract", "contracts/release/platform-k3s-runtime-contract.json", "TARGET_JOURNEY_V3_REQUIRED", ["\"version\": \"v1.36.3+k3s1\"", "\"activeServiceNodePort\": 32080", "\"multiHostHighAvailabilityClaim\": false", "\"result\": \"TYPED_NONZERO_OUTPUT_ZERO\""]],
     ["k3s.config.loopback-nodeport", "infra/k3s/config.yaml", "TARGET_JOURNEY_V3_REQUIRED", ["secrets-encryption: true", "  - traefik", "proxy-mode=iptables", "nodeport-addresses=127.0.0.0/8"]],
     ["k3s.service.pinned-server", "infra/k3s/easysubway-k3s.service", "TARGET_JOURNEY_V3_REQUIRED", ["ExecStart=/usr/local/bin/k3s server --config /etc/rancher/k3s/config.yaml", "Restart=on-failure", "TimeoutStopSec=45s"]],
@@ -108,9 +112,9 @@ test("deployment runtime input inventory is closed and source-literal backed", (
   assert.equal(inventory.schemaVersion, 1);
   assert.equal(inventory.artifactKind, "platform-deployment-runtime-input-inventory-v1");
   assert.deepEqual(inventory.sourcePaths, sourcePaths);
-  assert.equal(inventory.entries.length, 31);
-  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 15);
-  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "LEGACY_NOT_JOURNEY_V3").length, 16);
+  assert.equal(inventory.entries.length, 33);
+  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 16);
+  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "LEGACY_NOT_JOURNEY_V3").length, 17);
   assert.deepEqual(inventory.entries.map(({ id, sourcePath, journeyV3Disposition, evidenceTokens }) => [id, sourcePath, journeyV3Disposition, evidenceTokens]), entries);
 
   const root = new URL("../..", import.meta.url);
