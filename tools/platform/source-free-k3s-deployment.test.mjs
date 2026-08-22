@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   commitServiceCasWithReconciliation,
+  createK3sJourneyActivationEffects,
   K3sJourneyActivationError,
   parseRunningComposeServices,
   renderK3sNginxConfig,
@@ -187,6 +188,82 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
   assert.equal(k3sRequest.operationDirectory, fixedRequest.operationDirectory);
   assert.doesNotMatch(JSON.stringify(result), /private-test-value/);
   assert.doesNotMatch(JSON.stringify(k3sRequest), /private-test-value/);
+});
+test("activation Secret injects the protected readiness token without exposing it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-protected-secret-"));
+  const protectedToken = "p".repeat(32);
+  const untrustedToken = "u".repeat(32);
+  const activationRequest = request(root);
+  const runtimeBytes = await readFile(new URL(
+    "../../contracts/release/platform-k3s-runtime-contract.json", import.meta.url,
+  ));
+  activationRequest.runtimeContractSha256 = sha256(runtimeBytes);
+  const backendEnvironment = [
+    "DATABASE_PASSWORD=private-test-value",
+    "SAFE_FLAG=true",
+    `EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN=${untrustedToken}`,
+    "",
+  ].join("\n");
+  const candidateInput = {
+    tupleSha256: activationRequest.releaseTuple.tupleSha256,
+    candidateGeneration: activationRequest.candidateGeneration,
+    trafficGeneration: activationRequest.trafficGeneration,
+    secretIdentity: sha256(backendEnvironment),
+    nodeInternalIp: "10.0.0.17",
+  };
+  await Promise.all([
+    writeFile(activationRequest.candidateInputPath, JSON.stringify(candidateInput)),
+    writeFile(activationRequest.backendEnvPath, backendEnvironment),
+  ]);
+  const createdSecrets = [];
+  const rendered = {
+    schemaVersion: "PLATFORM_K3S_CANDIDATE_RENDER_V1",
+    artifactKind: "platform-k3s-candidate-render",
+    releaseIdentity: {
+      tupleSha256: activationRequest.releaseTuple.tupleSha256,
+      candidateToken: "candidate-23",
+    },
+    configPlan: { name: "journey-config-23", overrides: { SAFE_CONFIG: "true" } },
+    secretPlan: { name: "journey-secret-23" },
+    candidateObjects: [],
+    activationPlan: {
+      requiredCasField: "metadata.resourceVersion",
+      applyDuringCandidatePreparation: false,
+      activeServiceTemplate: { spec: { ports: [{ nodePort: 32080 }] } },
+      candidateDeploymentName: "journey-candidate-23",
+      candidateServiceName: "journey-candidate-23",
+    },
+  };
+  const commandRunner = async (command, args, options = {}) => {
+    if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
+    if (args.includes("create")) createdSecrets.push(JSON.parse(Buffer.from(options.input).toString("utf8")));
+    return { stdout: Buffer.alloc(0) };
+  };
+  const activationEffects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner,
+    serviceToken: protectedToken,
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  const verified = await activationEffects.verifyInputs();
+  const candidate = await activationEffects.applyCandidate();
+  assert.deepEqual(createdSecrets, [{
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: { name: "journey-secret-23", namespace: "easysubway-journey" },
+    immutable: true,
+    type: "Opaque",
+    stringData: {
+      DATABASE_PASSWORD: "private-test-value",
+      SAFE_FLAG: "true",
+      EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN: protectedToken,
+    },
+  }]);
+  for (const value of [activationRequest, verified, candidate]) {
+    assert.doesNotMatch(JSON.stringify(value), new RegExp(`${protectedToken}|${untrustedToken}`));
+  }
+  const ci = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.equal(ci.split("node --test tools/platform/source-free-k3s-deployment.test.mjs").length - 1, 1);
 });
 test("success linearizes traffic with Service resourceVersion CAS before Nginx and drain", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-success-"));

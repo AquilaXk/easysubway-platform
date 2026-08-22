@@ -63,6 +63,7 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     ".github/workflows/source-free-journey-deploy.yml",
     ".github/workflows/source-free-journey-k3s-deploy.yml",
     "tools/platform/prepare-source-free-fixed-host-deployment.mjs",
+    "tools/platform/prepare-source-free-k3s-deployment.mjs",
     "tools/platform/run-fixed-host-journey-activation.mjs",
     "tools/platform/run-k3s-journey-activation.mjs",
     "infra/docker-compose.journey-candidate.yml",
@@ -97,6 +98,7 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     ["source-free.workflow.artifact-identities", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend_artifact_id:", "data_artifact_id:", "skip-decompress: true"]],
     ["source-free.workflow.closed-modes", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["--mode PREVIEW", "prepare-source-free-fixed-host-deployment.mjs"]],
     ["source-free.prepare.exact-producer-inputs", "tools/platform/prepare-source-free-fixed-host-deployment.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["backend-component-manifest.json", "journey-v3-contract-bundle-v2-receipt.json", "server-route-bundle-publication-descriptor.json"]],
+    ["source-free.k3s-prepare.activation-request", "tools/platform/prepare-source-free-k3s-deployment.mjs", "TARGET_JOURNEY_V3_REQUIRED", ["PLATFORM_SOURCE_FREE_K3S_ACTIVATION_REQUEST_V1", "orchestrator: \"K3S\"", "runtimeContractSha256", "externalMutationCount: 0"]],
     ["source-free.runner.fixed-host-lifecycle", "tools/platform/run-fixed-host-journey-activation.mjs", "LEGACY_NOT_JOURNEY_V3", ["switchNginx", "drainAndRecreateCanonical", "removeStandby", "writeFailureReceipt", "activation-receipt.json", "reserveOperationDirectory"]],
     ["source-free.compose.exact-journey-environment", "infra/docker-compose.journey-candidate.yml", "TARGET_JOURNEY_V3_REQUIRED", ["EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend", "EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: backend-standby"]],
     ["source-free.k3s-workflow.sole-deploy-owner", ".github/workflows/source-free-journey-k3s-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["- PREVIEW", "- DEPLOY", "cancel-in-progress: false", "run-k3s-journey-activation.mjs"]],
@@ -112,8 +114,8 @@ test("deployment runtime input inventory is closed and source-literal backed", (
   assert.equal(inventory.schemaVersion, 1);
   assert.equal(inventory.artifactKind, "platform-deployment-runtime-input-inventory-v1");
   assert.deepEqual(inventory.sourcePaths, sourcePaths);
-  assert.equal(inventory.entries.length, 33);
-  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 16);
+  assert.equal(inventory.entries.length, 34);
+  assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "TARGET_JOURNEY_V3_REQUIRED").length, 17);
   assert.equal(inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "LEGACY_NOT_JOURNEY_V3").length, 17);
   assert.deepEqual(inventory.entries.map(({ id, sourcePath, journeyV3Disposition, evidenceTokens }) => [id, sourcePath, journeyV3Disposition, evidenceTokens]), entries);
 
