@@ -19,6 +19,7 @@ import {
   readStableRegularFile,
   validPublicBaseUrl,
 } from "./prepare-source-free-k3s-deployment.mjs";
+import { BUNDLE_SHA256, HUB_REVISION, inspectStagedPlatformContractBundle } from "./acquire-platform-contract-bundle.mjs";
 
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIRECTORY, "../..");
@@ -42,7 +43,7 @@ const REQUEST_FIELDS = Object.freeze([
   "composeEnvPath", "backendEnvPath", "baseComposePath",
   "candidateComposePath", "projectName", "nginxConfigPath",
   "publicBaseUrl", "releaseTuple", "candidateGeneration",
-  "trafficGeneration", "canary",
+  "trafficGeneration", "canary", "platformBundle",
 ]);
 const TUPLE_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "backendImageDigest", "backendConfigDigest",
@@ -89,6 +90,11 @@ export async function runK3sJourneyActivation(
   validateRequest(input);
   validateEffects(effects);
   if (typeof failureNow !== "function") throw typed("K3S_USAGE", undefined, 2);
+  try {
+    await effects.verifyImmutableBundle?.({ input });
+  } catch (cause) {
+    throw typed("K3S_USAGE", cause, 1);
+  }
   await reserveOperationDirectory(input.operationDirectory);
   const state = {
     candidateApplied: false,
@@ -213,6 +219,7 @@ async function recordActivationFailure({ input, effects, failureNow, state, caus
     successReceiptCreated: false,
     fallbackZero: FALLBACK_ZERO,
     failureCode: code,
+    bundleAcquisitionEvidenceDigest: input.platformBundle.acquisitionEvidenceDigest,
   };
   try {
     await writeCreateOnly(
@@ -251,16 +258,22 @@ export function createK3sJourneyActivationEffects({
   );
 
   return {
+    async verifyImmutableBundle() {
+      const stagedBundle = await inspectStagedPlatformContractBundle({
+        runtimeContractPath: request.platformBundle.runtimeContractPath,
+        readStableFile: readStableRegularFile,
+      });
+      if (JSON.stringify(stagedBundle) !== JSON.stringify(request.platformBundle)) {
+        throw new Error("K3s Hub bundle evidence binding changed");
+      }
+    },
     async verifyInputs() {
-      const runtimeContractPath = path.join(
-        REPOSITORY_ROOT,
-        "contracts/release/platform-k3s-runtime-contract.json",
-      );
-      const [runtimeBytes, candidateBytes, backendEnvBytes] = await Promise.all([
-        readStableRegularFile(runtimeContractPath),
+      const [, candidateBytes, backendEnvBytes] = await Promise.all([
+        this.verifyImmutableBundle(),
         readStableRegularFile(request.candidateInputPath),
         readStableRegularFile(request.backendEnvPath),
       ]);
+      const runtimeBytes = await readStableRegularFile(request.platformBundle.runtimeContractPath);
       if (digest(runtimeBytes) !== request.runtimeContractSha256) {
         throw new Error("K3s runtime contract identity changed");
       }
@@ -674,6 +687,7 @@ function successReceipt(values) {
     },
     rollbackAttemptCount: 0,
     fallbackZero: FALLBACK_ZERO,
+    bundleAcquisitionEvidenceDigest: values.input.platformBundle.acquisitionEvidenceDigest,
   };
 }
 
@@ -714,9 +728,14 @@ function validateRequest(input) {
     !SAFE_PROJECT.test(input.projectName) || !validPublicBaseUrl(input.publicBaseUrl) ||
     !Number.isSafeInteger(input.candidateGeneration) || input.candidateGeneration < 1 ||
     !Number.isSafeInteger(input.trafficGeneration) || input.trafficGeneration < 1 ||
-    !validateTuple(input.releaseTuple) || !validateCanary(input.canary)) {
+    !validateTuple(input.releaseTuple) || !validateCanary(input.canary) || !validatePlatformBundle(input.platformBundle)) {
     throw typed("K3S_USAGE", undefined, 2);
   }
+}
+function validatePlatformBundle(bundle) {
+  return exactObject(bundle, ["hubRevision", "bundleSha256", "resourceSetSha256", "acquisitionEvidenceDigest", "runtimeContractPath"]) &&
+    bundle.hubRevision === HUB_REVISION && bundle.bundleSha256 === `sha256:${BUNDLE_SHA256}` &&
+    DIGEST.test(bundle.resourceSetSha256) && DIGEST.test(bundle.acquisitionEvidenceDigest) && absolutePath(bundle.runtimeContractPath);
 }
 
 function validateTuple(tuple) {

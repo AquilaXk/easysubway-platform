@@ -6,12 +6,9 @@ import { isIPv4 } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJourneyReleaseTupleBytes } from "./bind-journey-release-candidate.mjs";
+import { inspectStagedPlatformContractBundle } from "./acquire-platform-contract-bundle.mjs";
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIRECTORY, "../..");
-const RUNTIME_CONTRACT_PATH = path.join(
-  REPOSITORY_ROOT,
-  "contracts/release/platform-k3s-runtime-contract.json",
-);
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9]\d*$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
@@ -29,6 +26,7 @@ const CLI_OPTIONS = new Map([
   ["--request-output", "requestOutputPath"],
   ["--node-internal-ip", "nodeInternalIp"],
   ["--public-base-url", "publicBaseUrl"],
+  ["--platform-contract-bundle", "platformContractBundlePath"],
 ]);
 const ERROR_MESSAGES = Object.freeze({
   K3S_PREPARE_USAGE: "expected exact source-free K3s preparation arguments",
@@ -50,12 +48,12 @@ export async function prepareSourceFreeK3sDeployment(input) {
     const fixedRequest = JSON.parse(fixedBytes.toString("utf8"));
     validateFixedRequest(fixedRequest);
     const [tupleBytes, bindingBytes, descriptorBindingBytes, backendEnvBytes,
-      runtimeContractBytes] = await Promise.all([
+      bundle] = await Promise.all([
       readStableRegularFile(fixedRequest.tuplePath),
       readStableRegularFile(fixedRequest.bindingPath),
       readStableRegularFile(fixedRequest.descriptorBindingPath),
       readStableRegularFile(fixedRequest.backendEnvPath),
-      readStableRegularFile(RUNTIME_CONTRACT_PATH),
+      readStagedPlatformBundle(input.platformContractBundlePath),
     ]);
     const tuple = validateJourneyReleaseTupleBytes(tupleBytes);
     const binding = parseJson(bindingBytes);
@@ -95,7 +93,7 @@ export async function prepareSourceFreeK3sDeployment(input) {
       deployRoot: fixedRequest.deployRoot,
       runUrl: fixedRequest.runUrl,
       generatedAt: fixedRequest.generatedAt,
-      runtimeContractSha256: digest(runtimeContractBytes),
+      runtimeContractSha256: bundle.runtimeContractSha256,
       candidateInputPath: input.candidateInputOutputPath,
       tuplePath: fixedRequest.tuplePath,
       bindingPath: fixedRequest.bindingPath,
@@ -111,6 +109,7 @@ export async function prepareSourceFreeK3sDeployment(input) {
       candidateGeneration: fixedRequest.candidateGeneration,
       trafficGeneration: fixedRequest.trafficGeneration,
       canary: fixedRequest.canary,
+      platformBundle: bundle.identity,
     };
     await writeCreateOnly(input.candidateInputOutputPath, candidateInput);
     await writeCreateOnly(input.requestOutputPath, request);
@@ -122,6 +121,7 @@ export async function prepareSourceFreeK3sDeployment(input) {
       preparationFoundation: "COMPOSE_INPUT_VALIDATION_ONLY",
       tupleSha256: tuple.tupleSha256,
       runtimeContractSha256: request.runtimeContractSha256,
+      bundleAcquisitionEvidenceDigest: bundle.identity.acquisitionEvidenceDigest,
       candidateInputSha256: digest(jsonBytes(candidateInput)),
       requestSha256: digest(jsonBytes(request)),
       candidateInputPath: input.candidateInputOutputPath,
@@ -142,9 +142,9 @@ function validateInvocation(input) {
   if (!input || typeof input !== "object" ||
     !["PREVIEW", "DEPLOY"].includes(input.mode) ||
     ![input.fixedHostRequestPath, input.candidateInputOutputPath,
-      input.requestOutputPath].every(absolutePath) ||
+      input.requestOutputPath, input.platformContractBundlePath].every(absolutePath) ||
     new Set([input.fixedHostRequestPath, input.candidateInputOutputPath,
-      input.requestOutputPath]).size !== 3 ||
+      input.requestOutputPath, input.platformContractBundlePath]).size !== 4 ||
     !privateIpv4(input.nodeInternalIp) ||
     !validPublicBaseUrl(input.publicBaseUrl)) {
     throw new SourceFreeK3sPreparationError("K3S_PREPARE_USAGE", 2);
@@ -167,6 +167,13 @@ function validateFixedRequest(request) {
     !request.canary || typeof request.canary !== "object") {
     throw new Error("fixed-host source-free request is invalid");
   }
+}
+async function readStagedPlatformBundle(bundleRoot) {
+  const identity = await inspectStagedPlatformContractBundle({
+    runtimeContractPath: path.join(bundleRoot, "resources/platform/k3s-runtime-contract.json"),
+    readStableFile: readStableRegularFile,
+  });
+  return { runtimeContractSha256: "sha256:ce226499224b3a3279d6bf1e41a181fc2a47afe100d9230411e3d782de36220b", identity };
 }
 export async function readStableRegularFile(pathname) {
   const before = await lstat(pathname, { bigint: true });

@@ -29,6 +29,13 @@ test("Platform CI has no mutable Hub contract staging source", () => {
   }
 });
 
+test("K3s workflow pins the Hub bundle revision and never reads a mutable Hub ref", () => {
+  const workflow = readFileSync(resolve(root, ".github/workflows/source-free-journey-k3s-deploy.yml"), "utf8");
+  assert.match(workflow, /acquire-platform-contract-bundle\.mjs/);
+  assert.doesNotMatch(workflow, /raw\.githubusercontent\.com\/AquilaXk\/easysubway\/(?:main|master)\//);
+  assert.doesNotMatch(workflow, /contracts\/bundles\/platform-contracts-v1\.1\.0\.json/);
+});
+
 function trackedReferences(forbidden) {
   try {
     return execFileSync(
