@@ -6,7 +6,7 @@ import { isIPv4 } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateJourneyReleaseTupleBytes } from "./bind-journey-release-candidate.mjs";
-import { BUNDLE_SHA256, HUB_REVISION, RESOURCE_IDENTITIES, sha256 as rawSha256 } from "./acquire-platform-contract-bundle.mjs";
+import { inspectStagedPlatformContractBundle } from "./acquire-platform-contract-bundle.mjs";
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIRECTORY, "../..");
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -169,22 +169,11 @@ function validateFixedRequest(request) {
   }
 }
 async function readStagedPlatformBundle(bundleRoot) {
-  const resources = await Promise.all(RESOURCE_IDENTITIES.map(async ([resourcePath, expected]) => {
-    const bytes = await readStableRegularFile(path.join(bundleRoot, "resources", resourcePath));
-    if (rawSha256(bytes) !== expected) throw new Error("staged Hub resource digest drift");
-    return { resourcePath, sha256: `sha256:${expected}` };
-  }));
-  const evidenceBytes = await readStableRegularFile(path.join(bundleRoot, "evidence.json"));
-  const evidence = parseJson(evidenceBytes);
-  const resourceSetSha256 = `sha256:${rawSha256(Buffer.from(resources.map((entry) => `${entry.resourcePath}\n${entry.sha256.slice(7)}\n`).join(""), "utf8"))}`;
-  if (!exactObject(evidence, ["schemaVersion", "artifactKind", "hubRevision", "bundleSha256", "resourceSetSha256", "resources"]) ||
-    evidence.schemaVersion !== "PLATFORM_HUB_BUNDLE_ACQUISITION_EVIDENCE_V1" || evidence.artifactKind !== "platform-hub-bundle-acquisition-evidence" ||
-    evidence.hubRevision !== HUB_REVISION || evidence.bundleSha256 !== `sha256:${BUNDLE_SHA256}` || evidence.resourceSetSha256 !== resourceSetSha256 ||
-    JSON.stringify(evidence.resources) !== JSON.stringify(resources)) throw new Error("staged Hub evidence drift");
-  return {
-    runtimeContractSha256: `sha256:${RESOURCE_IDENTITIES[2][1]}`,
-    identity: { hubRevision: HUB_REVISION, bundleSha256: `sha256:${BUNDLE_SHA256}`, resourceSetSha256, acquisitionEvidenceDigest: digest(evidenceBytes), runtimeContractPath: path.join(bundleRoot, "resources/platform/k3s-runtime-contract.json") },
-  };
+  const identity = await inspectStagedPlatformContractBundle({
+    runtimeContractPath: path.join(bundleRoot, "resources/platform/k3s-runtime-contract.json"),
+    readStableFile: readStableRegularFile,
+  });
+  return { runtimeContractSha256: "sha256:ce226499224b3a3279d6bf1e41a181fc2a47afe100d9230411e3d782de36220b", identity };
 }
 export async function readStableRegularFile(pathname) {
   const before = await lstat(pathname, { bigint: true });

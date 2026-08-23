@@ -19,6 +19,7 @@ import {
   readStableRegularFile,
   validPublicBaseUrl,
 } from "./prepare-source-free-k3s-deployment.mjs";
+import { BUNDLE_SHA256, HUB_REVISION, inspectStagedPlatformContractBundle } from "./acquire-platform-contract-bundle.mjs";
 
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(MODULE_DIRECTORY, "../..");
@@ -89,6 +90,11 @@ export async function runK3sJourneyActivation(
   validateRequest(input);
   validateEffects(effects);
   if (typeof failureNow !== "function") throw typed("K3S_USAGE", undefined, 2);
+  try {
+    await effects.verifyImmutableBundle?.({ input });
+  } catch (cause) {
+    throw typed("K3S_USAGE", cause, 1);
+  }
   await reserveOperationDirectory(input.operationDirectory);
   const state = {
     candidateApplied: false,
@@ -252,12 +258,22 @@ export function createK3sJourneyActivationEffects({
   );
 
   return {
+    async verifyImmutableBundle() {
+      const stagedBundle = await inspectStagedPlatformContractBundle({
+        runtimeContractPath: request.platformBundle.runtimeContractPath,
+        readStableFile: readStableRegularFile,
+      });
+      if (JSON.stringify(stagedBundle) !== JSON.stringify(request.platformBundle)) {
+        throw new Error("K3s Hub bundle evidence binding changed");
+      }
+    },
     async verifyInputs() {
-      const [runtimeBytes, candidateBytes, backendEnvBytes] = await Promise.all([
-        readStableRegularFile(request.platformBundle.runtimeContractPath),
+      const [, candidateBytes, backendEnvBytes] = await Promise.all([
+        this.verifyImmutableBundle(),
         readStableRegularFile(request.candidateInputPath),
         readStableRegularFile(request.backendEnvPath),
       ]);
+      const runtimeBytes = await readStableRegularFile(request.platformBundle.runtimeContractPath);
       if (digest(runtimeBytes) !== request.runtimeContractSha256) {
         throw new Error("K3s runtime contract identity changed");
       }
@@ -718,7 +734,8 @@ function validateRequest(input) {
 }
 function validatePlatformBundle(bundle) {
   return exactObject(bundle, ["hubRevision", "bundleSha256", "resourceSetSha256", "acquisitionEvidenceDigest", "runtimeContractPath"]) &&
-    /^[a-f0-9]{40}$/.test(bundle.hubRevision) && [bundle.bundleSha256, bundle.resourceSetSha256, bundle.acquisitionEvidenceDigest].every((value) => DIGEST.test(value)) && absolutePath(bundle.runtimeContractPath);
+    bundle.hubRevision === HUB_REVISION && bundle.bundleSha256 === `sha256:${BUNDLE_SHA256}` &&
+    DIGEST.test(bundle.resourceSetSha256) && DIGEST.test(bundle.acquisitionEvidenceDigest) && absolutePath(bundle.runtimeContractPath);
 }
 
 function validateTuple(tuple) {

@@ -103,7 +103,9 @@ function request(root) {
     },
     platformBundle: {
       hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
-      bundleSha256: digest("9"), resourceSetSha256: digest("8"), acquisitionEvidenceDigest: digest("7"),
+      bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
+      resourceSetSha256: "sha256:024e239b18364a3b1be9465cf3f9af0b3127344462c72ace7ff5071d332f48c6",
+      acquisitionEvidenceDigest: digest("7"),
       runtimeContractPath: path.join(root, "platform-contracts", "resources", "platform", "k3s-runtime-contract.json"),
     },
   };
@@ -147,13 +149,21 @@ async function writePlatformBundle(root) {
     evidenceResources.push({ resourcePath, sha256: sha256(bytes) });
   }
   const resourceSetSha256 = sha256(Buffer.from(evidenceResources.map((entry) => `${entry.resourcePath}\n${entry.sha256.slice(7)}\n`).join("")));
-  await writeFile(path.join(bundleRoot, "evidence.json"), `${JSON.stringify({
+  const evidenceBytes = Buffer.from(`${JSON.stringify({
     schemaVersion: "PLATFORM_HUB_BUNDLE_ACQUISITION_EVIDENCE_V1", artifactKind: "platform-hub-bundle-acquisition-evidence",
     hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
     bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
     resourceSetSha256, resources: evidenceResources,
   }, null, 2)}\n`);
-  return bundleRoot;
+  await writeFile(path.join(bundleRoot, "evidence.json"), evidenceBytes);
+  return {
+    hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
+    bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
+    resourceSetSha256,
+    acquisitionEvidenceDigest: sha256(evidenceBytes),
+    runtimeContractPath: path.join(bundleRoot, "resources", "platform", "k3s-runtime-contract.json"),
+    bundleRoot,
+  };
 }
 function effects(events, failAt) {
   const fails = (name) => Array.isArray(failAt) ? failAt.includes(name) : name === failAt;
@@ -275,7 +285,7 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
     canary: request(root).canary,
   };
   await writeFile(paths.fixedRequest, `${JSON.stringify(fixedRequest, null, 2)}\n`);
-  const platformContractBundlePath = await writePlatformBundle(root);
+  const platformContractBundlePath = (await writePlatformBundle(root)).bundleRoot;
   const result = await prepareSourceFreeK3sDeployment({
     mode: "PREVIEW",
     fixedHostRequestPath: paths.fixedRequest,
@@ -306,7 +316,8 @@ test("activation Secret injects the protected readiness token without exposing i
   const protectedToken = "p".repeat(32);
   const untrustedToken = "u".repeat(32);
   const activationRequest = request(root);
-  await writePlatformBundle(root);
+  activationRequest.platformBundle = await writePlatformBundle(root);
+  delete activationRequest.platformBundle.bundleRoot;
   const runtimeBytes = await readFile(new URL(
     "../../contracts/release/platform-k3s-runtime-contract.json", import.meta.url,
   ));
@@ -377,6 +388,47 @@ test("activation Secret injects the protected readiness token without exposing i
   }
   const ci = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.equal(ci.split("node --test tools/platform/source-free-k3s-deployment.test.mjs").length - 1, 1);
+});
+test("activation rejects a crafted Hub bundle request before it can invoke K3s", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-crafted-hub-bundle-"));
+  const activationRequest = request(root);
+  activationRequest.platformBundle.hubRevision = "0".repeat(40);
+  const commands = [];
+  assert.throws(() => createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (...args) => { commands.push(args); return { stdout: Buffer.alloc(0) }; },
+    serviceToken: "p".repeat(32),
+  }), (error) => error instanceof K3sJourneyActivationError && error.code === "K3S_USAGE");
+  assert.deepEqual(commands, []);
+});
+test("activation rejects a staged evidence digest mismatch before K3s mutation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-staged-hub-bundle-"));
+  const activationRequest = request(root);
+  activationRequest.platformBundle = await writePlatformBundle(root);
+  delete activationRequest.platformBundle.bundleRoot;
+  activationRequest.platformBundle.acquisitionEvidenceDigest = digest("0");
+  const backendEnvironment = "SAFE_FLAG=true\n";
+  await Promise.all([
+    writeFile(activationRequest.candidateInputPath, JSON.stringify({
+      tupleSha256: activationRequest.releaseTuple.tupleSha256,
+      candidateGeneration: activationRequest.candidateGeneration,
+      trafficGeneration: activationRequest.trafficGeneration,
+      secretIdentity: sha256(backendEnvironment), nodeInternalIp: "10.0.0.17",
+    })),
+    writeFile(activationRequest.backendEnvPath, backendEnvironment),
+  ]);
+  const commands = [];
+  const activationEffects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (...args) => { commands.push(args); return { stdout: Buffer.alloc(0) }; },
+    serviceToken: "p".repeat(32),
+  });
+  await assert.rejects(
+    runK3sJourneyActivation(activationRequest, activationEffects),
+    (error) => error instanceof K3sJourneyActivationError && error.code === "K3S_USAGE",
+  );
+  assert.deepEqual(commands, []);
+  await missing(activationRequest.operationDirectory);
 });
 test("success linearizes traffic with Service resourceVersion CAS before Nginx and drain", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-success-"));
@@ -531,6 +583,8 @@ test("contract and workflow keep K3s activation source-free, protected and Compo
   assert.match(workflow, /prepare-source-free-k3s-deployment\.mjs/);
   assert.match(workflow, /run-k3s-journey-activation\.mjs/);
   assert.ok(workflow.indexOf("acquire-platform-contract-bundle.mjs") < workflow.indexOf("prepare-source-free-k3s-deployment.mjs"));
+  assert.match(workflow, /platform-contracts-\$\{GITHUB_RUN_ID\}/);
+  assert.doesNotMatch(workflow, /mkdir -p[^\n]*\$\{source_free_root\}/);
   assert.doesNotMatch(workflow, /run-fixed-host-journey-activation\.mjs/);
   assert.doesNotMatch(workflow, /docker compose|docker-compose/);
 });

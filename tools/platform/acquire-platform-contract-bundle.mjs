@@ -49,6 +49,36 @@ export function inspectPlatformContractBundle(bytes) {
   return { resources, resourceSetSha256 };
 }
 
+export async function inspectStagedPlatformContractBundle({ runtimeContractPath, readStableFile }) {
+  if (typeof runtimeContractPath !== "string" || !path.isAbsolute(runtimeContractPath) || typeof readStableFile !== "function") {
+    throw new PlatformContractBundleError("HUB_BUNDLE_USAGE");
+  }
+  const bundleRoot = path.resolve(path.dirname(runtimeContractPath), "../..");
+  const expectedRuntimePath = path.join(bundleRoot, "resources", "platform", "k3s-runtime-contract.json");
+  if (runtimeContractPath !== expectedRuntimePath) throw new PlatformContractBundleError("HUB_BUNDLE_STAGING_DRIFT");
+  const resources = await Promise.all(RESOURCE_IDENTITIES.map(async ([resourcePath, expectedSha256]) => {
+    const bytes = await readStableFile(path.join(bundleRoot, "resources", resourcePath));
+    if (sha256(bytes) !== expectedSha256) throw new PlatformContractBundleError("HUB_BUNDLE_STAGING_DRIFT");
+    return { resourcePath, sha256: `sha256:${expectedSha256}` };
+  }));
+  const evidenceBytes = await readStableFile(path.join(bundleRoot, "evidence.json"));
+  let evidence;
+  try { evidence = JSON.parse(evidenceBytes.toString("utf8")); } catch { throw new PlatformContractBundleError("HUB_BUNDLE_STAGING_DRIFT"); }
+  const resourceSetSha256 = `sha256:${sha256(Buffer.from(resources.map((entry) => `${entry.resourcePath}\n${entry.sha256.slice(7)}\n`).join(""), "utf8"))}`;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) ||
+    Object.keys(evidence).length !== 6 || evidence.schemaVersion !== "PLATFORM_HUB_BUNDLE_ACQUISITION_EVIDENCE_V1" ||
+    evidence.artifactKind !== "platform-hub-bundle-acquisition-evidence" || evidence.hubRevision !== HUB_REVISION ||
+    evidence.bundleSha256 !== `sha256:${BUNDLE_SHA256}` || evidence.resourceSetSha256 !== resourceSetSha256 ||
+    JSON.stringify(evidence.resources) !== JSON.stringify(resources)) throw new PlatformContractBundleError("HUB_BUNDLE_STAGING_DRIFT");
+  return {
+    hubRevision: HUB_REVISION,
+    bundleSha256: `sha256:${BUNDLE_SHA256}`,
+    resourceSetSha256,
+    acquisitionEvidenceDigest: `sha256:${sha256(evidenceBytes)}`,
+    runtimeContractPath,
+  };
+}
+
 export async function acquirePlatformContractBundle({ outputRoot, fetchImpl = fetch }) {
   if (typeof outputRoot !== "string" || !path.isAbsolute(outputRoot) || typeof fetchImpl !== "function") throw new PlatformContractBundleError("HUB_BUNDLE_USAGE");
   let stage;
@@ -91,6 +121,15 @@ function parseCli(args) {
   if (args.length !== 2 || args[0] !== "--output-root") throw new PlatformContractBundleError("HUB_BUNDLE_USAGE");
   return { outputRoot: args[1] };
 }
+async function main() {
+  try {
+    const result = await acquirePlatformContractBundle(parseCli(process.argv.slice(2)));
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } catch (error) {
+    process.stderr.write(`${error.code ?? "HUB_BUNDLE_UNAVAILABLE"}\n`);
+    process.exitCode = 1;
+  }
+}
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
-  acquirePlatformContractBundle(parseCli(process.argv.slice(2))).then((result) => process.stdout.write(`${JSON.stringify(result)}\n`)).catch((error) => { process.stderr.write(`${error.code ?? "HUB_BUNDLE_UNAVAILABLE"}\n`); process.exitCode = 1; });
+  main();
 }
