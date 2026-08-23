@@ -16,6 +16,61 @@ import {
 import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
 const digest = (value) => `sha256:${value.repeat(64)}`;
 const sha256 = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+function schemaAccepts(value, schema, root = schema) {
+  if (schema.$ref) {
+    const target = schema.$ref.slice("#/".length).split("/").reduce(
+      (current, segment) => current?.[segment],
+      root,
+    );
+    return target !== undefined && schemaAccepts(value, target, root);
+  }
+  if (schema.allOf && !schema.allOf.every((part) => schemaAccepts(value, part, root))) return false;
+  if (schema.oneOf && schema.oneOf.filter((part) => schemaAccepts(value, part, root)).length !== 1) return false;
+  if (Object.hasOwn(schema, "const") && !Object.is(value, schema.const)) return false;
+  if (schema.enum && !schema.enum.some((entry) => Object.is(value, entry))) return false;
+  if (schema.type === "null") return value === null;
+  if (schema.type === "integer" && (!Number.isInteger(value) || value < (schema.minimum ?? -Infinity))) return false;
+  if (schema.type === "string" && (typeof value !== "string" ||
+    value.length < (schema.minLength ?? 0) || value.length > (schema.maxLength ?? Infinity) ||
+    (schema.pattern && !(new RegExp(schema.pattern).test(value))))) return false;
+  if (schema.type !== "object" && !schema.properties) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if ((schema.required ?? []).some((key) => !Object.hasOwn(value, key))) return false;
+  if (schema.minProperties && Object.keys(value).length < schema.minProperties) return false;
+  for (const [key, item] of Object.entries(value)) {
+    const property = schema.properties?.[key];
+    if (!property && schema.additionalProperties === false) return false;
+    if (!schemaAccepts(item, property ?? schema.additionalProperties ?? {}, root)) return false;
+  }
+  return true;
+}
+function failureReceipt(phase, failureCode) {
+  return {
+    schemaVersion: "PLATFORM_K3S_ACTIVATION_FAILURE_V1",
+    artifactKind: "platform-k3s-activation-failure",
+    orchestrator: "K3S",
+    phase,
+    operationId: digest("0"),
+    runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/31700000000",
+    failedAt: "2026-08-14T04:01:00.000Z",
+    releaseIdentity: {
+      tupleSha256: digest("1"), backendImageDigest: digest("2"), backendConfigDigest: digest("3"),
+      journeyContractDigest: digest("4"), serverRouteBundleDigest: digest("5"),
+      deploymentRevision: "6".repeat(40), environmentIdentity: "production",
+      candidateGeneration: 23, trafficGeneration: 41,
+    },
+    mutationCounts: { activeService: 0, nginx: 0, oldWorkload: 0 },
+    serviceCas: null,
+    rollbackAttemptCount: 0,
+    degradedSuccess: false,
+    successReceiptCreated: false,
+    fallbackZero: {
+      legacyGraphSuccessCount: 0, localRouteInvocationCount: 0,
+      staleJourneyServedCount: 0, alternateEndpointSuccessCount: 0,
+    },
+    failureCode,
+  };
+}
 function request(root) {
   return {
     schemaVersion: "PLATFORM_SOURCE_FREE_K3S_ACTIVATION_REQUEST_V1",
@@ -437,5 +492,25 @@ test("terminal receipts may bind one direct canonical bundle acquisition-evidenc
     const terminalReceipt = schema.$defs[terminalKind];
     assert.deepEqual(terminalReceipt.properties[field], { $ref: "#/$defs/digest" });
     assert.equal(terminalReceipt.required.includes(field), false);
+  }
+});
+test("failure receipt schema accepts only the phase-specific terminal failure code", async () => {
+  const schema = JSON.parse(await readFile(
+    new URL("../../contracts/release/platform-k3s-activation-receipt.schema.json", import.meta.url),
+    "utf8",
+  ));
+  const cases = [
+    ["FAILED_PRECOMMIT", "K3S_PRECOMMIT_FAILED", true],
+    ["FAILED_POSTSWITCH", "K3S_POSTSWITCH_FAILED", true],
+    ["FAILED_PRECOMMIT", "K3S_POSTSWITCH_FAILED", false],
+    ["FAILED_POSTSWITCH", "K3S_PRECOMMIT_FAILED", false],
+  ];
+
+  for (const [phase, failureCode, expected] of cases) {
+    assert.equal(
+      schemaAccepts(failureReceipt(phase, failureCode), schema.$defs.failure, schema),
+      expected,
+      `${phase} must ${expected ? "accept" : "reject"} ${failureCode}`,
+    );
   }
 });
