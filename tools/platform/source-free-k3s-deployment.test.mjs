@@ -417,3 +417,25 @@ test("contract and workflow keep K3s activation source-free, protected and Compo
   assert.doesNotMatch(workflow, /run-fixed-host-journey-activation\.mjs/);
   assert.doesNotMatch(workflow, /docker compose|docker-compose/);
 });
+test("terminal receipts may bind one direct canonical bundle acquisition-evidence digest without breaking V1", async () => {
+  const contract = JSON.parse(await readFile(
+    new URL("../../contracts/release/platform-k3s-activation-contract.json", import.meta.url),
+    "utf8",
+  ));
+  const schema = JSON.parse(await readFile(
+    new URL("../../contracts/release/platform-k3s-activation-receipt.schema.json", import.meta.url),
+    "utf8",
+  ));
+  const field = "bundleAcquisitionEvidenceDigest";
+
+  assert.deepEqual(contract.receipt.bundleAcquisitionEvidence, {
+    field,
+    digestMeaning: "DIRECT_SHA256_OF_CREATE_ONLY_CANONICAL_BUNDLE_ACQUISITION_EVIDENCE",
+    requiredForV1: false,
+  });
+  for (const terminalKind of ["success", "failure"]) {
+    const terminalReceipt = schema.$defs[terminalKind];
+    assert.deepEqual(terminalReceipt.properties[field], { $ref: "#/$defs/digest" });
+    assert.equal(terminalReceipt.required.includes(field), false);
+  }
+});
