@@ -136,10 +136,13 @@ jobs:
           source_free_root="${deploy_root}/source-free-inputs/source-free-k3s-${GITHUB_RUN_ID}"
           operation_directory="${deploy_root}/release-receipts/source-free-k3s-${GITHUB_RUN_ID}"
           mkdir -p "${RUNNER_TEMP}/backend" "${RUNNER_TEMP}/data" "${RUNNER_TEMP}/prepared" \
-            "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
+            "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts" "${source_free_root}"
           chmod 700 "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
           unzip -q "${backend_archives[0]}" -d "${RUNNER_TEMP}/backend"
           unzip -q "${data_archives[0]}" -d "${RUNNER_TEMP}/data"
+          node tools/platform/acquire-platform-contract-bundle.mjs \
+            --output-root "${source_free_root}/platform-contracts" \
+            > "${RUNNER_TEMP}/platform-contract-bundle-acquisition.json"
           printf '%s' "${EASYSUBWAY_ENV}" > "${RUNNER_TEMP}/deployment.env"
           chmod 600 "${RUNNER_TEMP}/deployment.env"
           tools/deploy/prepare-deployment-env.sh \
@@ -178,6 +181,7 @@ jobs:
             --request-output "${RUNNER_TEMP}/k3s-activation-request.json" \
             --node-internal-ip "${NODE_INTERNAL_IP}" \
             --public-base-url "${PUBLIC_BASE_URL}" \
+            --platform-contract-bundle "${source_free_root}/platform-contracts" \
             > "${RUNNER_TEMP}/k3s-preparation.json"
           cat "${RUNNER_TEMP}/k3s-preparation.json" >> "${GITHUB_STEP_SUMMARY}"
 

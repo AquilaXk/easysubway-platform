@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -101,7 +101,59 @@ function request(root) {
       mobilityProfile: "WHEELCHAIR", constraintMode: "STRICT",
       maxTransfers: 2, alternativeCount: 1,
     },
+    platformBundle: {
+      hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
+      bundleSha256: digest("9"), resourceSetSha256: digest("8"), acquisitionEvidenceDigest: digest("7"),
+      runtimeContractPath: path.join(root, "platform-contracts", "resources", "platform", "k3s-runtime-contract.json"),
+    },
   };
+}
+async function writePlatformBundle(root) {
+  const bundleRoot = path.join(root, "platform-contracts");
+  const resources = [
+    ["platform/deployment-contract.json", Buffer.from(`{
+  "schemaVersion": 1,
+  "artifactKind": "platform-deployment-contract",
+  "contractVersion": "platform-v1",
+  "allowedProducerRepositories": [
+    "AquilaXk/easysubway",
+    "AquilaXk/easysubway-backend"
+  ],
+  "artifactNamePattern": "^easysubway-backend-release-[a-f0-9]{40}$",
+  "imageRepository": "ghcr.io/aquilaxk/easysubway-backend",
+  "platformRepository": "AquilaXk/easysubway-platform",
+  "gitShaPattern": "^[a-f0-9]{40}$",
+  "sha256Pattern": "^[a-f0-9]{64}$",
+  "imageDigestPattern": "^sha256:[a-f0-9]{64}$",
+  "issueRefPattern": "^AquilaXk/(easysubway|easysubway-data|easysubway-platform|easysubway-backend|easysubway-mobile)#[1-9][0-9]*$",
+  "forbiddenInputs": [
+    "branch",
+    "buildContext",
+    "sourceDirectory",
+    "mutableImageTag"
+  ]
+}\n`)],
+    ["platform/k3s-activation-contract.json", "../../contracts/release/platform-k3s-activation-contract.json"],
+    ["platform/k3s-runtime-contract.json", "../../contracts/release/platform-k3s-runtime-contract.json"],
+    ["platform/k3s-runtime-contract.schema.json", "../../contracts/release/platform-k3s-runtime-contract.schema.json"],
+    ["platform/k3s-activation-receipt.schema.json", "../../contracts/release/platform-k3s-activation-receipt.schema.json"],
+  ];
+  const evidenceResources = [];
+  for (const [resourcePath, source] of resources) {
+    const bytes = Buffer.isBuffer(source) ? source : await readFile(new URL(source, import.meta.url));
+    const target = path.join(bundleRoot, "resources", resourcePath);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, bytes);
+    evidenceResources.push({ resourcePath, sha256: sha256(bytes) });
+  }
+  const resourceSetSha256 = sha256(Buffer.from(evidenceResources.map((entry) => `${entry.resourcePath}\n${entry.sha256.slice(7)}\n`).join("")));
+  await writeFile(path.join(bundleRoot, "evidence.json"), `${JSON.stringify({
+    schemaVersion: "PLATFORM_HUB_BUNDLE_ACQUISITION_EVIDENCE_V1", artifactKind: "platform-hub-bundle-acquisition-evidence",
+    hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
+    bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
+    resourceSetSha256, resources: evidenceResources,
+  }, null, 2)}\n`);
+  return bundleRoot;
 }
 function effects(events, failAt) {
   const fails = (name) => Array.isArray(failAt) ? failAt.includes(name) : name === failAt;
@@ -223,6 +275,7 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
     canary: request(root).canary,
   };
   await writeFile(paths.fixedRequest, `${JSON.stringify(fixedRequest, null, 2)}\n`);
+  const platformContractBundlePath = await writePlatformBundle(root);
   const result = await prepareSourceFreeK3sDeployment({
     mode: "PREVIEW",
     fixedHostRequestPath: paths.fixedRequest,
@@ -230,6 +283,7 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
     requestOutputPath: paths.request,
     nodeInternalIp: "10.0.0.17",
     publicBaseUrl: "https://api.easysubway.kr",
+    platformContractBundlePath,
   });
   const candidateInput = JSON.parse(await readFile(paths.candidateInput, "utf8"));
   const k3sRequest = JSON.parse(await readFile(paths.request, "utf8"));
@@ -240,6 +294,9 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
   assert.equal(candidateInput.secretIdentity, sha256(backendEnvironment));
   assert.equal(candidateInput.nodeInternalIp, "10.0.0.17");
   assert.equal(k3sRequest.releaseTuple.tupleSha256, tuple.tupleSha256);
+  assert.equal(k3sRequest.platformBundle.hubRevision, "e14964e588ef79b1cff6e01e18d8b943d7724420");
+  assert.match(k3sRequest.platformBundle.bundleSha256, /^sha256:[a-f0-9]{64}$/);
+  assert.match(k3sRequest.platformBundle.acquisitionEvidenceDigest, /^sha256:[a-f0-9]{64}$/);
   assert.equal(k3sRequest.operationDirectory, fixedRequest.operationDirectory);
   assert.doesNotMatch(JSON.stringify(result), /private-test-value/);
   assert.doesNotMatch(JSON.stringify(k3sRequest), /private-test-value/);
@@ -249,6 +306,7 @@ test("activation Secret injects the protected readiness token without exposing i
   const protectedToken = "p".repeat(32);
   const untrustedToken = "u".repeat(32);
   const activationRequest = request(root);
+  await writePlatformBundle(root);
   const runtimeBytes = await readFile(new URL(
     "../../contracts/release/platform-k3s-runtime-contract.json", import.meta.url,
   ));
@@ -339,6 +397,7 @@ test("success linearizes traffic with Service resourceVersion CAS before Nginx a
   assert.equal(receipt.candidate.activeReadinessEvidenceDigest, digest("e"));
   assert.equal(receipt.activation.nginx.targetPort, 32080); assert.equal(receipt.activation.drain.signal, "SIGTERM");
   assert.deepEqual(Object.values(receipt.fallbackZero), [0, 0, 0, 0]);
+  assert.equal(receipt.bundleAcquisitionEvidenceDigest, digest("7"));
   assert.deepEqual(
     JSON.parse(await readFile(
       path.join(root, "operation", "k3s-activation-receipt.json"),
@@ -412,6 +471,7 @@ test("precommit failure cleans only candidate and leaves active traffic surfaces
   });
   assert.equal(failure.rollbackAttemptCount, 0);
   assert.equal(failure.successReceiptCreated, false);
+  assert.equal(failure.bundleAcquisitionEvidenceDigest, digest("7"));
   await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
 });
 test("partial candidate apply is cleanup-owned and cleanup failure stops terminal receipt", async () => {
@@ -467,8 +527,10 @@ test("contract and workflow keep K3s activation source-free, protected and Compo
   assert.equal(contract.fallback.policy, "FORBIDDEN");
   assert.match(workflow, /environment:\s*production-deploy/);
   assert.match(workflow, /prepare-source-free-fixed-host-deployment\.mjs/);
+  assert.match(workflow, /acquire-platform-contract-bundle\.mjs/);
   assert.match(workflow, /prepare-source-free-k3s-deployment\.mjs/);
   assert.match(workflow, /run-k3s-journey-activation\.mjs/);
+  assert.ok(workflow.indexOf("acquire-platform-contract-bundle.mjs") < workflow.indexOf("prepare-source-free-k3s-deployment.mjs"));
   assert.doesNotMatch(workflow, /run-fixed-host-journey-activation\.mjs/);
   assert.doesNotMatch(workflow, /docker compose|docker-compose/);
 });

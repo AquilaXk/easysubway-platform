@@ -42,7 +42,7 @@ const REQUEST_FIELDS = Object.freeze([
   "composeEnvPath", "backendEnvPath", "baseComposePath",
   "candidateComposePath", "projectName", "nginxConfigPath",
   "publicBaseUrl", "releaseTuple", "candidateGeneration",
-  "trafficGeneration", "canary",
+  "trafficGeneration", "canary", "platformBundle",
 ]);
 const TUPLE_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "backendImageDigest", "backendConfigDigest",
@@ -213,6 +213,7 @@ async function recordActivationFailure({ input, effects, failureNow, state, caus
     successReceiptCreated: false,
     fallbackZero: FALLBACK_ZERO,
     failureCode: code,
+    bundleAcquisitionEvidenceDigest: input.platformBundle.acquisitionEvidenceDigest,
   };
   try {
     await writeCreateOnly(
@@ -252,12 +253,8 @@ export function createK3sJourneyActivationEffects({
 
   return {
     async verifyInputs() {
-      const runtimeContractPath = path.join(
-        REPOSITORY_ROOT,
-        "contracts/release/platform-k3s-runtime-contract.json",
-      );
       const [runtimeBytes, candidateBytes, backendEnvBytes] = await Promise.all([
-        readStableRegularFile(runtimeContractPath),
+        readStableRegularFile(request.platformBundle.runtimeContractPath),
         readStableRegularFile(request.candidateInputPath),
         readStableRegularFile(request.backendEnvPath),
       ]);
@@ -674,6 +671,7 @@ function successReceipt(values) {
     },
     rollbackAttemptCount: 0,
     fallbackZero: FALLBACK_ZERO,
+    bundleAcquisitionEvidenceDigest: values.input.platformBundle.acquisitionEvidenceDigest,
   };
 }
 
@@ -714,9 +712,13 @@ function validateRequest(input) {
     !SAFE_PROJECT.test(input.projectName) || !validPublicBaseUrl(input.publicBaseUrl) ||
     !Number.isSafeInteger(input.candidateGeneration) || input.candidateGeneration < 1 ||
     !Number.isSafeInteger(input.trafficGeneration) || input.trafficGeneration < 1 ||
-    !validateTuple(input.releaseTuple) || !validateCanary(input.canary)) {
+    !validateTuple(input.releaseTuple) || !validateCanary(input.canary) || !validatePlatformBundle(input.platformBundle)) {
     throw typed("K3S_USAGE", undefined, 2);
   }
+}
+function validatePlatformBundle(bundle) {
+  return exactObject(bundle, ["hubRevision", "bundleSha256", "resourceSetSha256", "acquisitionEvidenceDigest", "runtimeContractPath"]) &&
+    /^[a-f0-9]{40}$/.test(bundle.hubRevision) && [bundle.bundleSha256, bundle.resourceSetSha256, bundle.acquisitionEvidenceDigest].every((value) => DIGEST.test(value)) && absolutePath(bundle.runtimeContractPath);
 }
 
 function validateTuple(tuple) {
