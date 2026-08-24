@@ -83,6 +83,41 @@ output "datapack_object_prefix" {
   value       = var.datapack_object_prefix
 }
 
+output "map_catalog_namespace" {
+  description = "OCI Object Storage namespace for the private map/catalog bucket."
+  value       = data.oci_objectstorage_namespace.this.namespace
+}
+
+output "map_catalog_bucket_name" {
+  description = "Dedicated private bucket for signed-current map and catalog publication."
+  value       = oci_objectstorage_bucket.map_catalog.name
+}
+
+output "map_catalog_region" {
+  description = "OCI region for map/catalog object publication and reading."
+  value       = var.region
+}
+
+output "map_catalog_object_storage_endpoint" {
+  description = "S3-compatible OCI endpoint for the map/catalog bucket."
+  value       = local.map_catalog_object_storage_endpoint
+}
+
+output "map_catalog_object_prefix" {
+  description = "Object prefix for signed-current map and catalog publication."
+  value       = var.map_catalog_object_prefix
+}
+
+output "github_actions_map_catalog_credential_secret_names" {
+  description = "GitHub Actions credential secret names for map/catalog access; values are never output by Terraform."
+  value = {
+    publisher_access_key = var.map_catalog_publisher_access_key_secret_name
+    publisher_secret_key = var.map_catalog_publisher_secret_key_secret_name
+    reader_access_key    = var.map_catalog_reader_access_key_secret_name
+    reader_secret_key    = var.map_catalog_reader_secret_key_secret_name
+  }
+}
+
 output "github_actions_datapack_env" {
   description = "Non-secret GitHub Actions values for data pack publishing. Access key and secret key must stay in GitHub secrets."
   value = {

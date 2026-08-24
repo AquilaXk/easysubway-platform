@@ -330,6 +330,58 @@ variable "datapack_bucket_name" {
   }
 }
 
+variable "map_catalog_bucket_name" {
+  description = "Dedicated private OCI Object Storage bucket for signed-current map and catalog publication."
+  type        = string
+  default     = "easysubway-map-catalog"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,61}[a-z0-9]$", var.map_catalog_bucket_name))
+    error_message = "map_catalog_bucket_name must be lowercase kebab-case, 3-63 characters."
+  }
+}
+
+variable "map_catalog_object_prefix" {
+  description = "Object prefix for signed-current map and catalog publication."
+  type        = string
+  default     = "map-catalog"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9/_-]*[a-z0-9]$", var.map_catalog_object_prefix))
+    error_message = "map_catalog_object_prefix must contain lowercase path characters without leading or trailing slash."
+  }
+}
+
+variable "map_catalog_publisher_access_key_secret_name" {
+  description = "GitHub Actions secret name for the map/catalog publisher access key; never the key value."
+  type        = string
+  default     = "OCI_MAP_CATALOG_PUBLISHER_ACCESS_KEY"
+  nullable    = false
+}
+
+variable "map_catalog_publisher_secret_key_secret_name" {
+  description = "GitHub Actions secret name for the map/catalog publisher secret key; never the key value."
+  type        = string
+  default     = "OCI_MAP_CATALOG_PUBLISHER_SECRET_KEY"
+  nullable    = false
+}
+
+variable "map_catalog_reader_access_key_secret_name" {
+  description = "GitHub Actions secret name for the map/catalog reader access key; never the key value."
+  type        = string
+  default     = "OCI_MAP_CATALOG_READER_ACCESS_KEY"
+  nullable    = false
+}
+
+variable "map_catalog_reader_secret_key_secret_name" {
+  description = "GitHub Actions secret name for the map/catalog reader secret key; never the key value."
+  type        = string
+  default     = "OCI_MAP_CATALOG_READER_SECRET_KEY"
+  nullable    = false
+}
+
 variable "datapack_object_prefix" {
   description = "Object prefix used by the app and publisher for data pack files. Empty means bucket root."
   type        = string
