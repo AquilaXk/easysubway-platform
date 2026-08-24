@@ -19,13 +19,15 @@ const approvedDecisions = [
   ["CKV_OCI_10", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약", "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음", "40", "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거", "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제"],
   ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 datapack delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
   ["CKV_OCI_9", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 object data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제"],
+  ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.map_catalog", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 map/catalog signed-current delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 map/catalog object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
+  ["CKV_OCI_9", "datapack_object_storage.tf", "oci_objectstorage_bucket.map_catalog", "ACCEPTED_BOUNDED_RISK", "현재 map/catalog bucket은 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 map/catalog object data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제"],
   ["CKV_OCI_2", "storage.tf", "oci_core_volume.data[0]", "NOT_APPLICABLE_WITH_REASON", "pinned Checkov 3.3.9는 deprecated direct backup_policy_id만 검사하고 existing-volume assignment를 소유한 별도 Terraform state root를 상관하지 못함", "scanner 단독 결과는 exact cross-root assignment 존재를 분류하지 못하므로 deterministic two-root ownership contract와 live assignment read-back이 필요함", "48", "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소", "scanner가 cross-root state relationship을 검증하거나 volume과 assignment가 하나의 안전한 managed state로 통합되면 CKV_OCI_2 decision 삭제"],
   ["CKV_OCI_3", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 block-volume data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, volume kms_key_id plan evidence, CKV_OCI_3 0, policy decision 삭제"],
 ].map(([ruleId, file, resourceAddress, disposition, reason, impact, issue, ownerIssueTitle, removalCondition]) => ({
   scanner: "CHECKOV", ruleId, rootId, path: `${rootPath}/${file}`, resourceAddress, resourceIdentitySource: "RESOURCE", disposition, reason, impact,
   ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2026-11-07",
 }));
-const currentCheckovFindings = approvedDecisions.map(({ ruleId, path, resourceAddress }) => ({ ruleId, path: path.slice(`${rootPath}/`.length), resourceAddress }));
+const currentCheckovFindings = approvedDecisions.map(({ ruleId, path, resourceAddress }) => ({ ruleId, path: path.slice(`${rootPath}/`.length), resourceAddress, lineRange: resourceAddress === "oci_objectstorage_bucket.datapack" ? [5, 13] : resourceAddress === "oci_objectstorage_bucket.map_catalog" ? [22, 30] : undefined }));
 
 function write(directory, path, value) { writeFileSync(join(directory, path), value); }
 function tflintSarif(ruleId = null, uri = "versions.tf", rule = ruleId ? { id: ruleId, name: ruleId } : null, region = { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 }) {
@@ -41,15 +43,15 @@ function tflintSarifWithResults(results) {
     { tool: { driver: { name: "tflint-errors", version: "0.64.0", informationUri: tflintInfoUri, rules: [] } }, results: [] },
   ] });
 }
-function checkovSarifRecords(records, driverName = "Checkov", rules = records.map(({ ruleId }) => ({ id: ruleId, name: ruleId }))) {
-  return JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: driverName, version: "3.3.9", rules } }, results: records.map(({ ruleId, path }) => ({ ruleId, ruleIndex: rules.findIndex((rule) => rule.id === ruleId), locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] })) }] });
+function checkovSarifRecords(records, driverName = "Checkov", rules = [...new Map(records.map(({ ruleId }) => [ruleId, { id: ruleId, name: ruleId }])).values()]) {
+  return JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: driverName, version: "3.3.9", rules } }, results: records.map(({ ruleId, path, lineRange }) => ({ ruleId, ruleIndex: rules.findIndex((rule) => rule.id === ruleId), locations: [{ physicalLocation: { artifactLocation: { uri: path }, ...(lineRange === undefined ? {} : { region: { startLine: lineRange[0], endLine: lineRange[1] } }) } }] })) }] });
 }
 function checkovSarif(ruleId = null, uri = "datapack_object_storage.tf", driverName = "Checkov", rules = ruleId ? [{ id: ruleId, name: ruleId }] : []) {
   return checkovSarifRecords(ruleId ? [{ ruleId, path: uri }] : [], driverName, rules);
 }
 function checkovJsonRecords(records) {
   return JSON.stringify({ check_type: "terraform", results: {
-    passed_checks: [], failed_checks: records.map(({ ruleId, path, resourceAddress }) => ({ check_id: ruleId, check_result: { result: "FAILED" }, file_path: `/${path}`, resource_address: null, resource: resourceAddress })), skipped_checks: [], parsing_errors: [],
+    passed_checks: [], failed_checks: records.map(({ ruleId, path, resourceAddress, lineRange }) => ({ check_id: ruleId, check_result: { result: "FAILED" }, file_path: `/${path}`, resource_address: null, resource: resourceAddress, ...(lineRange === undefined ? {} : { file_line_range: lineRange }) })), skipped_checks: [], parsing_errors: [],
   }, summary: { passed: 0, failed: records.length, skipped: 0, parsing_errors: 0, resource_count: 1, checkov_version: "3.3.9" }, url: null });
 }
 function checkovJson(ruleId = null, path = "/datapack_object_storage.tf", resourceAddress = null, resource = "oci_objectstorage_bucket.datapack") {
@@ -138,7 +140,7 @@ test("tracked source hashing uses only the fixed Git binary", () => {
   assert.equal(/process\.env\.GIT(?:_|\b)/.test(staticAnalysisRunnerSource), false);
 });
 
-test("only the five approved current Checkov identities normalize away from FIX_REQUIRED", () => {
+test("only the approved current Checkov identities normalize away from FIX_REQUIRED", () => {
   const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-unclassified-"));
   try {
     recordToolChecks(directory);
@@ -250,6 +252,31 @@ test("Checkov joins JSON resource identity to exactly one normalized SARIF resul
       write(directory, "checkov-root.json", checkovJson("CKV_OCI_10", "/datapack_object_storage.tf"));
       assert.throws(() => recordScan({ reportDirectory: directory, scanner: "CHECKOV", rootId, rootPath, exit: 1, rawSarifPath: "checkov-root.sarif", structuredJsonPath: "checkov-root.json" }), /unsafe/);
     }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Checkov disambiguates same rule and path only by exact positive line ranges", () => {
+  const directory = mkdtempSync(join(testReportRoot, "terraform-static-analysis-checkov-ranges-"));
+  const records = [
+    { ruleId: "CKV_OCI_7", path: "datapack_object_storage.tf", resourceAddress: "oci_objectstorage_bucket.datapack", lineRange: [5, 13] },
+    { ruleId: "CKV_OCI_7", path: "datapack_object_storage.tf", resourceAddress: "oci_objectstorage_bucket.map_catalog", lineRange: [22, 30] },
+  ];
+  try {
+    const sarif = JSON.parse(checkovSarifRecords(records, "Checkov", [{ id: "CKV_OCI_7", name: "CKV_OCI_7" }]));
+    for (const [index, item] of records.entries()) sarif.runs[0].results[index].locations[0].physicalLocation.region = { startLine: item.lineRange[0], endLine: item.lineRange[1] };
+    const json = JSON.parse(checkovJsonRecords(records));
+    for (const [index, item] of records.entries()) json.results.failed_checks[index].file_line_range = item.lineRange;
+    write(directory, "checkov-root.sarif", JSON.stringify(sarif));
+    write(directory, "checkov-root.json", JSON.stringify(json));
+    assert.doesNotThrow(() => recordScan({ reportDirectory: directory, scanner: "CHECKOV", rootId, rootPath, exit: 1, rawSarifPath: "checkov-root.sarif", structuredJsonPath: "checkov-root.json" }));
+
+    write(directory, "checkov-root.sarif", checkovSarifRecords([records[0]]));
+    write(directory, "checkov-root.json", checkovJsonRecords([{ ...records[0], lineRange: [22, 30] }]));
+    assert.throws(() => recordScan({ reportDirectory: directory, scanner: "CHECKOV", rootId: "unique-range-mismatch", rootPath, exit: 1, rawSarifPath: "checkov-root.sarif", structuredJsonPath: "checkov-root.json" }), /identity join/);
+
+    write(directory, "checkov-root.sarif", checkovSarifRecords(records));
+    write(directory, "checkov-root.json", checkovJsonRecords([{ ...records[0], lineRange: undefined }, records[1]]));
+    assert.throws(() => recordScan({ reportDirectory: directory, scanner: "CHECKOV", rootId: "missing-ambiguous-range", rootPath, exit: 1, rawSarifPath: "checkov-root.sarif", structuredJsonPath: "checkov-root.json" }), /identity join/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

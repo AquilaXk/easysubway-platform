@@ -146,6 +146,8 @@ const approvedSuppressionRows = [
   ["CKV_OCI_10", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "ObjectReadWithoutList로 known immutable datapack object GET만 허용하고 bucket list는 금지하는 현재 제품 전달 계약", "object URL을 아는 비인증 사용자가 해당 datapack object를 읽고 재전달할 수 있음", "40", "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거", "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제"],
   ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 datapack delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
   ["CKV_OCI_9", "datapack_object_storage.tf", "oci_objectstorage_bucket.datapack", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 object data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제"],
+  ["CKV_OCI_7", "datapack_object_storage.tf", "oci_objectstorage_bucket.map_catalog", "NOT_APPLICABLE_WITH_REASON", "현재 승인된 map/catalog signed-current delivery에는 object event를 소비하는 운영 계약이 없고 event emission만으로 보안·감사 결과가 생성되지 않음", "향후 map/catalog object mutation audit·SIEM·event-driven lifecycle 요구가 생기면 현재 decision이 그 요구를 충족하지 못함", "46", "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision", "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제"],
+  ["CKV_OCI_9", "datapack_object_storage.tf", "oci_objectstorage_bucket.map_catalog", "ACCEPTED_BOUNDED_RISK", "현재 map/catalog bucket은 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 map/catalog object data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제"],
   ["CKV_OCI_2", "storage.tf", "oci_core_volume.data[0]", "NOT_APPLICABLE_WITH_REASON", "pinned Checkov 3.3.9는 deprecated direct backup_policy_id만 검사하고 existing-volume assignment를 소유한 별도 Terraform state root를 상관하지 못함", "scanner 단독 결과는 exact cross-root assignment 존재를 분류하지 못하므로 deterministic two-root ownership contract와 live assignment read-back이 필요함", "48", "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소", "scanner가 cross-root state relationship을 검증하거나 volume과 assignment가 하나의 안전한 managed state로 통합되면 CKV_OCI_2 decision 삭제"],
   ["CKV_OCI_3", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 block-volume data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, volume kms_key_id plan evidence, CKV_OCI_3 0, policy decision 삭제"],
 ];
@@ -229,6 +231,13 @@ function readLocation(result) {
   if (!result || typeof result.ruleId !== "string" || !result.ruleId || !Array.isArray(result.locations) || result.locations.length !== 1) fail("SARIF result lacks one exact identity location");
   return normalizeSarifPath(result.locations[0]?.physicalLocation?.artifactLocation?.uri);
 }
+function readCheckovSarifLocation(result) {
+  const path = readLocation(result);
+  const region = result.locations[0]?.physicalLocation?.region;
+  if (region === undefined) return { path, lineRange: null };
+  if (!region || typeof region !== "object" || Array.isArray(region) || !Number.isInteger(region.startLine) || !Number.isInteger(region.endLine) || region.startLine <= 0 || region.endLine <= 0 || region.endLine < region.startLine) fail("Checkov result region is invalid");
+  return { path, lineRange: [region.startLine, region.endLine] };
+}
 function readTflintLocation(result) {
   const path = readLocation(result);
   const region = result.locations[0]?.physicalLocation?.region;
@@ -265,7 +274,7 @@ function parseCheckovSarif(path) {
   const [run] = parsed.sarif.runs;
   validateRun(run, "Checkov", "3.3.9");
   validateRunRules(run);
-  for (const result of run.results) readLocation(result);
+  for (const result of run.results) readCheckovSarifLocation(result);
   return parsed;
 }
 function oneCheckovReport(value) {
@@ -298,7 +307,12 @@ function checkovFailedRecord(record) {
   const hasResourceAddress = typeof record.resource_address === "string" && record.resource_address.length > 0;
   const canUseResource = (record.resource_address === undefined || record.resource_address === null) && typeof record.resource === "string" && record.resource.length > 0;
   if (!hasResourceAddress && !canUseResource) fail("Checkov failed record lacks resource identity");
-  return { ruleId: record.check_id, path, resourceAddress: hasResourceAddress ? record.resource_address : record.resource, resourceIdentitySource: hasResourceAddress ? "RESOURCE_ADDRESS" : "RESOURCE" };
+  let lineRange = null;
+  if (record.file_line_range !== undefined) {
+    if (!Array.isArray(record.file_line_range) || record.file_line_range.length !== 2 || record.file_line_range.some((line) => !Number.isInteger(line) || line <= 0) || record.file_line_range[1] < record.file_line_range[0]) fail("Checkov JSON file_line_range is invalid");
+    lineRange = record.file_line_range;
+  }
+  return { ruleId: record.check_id, path, lineRange, resourceAddress: hasResourceAddress ? record.resource_address : record.resource, resourceIdentitySource: hasResourceAddress ? "RESOURCE_ADDRESS" : "RESOURCE" };
 }
 function failedCheckovRecords(path) {
   const report = oneCheckovReport(readJson(path).value);
@@ -307,12 +321,16 @@ function failedCheckovRecords(path) {
 }
 function checkovFindings(rawSarifPath, rawJsonPath, root) {
   const sarif = parseCheckovSarif(rawSarifPath).sarif;
-  const sarifResults = sarif.runs.flatMap((run) => run.results.map((result) => ({ result, ruleId: result.ruleId, path: readLocation(result) })));
+  const sarifResults = sarif.runs.flatMap((run) => run.results.map((result) => ({ result, ruleId: result.ruleId, ...readCheckovSarifLocation(result) })));
   const { records: json, cleanSummary } = failedCheckovRecords(rawJsonPath);
   if (cleanSummary && sarifResults.length !== 0) fail("Checkov clean summary requires zero SARIF results");
   const used = new Set();
   const findings = json.map((item) => {
-    const matches = sarifResults.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => candidate.ruleId === item.ruleId && candidate.path === item.path);
+    const baseMatches = sarifResults.map((candidate, index) => ({ candidate, index })).filter(({ candidate }) => candidate.ruleId === item.ruleId && candidate.path === item.path);
+    const exactLineRange = ({ candidate }) => item.lineRange !== null && candidate.lineRange !== null && candidate.lineRange[0] === item.lineRange[0] && candidate.lineRange[1] === item.lineRange[1];
+    const matches = baseMatches.length === 1
+      ? baseMatches.filter(({ candidate }) => item.lineRange === null || candidate.lineRange === null || exactLineRange({ candidate }))
+      : baseMatches.filter(exactLineRange);
     if (matches.length !== 1) fail("Checkov JSON/SARIF identity join is missing or ambiguous");
     if (used.has(matches[0].index)) fail("Checkov SARIF evidence is ambiguously reused");
     used.add(matches[0].index);
