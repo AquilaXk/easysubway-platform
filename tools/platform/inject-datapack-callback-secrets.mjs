@@ -6,11 +6,12 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const workflowTokenKey = "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN";
@@ -41,6 +42,26 @@ function regularFileSnapshot(path) {
     fail("dotenv input must be a regular non-symlink dotenv file");
   }
   return metadata;
+}
+
+function deploymentEnvPath(environment) {
+  const runnerTemp = environment.RUNNER_TEMP;
+  if (typeof runnerTemp !== "string" || runnerTemp.length === 0
+    || !isAbsolute(runnerTemp) || resolve(runnerTemp) !== runnerTemp) {
+    fail("RUNNER_TEMP must be a nonempty absolute path resolving to itself");
+  }
+  let metadata;
+  let resolved;
+  try {
+    metadata = lstatSync(runnerTemp, { bigint: true });
+    resolved = realpathSync(runnerTemp);
+  } catch {
+    fail("RUNNER_TEMP must be an existing regular non-symlink directory");
+  }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory() || resolved !== runnerTemp) {
+    fail("RUNNER_TEMP must be an existing regular non-symlink directory resolving to itself");
+  }
+  return join(runnerTemp, "deployment.env");
 }
 
 function sameFileSnapshot(before, after) {
@@ -95,19 +116,20 @@ function atomicReplace(path, contents, expectedSnapshot) {
   }
 }
 
-export function inject(path, environment = process.env) {
+export function inject(environment = process.env) {
   const values = {
     workflowToken: requiredSecret(environment, workflowTokenKey, { rejectTrimWhitespace: true }),
     callbackHmac: requiredSecret(environment, callbackHmacKey, { minimumUtf8Bytes: 32 }),
   };
+  const path = deploymentEnvPath(environment);
   const source = stableRead(path);
   atomicReplace(path, replacementContents(source.contents, values), source.snapshot);
 }
 
 if (import.meta.url === new URL(process.argv[1], "file:").href) {
   try {
-    if (process.argv.length !== 3) fail("usage: inject-datapack-callback-secrets.mjs <dotenv-path>");
-    inject(process.argv[2]);
+    if (process.argv.length !== 2) fail("usage: inject-datapack-callback-secrets.mjs");
+    inject();
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

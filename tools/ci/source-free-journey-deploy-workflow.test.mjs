@@ -83,6 +83,8 @@ test("K3s injects DataPack callback secrets only for DEPLOY before environment p
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN"), 1);
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY"), 1);
   assert.match(workflow.slice(writeIndex, prepareIndex), /if \[\[ "\$\{MODE\}" == "DEPLOY" \]\]; then/);
+  assert.match(workflow.slice(writeIndex, prepareIndex), /node tools\/platform\/inject-datapack-callback-secrets\.mjs\n/);
+  assert.doesNotMatch(workflow, /inject-datapack-callback-secrets\.mjs "\$\{RUNNER_TEMP\}/);
   assert.ok(writeIndex < injectionIndex && injectionIndex < prepareIndex);
   for (const productionMutation of [
     "${deploy_root}/source-free-inputs", "${deploy_root}/release-receipts",

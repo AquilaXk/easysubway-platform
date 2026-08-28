@@ -135,7 +135,7 @@ jobs:
           printf '%s' "${EASYSUBWAY_ENV}" > "${RUNNER_TEMP}/deployment.env"
           chmod 600 "${RUNNER_TEMP}/deployment.env"
           if [[ "${MODE}" == "DEPLOY" ]]; then
-            node tools/platform/inject-datapack-callback-secrets.mjs "${RUNNER_TEMP}/deployment.env"
+            node tools/platform/inject-datapack-callback-secrets.mjs
           fi
           tools/deploy/prepare-deployment-env.sh \
             "${RUNNER_TEMP}/deployment.env" \
