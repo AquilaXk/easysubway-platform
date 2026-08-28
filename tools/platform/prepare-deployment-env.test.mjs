@@ -29,6 +29,14 @@ const datapackWorkflowToken = "synthetic-datapack-workflow-token";
 const datapackCallbackHmac = "synthetic-datapack-callback-hmac-key-at-least-32-bytes";
 const sharedSecret = "shared-report-secret-value-with-enough-entropy";
 const legacySecret = "sensitive-legacy-receipt-pepper-with-enough-entropy";
+const journeySearchTimeoutKey = "EASYSUBWAY_JOURNEY_SEARCH_TIMEOUT";
+const journeyMaxSearchesPerSessionKey = "EASYSUBWAY_JOURNEY_MAX_SEARCHES_PER_SESSION";
+const journeySessionCertificateSha256Key = "EASYSUBWAY_JOURNEY_SESSION_CERTIFICATE_SHA256";
+const journeySettings = {
+  [journeySearchTimeoutKey]: "PT2S",
+  [journeyMaxSearchesPerSessionKey]: "12",
+  [journeySessionCertificateSha256Key]: "c".repeat(43),
+};
 
 test("required Platform CI owns the canonical report-secret preparation contract", () => {
   const allowlist = readFileSync(backendAllowlist, "utf8").split("\n").filter(Boolean);
@@ -56,6 +64,42 @@ test("canonical report and DataPack callback secrets are preserved without the l
     assert.doesNotMatch(backendEnv, new RegExp(`^${legacyReceiptKey}=`, "m"));
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("Journey V3 production settings are required and projected exactly once", () => {
+  const allowlist = readFileSync(backendAllowlist, "utf8").split("\n").filter(Boolean);
+  for (const key of Object.keys(journeySettings)) {
+    assert.equal(allowlist.filter((entry) => entry === key).length, 1);
+  }
+
+  const fixture = makeFixture(journeySettings);
+  try {
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const backendEnv = readFileSync(join(fixture.outputDirectory, "backend.env"), "utf8");
+    for (const [key, value] of Object.entries(journeySettings)) {
+      assert.equal(count(backendEnv, `${key}=${value}`), 1);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("missing Journey V3 production settings fail before output publication", () => {
+  for (const key of Object.keys(journeySettings)) {
+    const fixture = makeFixture({ ...journeySettings, [key]: undefined });
+    try {
+      const result = run(fixture);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, new RegExp(key));
+      assert.deepEqual(
+        existsSync(fixture.outputDirectory) ? readdirSync(fixture.outputDirectory) : [],
+        [],
+      );
+    } finally {
+      fixture.cleanup();
+    }
   }
 });
 
@@ -158,6 +202,7 @@ function makeFixture(overrides = {}) {
     ["EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET", "a".repeat(43)],
     ["EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256", "b".repeat(43)],
     ["EASYSUBWAY_PLAY_INTEGRITY_CREDENTIALS_BASE64", "synthetic-play-integrity"],
+    ...Object.entries(journeySettings),
     ["EASYSUBWAY_ROUTE_V2_TRUSTED_PROXY_CIDR", "172.16.0.0/12"],
     ["EASYSUBWAY_ROUTE_V2_SESSION_RATE_PER_MINUTE", "5"],
     ["EASYSUBWAY_ROUTE_V2_SESSION_BURST", "2"],
