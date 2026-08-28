@@ -23,6 +23,10 @@ const legacyReceiptKey = "EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER";
 const intentKey = "EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY";
 const strongReceipt = "canonical-receipt-pepper-32-bytes-minimum";
 const strongIntent = "canonical-upload-intent-key-32-bytes-minimum";
+const datapackWorkflowTokenKey = "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN";
+const datapackCallbackHmacKey = "EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY";
+const datapackWorkflowToken = "synthetic-datapack-workflow-token";
+const datapackCallbackHmac = "synthetic-datapack-callback-hmac-key-at-least-32-bytes";
 const sharedSecret = "shared-report-secret-value-with-enough-entropy";
 const legacySecret = "sensitive-legacy-receipt-pepper-with-enough-entropy";
 
@@ -39,7 +43,7 @@ test("required Platform CI owns the canonical report-secret preparation contract
   );
 });
 
-test("two distinct canonical report secrets are preserved without the legacy alias", () => {
+test("canonical report and DataPack callback secrets are preserved without the legacy alias", () => {
   const fixture = makeFixture();
   try {
     const result = run(fixture);
@@ -47,6 +51,8 @@ test("two distinct canonical report secrets are preserved without the legacy ali
     const backendEnv = readFileSync(join(fixture.outputDirectory, "backend.env"), "utf8");
     assert.match(backendEnv, new RegExp(`^${receiptKey}=${strongReceipt}$`, "m"));
     assert.match(backendEnv, new RegExp(`^${intentKey}=${strongIntent}$`, "m"));
+    assert.equal(count(backendEnv, `${datapackWorkflowTokenKey}=${datapackWorkflowToken}`), 1);
+    assert.equal(count(backendEnv, `${datapackCallbackHmacKey}=${datapackCallbackHmac}`), 1);
     assert.doesNotMatch(backendEnv, new RegExp(`^${legacyReceiptKey}=`, "m"));
   } finally {
     fixture.cleanup();
@@ -116,7 +122,9 @@ test("missing weak legacy or equal report secrets fail before output publication
       const result = run(fixture);
       assert.equal(result.status, 1, JSON.stringify({ overrides: Object.keys(overrides), result }));
       assert.match(result.stderr, new RegExp(expectedIdentity));
-      for (const secret of [strongReceipt, strongIntent, sharedSecret, legacySecret]) {
+      for (const secret of [
+        strongReceipt, strongIntent, datapackWorkflowToken, datapackCallbackHmac, sharedSecret, legacySecret,
+      ]) {
         assert.equal(result.stderr.includes(secret), false);
       }
       assert.deepEqual(
@@ -162,6 +170,8 @@ function makeFixture(overrides = {}) {
     ["EASYSUBWAY_TRUSTED_PROXY_CIDRS", "172.16.0.0/12"],
     [receiptKey, strongReceipt],
     [intentKey, strongIntent],
+    [datapackWorkflowTokenKey, datapackWorkflowToken],
+    [datapackCallbackHmacKey, datapackCallbackHmac],
   ]);
   for (const [key, value] of Object.entries(overrides)) {
     if (value === undefined) values.delete(key);
@@ -188,4 +198,8 @@ function run(fixture) {
     encoding: "utf8",
     stdio: "pipe",
   });
+}
+
+function count(value, token) {
+  return value.split(token).length - 1;
 }

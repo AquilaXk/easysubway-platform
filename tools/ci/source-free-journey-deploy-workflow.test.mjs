@@ -54,7 +54,7 @@ test("fixed-host workflow is PREVIEW-only and K3s is the sole Journey DEPLOY own
   assert.doesNotMatch(k3sWorkflow, /run-fixed-host-journey-activation\.mjs/);
   assert.doesNotMatch(k3sWorkflow, /docker compose/);
   assert.equal(count(`${workflow}\n${k3sWorkflow}`, "--mode DEPLOY"), 0, "only K3s MODE dispatch may own DEPLOY");
-  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 3, "K3s owns the sole DEPLOY execution branch");
+  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 5, "K3s owns the sole DEPLOY execution branch and conditional callback-secret exposure");
 });
 
 test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or mutable artifact lookup", () => {
@@ -71,11 +71,31 @@ test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or
   assert.equal(count(workflow, "actions/checkout@"), 1);
 });
 
+test("K3s injects DataPack callback secrets only for DEPLOY before environment preparation", () => {
+  const workflow = readFileSync(k3sWorkflowUrl, "utf8");
+  const injection = "inject-datapack-callback-secrets.mjs";
+  const injectionIndex = workflow.indexOf(injection);
+  const writeIndex = workflow.indexOf("printf '%s' \"${EASYSUBWAY_ENV}\" > \"${RUNNER_TEMP}/deployment.env\"");
+  const prepareIndex = workflow.indexOf("tools/deploy/prepare-deployment-env.sh");
+
+  assert.notEqual(injectionIndex, -1);
+  assert.equal(count(workflow, injection), 1);
+  assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN"), 1);
+  assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY"), 1);
+  assert.match(workflow.slice(writeIndex, prepareIndex), /if \[\[ "\$\{MODE\}" == "DEPLOY" \]\]; then/);
+  assert.ok(writeIndex < injectionIndex && injectionIndex < prepareIndex);
+  for (const productionMutation of [
+    "${deploy_root}/source-free-inputs", "${deploy_root}/release-receipts",
+    "acquire-platform-contract-bundle.mjs",
+  ]) assert.ok(prepareIndex < workflow.indexOf(productionMutation), productionMutation);
+});
+
 test("Platform CI owns the exact new focused contracts", () => {
   const ci = readFileSync(ciUrl, "utf8");
   for (const command of [
     "node --test tools/platform/bind-journey-release-candidate-v2.test.mjs",
     "node --test tools/platform/prepare-source-free-fixed-host-deployment.test.mjs",
+    "node --test tools/platform/inject-datapack-callback-secrets.test.mjs",
     "node --test tools/ci/source-free-journey-deploy-workflow.test.mjs",
   ]) assert.equal(count(ci, command), 1, command);
 });

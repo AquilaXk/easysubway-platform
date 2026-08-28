@@ -95,6 +95,8 @@ jobs:
           GH_TOKEN: ${{ secrets.EASYSUBWAY_RELEASE_ARTIFACTS_READ_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           EASYSUBWAY_ENV: ${{ secrets.EASYSUBWAY_ENV }}
+          EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN || '' }}
+          EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY || '' }}
           MODE: ${{ inputs.mode }}
           CONFIGURED_DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
           NODE_INTERNAL_IP: ${{ vars.PRODUCTION_NODE_INTERNAL_IP }}
@@ -127,6 +129,19 @@ jobs:
           [[ "$(sha256sum "${data_archives[0]}" | cut -d ' ' -f 1)" == "${DATA_ARCHIVE_SHA256}" ]]
           [[ -n "${NODE_INTERNAL_IP}" && -n "${PUBLIC_BASE_URL}" && -n "${DEPLOY_COMPOSE_PROJECT}" ]]
 
+          mkdir -p "${RUNNER_TEMP}/backend" "${RUNNER_TEMP}/data" "${RUNNER_TEMP}/prepared"
+          unzip -q "${backend_archives[0]}" -d "${RUNNER_TEMP}/backend"
+          unzip -q "${data_archives[0]}" -d "${RUNNER_TEMP}/data"
+          printf '%s' "${EASYSUBWAY_ENV}" > "${RUNNER_TEMP}/deployment.env"
+          chmod 600 "${RUNNER_TEMP}/deployment.env"
+          if [[ "${MODE}" == "DEPLOY" ]]; then
+            node tools/platform/inject-datapack-callback-secrets.mjs "${RUNNER_TEMP}/deployment.env"
+          fi
+          tools/deploy/prepare-deployment-env.sh \
+            "${RUNNER_TEMP}/deployment.env" \
+            tools/deploy/compose-server-env.allowlist \
+            tools/deploy/backend-app-env.allowlist \
+            "${RUNNER_TEMP}/prepared"
           if [[ "${MODE}" == "PREVIEW" ]]; then
             deploy_root="${RUNNER_TEMP}/source-free-k3s-preview"
           else
@@ -136,21 +151,11 @@ jobs:
           source_free_root="${deploy_root}/source-free-inputs/source-free-k3s-${GITHUB_RUN_ID}"
           platform_contract_root="${deploy_root}/source-free-inputs/platform-contracts-${GITHUB_RUN_ID}"
           operation_directory="${deploy_root}/release-receipts/source-free-k3s-${GITHUB_RUN_ID}"
-          mkdir -p "${RUNNER_TEMP}/backend" "${RUNNER_TEMP}/data" "${RUNNER_TEMP}/prepared" \
-            "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
+          mkdir -p "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
           chmod 700 "${deploy_root}/source-free-inputs" "${deploy_root}/release-receipts"
-          unzip -q "${backend_archives[0]}" -d "${RUNNER_TEMP}/backend"
-          unzip -q "${data_archives[0]}" -d "${RUNNER_TEMP}/data"
           node tools/platform/acquire-platform-contract-bundle.mjs \
             --output-root "${platform_contract_root}" \
             > "${RUNNER_TEMP}/platform-contract-bundle-acquisition.json"
-          printf '%s' "${EASYSUBWAY_ENV}" > "${RUNNER_TEMP}/deployment.env"
-          chmod 600 "${RUNNER_TEMP}/deployment.env"
-          tools/deploy/prepare-deployment-env.sh \
-            "${RUNNER_TEMP}/deployment.env" \
-            tools/deploy/compose-server-env.allowlist \
-            tools/deploy/backend-app-env.allowlist \
-            "${RUNNER_TEMP}/prepared"
           node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
             --repository "${GITHUB_REPOSITORY}" \
             --ref "${GITHUB_REF}" \
