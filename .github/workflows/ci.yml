@@ -64,6 +64,7 @@ jobs:
           node --test tools/platform/bind-journey-release-candidate-v2.test.mjs
           node --test tools/platform/prepare-source-free-fixed-host-deployment.test.mjs
           node --test tools/platform/source-free-k3s-deployment.test.mjs
+          node --test tools/platform/inject-datapack-callback-secrets.test.mjs
           node --test tools/ci/source-free-journey-deploy-workflow.test.mjs
           node --test tools/platform/stage-journey-release-tuple.test.mjs
           node --test tools/platform/read-staged-journey-release-tuple.test.mjs
