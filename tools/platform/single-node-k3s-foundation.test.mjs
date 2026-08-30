@@ -109,6 +109,10 @@ test("renderer produces deterministic source-free candidate objects and an inact
     host: "journey-object-storage.easysubway-journey.svc",
     port: 9000,
   });
+  assert.equal(
+    rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION,
+    input.releaseTuple.deploymentRevision,
+  );
   assert.equal(rendered.secretPlan.immutable, true);
   assert.equal(rendered.secretPlan.requiredKeyProjection, "EXACT_VALIDATED_BACKEND_ENV_ALLOWLIST");
   assert.equal(rendered.secretPlan.serializedValueCount, 0);

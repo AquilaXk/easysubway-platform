@@ -352,6 +352,7 @@ function render(input) {
       EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST: input.releaseTuple.backendImageDigest,
       EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_CONFIG_SHA256: digestHex(input.releaseTuple.backendConfigDigest),
       EASYSUBWAY_JOURNEY_V3_READINESS_JOURNEY_CONTRACT_SHA256: digestHex(input.releaseTuple.journeyContractDigest),
+      EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION: input.releaseTuple.deploymentRevision,
       EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: String(input.trafficGeneration),
       EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: deploymentName,
     },
