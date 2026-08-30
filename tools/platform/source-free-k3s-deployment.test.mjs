@@ -311,10 +311,11 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
   assert.doesNotMatch(JSON.stringify(result), /private-test-value/);
   assert.doesNotMatch(JSON.stringify(k3sRequest), /private-test-value/);
 });
-test("activation Secret injects the protected readiness token without exposing it", async () => {
+test("activation keeps trusted readiness identity in ConfigMap and secrets out of evidence", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-protected-secret-"));
   const protectedToken = "p".repeat(32);
   const untrustedToken = "u".repeat(32);
+  const untrustedRevision = "0".repeat(40);
   const activationRequest = request(root);
   activationRequest.platformBundle = await writePlatformBundle(root);
   delete activationRequest.platformBundle.bundleRoot;
@@ -326,6 +327,7 @@ test("activation Secret injects the protected readiness token without exposing i
     "DATABASE_PASSWORD=private-test-value",
     "SAFE_FLAG=true",
     `EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN=${untrustedToken}`,
+    `EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION=${untrustedRevision}`,
     "",
   ].join("\n");
   const candidateInput = {
@@ -347,7 +349,14 @@ test("activation Secret injects the protected readiness token without exposing i
       tupleSha256: activationRequest.releaseTuple.tupleSha256,
       candidateToken: "candidate-23",
     },
-    configPlan: { name: "journey-config-23", overrides: { SAFE_CONFIG: "true" } },
+    configPlan: {
+      name: "journey-config-23",
+      overrides: {
+        SAFE_CONFIG: "true",
+        EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION:
+          activationRequest.releaseTuple.deploymentRevision,
+      },
+    },
     secretPlan: { name: "journey-secret-23" },
     candidateObjects: [],
     activationPlan: {
@@ -384,7 +393,10 @@ test("activation Secret injects the protected readiness token without exposing i
     },
   }]);
   for (const value of [activationRequest, verified, candidate]) {
-    assert.doesNotMatch(JSON.stringify(value), new RegExp(`${protectedToken}|${untrustedToken}`));
+    assert.doesNotMatch(
+      JSON.stringify(value),
+      new RegExp(`${protectedToken}|${untrustedToken}|${untrustedRevision}`),
+    );
   }
   const ci = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.equal(ci.split("node --test tools/platform/source-free-k3s-deployment.test.mjs").length - 1, 1);

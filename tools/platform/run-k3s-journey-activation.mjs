@@ -62,6 +62,7 @@ const OVERRIDE_KEYS = new Set([
   "EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST",
   "EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_CONFIG_SHA256",
   "EASYSUBWAY_JOURNEY_V3_READINESS_JOURNEY_CONTRACT_SHA256",
+  "EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION",
   "EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION",
   "EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID",
   "EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN",
@@ -778,6 +779,8 @@ function validateRender(value, request) {
   if (value?.schemaVersion !== "PLATFORM_K3S_CANDIDATE_RENDER_V1" ||
     value?.artifactKind !== "platform-k3s-candidate-render" ||
     value?.releaseIdentity?.tupleSha256 !== request.releaseTuple.tupleSha256 ||
+    value?.configPlan?.overrides?.EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION !==
+      request.releaseTuple.deploymentRevision ||
     value?.activationPlan?.requiredCasField !== "metadata.resourceVersion" ||
     value?.activationPlan?.applyDuringCandidatePreparation !== false ||
     value?.activationPlan?.activeServiceTemplate?.spec?.ports?.[0]?.nodePort !== 32080 ||
