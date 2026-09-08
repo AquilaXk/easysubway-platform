@@ -9,7 +9,7 @@
       "providers": [
         {
           "source": "registry.terraform.io/oracle/oci",
-          "constraint": "~> 8.8"
+          "constraint": "~> 9.0"
         }
       ],
       "backendDisposition": "DISABLED_FOR_CI",
