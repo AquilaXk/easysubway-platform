@@ -173,7 +173,7 @@ services:
         condition: service_healthy
 
   route-v2-gateway:
-    image: nginx:1.31.4-alpine-slim
+    image: nginx:1.31.5-alpine-slim
     container_name: easysubway-route-v2-gateway
     restart: unless-stopped
     user: "10001:10001"
@@ -310,7 +310,7 @@ services:
       start_period: 20s
 
   grafana:
-    image: grafana/grafana:13.2.0
+    image: grafana/grafana:13.2.1
     container_name: easysubway-grafana
     profiles:
       - observability
