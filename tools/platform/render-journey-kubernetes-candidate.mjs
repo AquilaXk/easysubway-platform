@@ -322,6 +322,7 @@ function networkPolicy(input) {
       egress: [
         { to: [{ ipBlock: { cidr: `${input.nodeInternalIp}/32` } }], ports: [{ protocol: "TCP", port: 15432 }, { protocol: "TCP", port: 9000 }] },
         { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] },
+        { to: [{ ipBlock: { cidr: "0.0.0.0/0" } }], ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 80 }] },
       ],
     },
   };

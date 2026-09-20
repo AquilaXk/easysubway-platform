@@ -190,6 +190,12 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.equal(postgresSlice.ports[0].port, 15432);
   assert.equal(objectSlice.ports[0].port, 9000);
 
+  const networkPolicy = objects.find(({ kind }) => kind === "NetworkPolicy");
+  assert.ok(networkPolicy.spec.egress.some((rule) =>
+    rule.to?.some((target) => target.ipBlock?.cidr === "0.0.0.0/0") &&
+    rule.ports?.some((port) => port.port === 443),
+  ));
+
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.type, "NodePort");
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.ports[0].nodePort, 32080);
   assert.deepEqual(rendered.activationPlan.nodePortAddresses, ["127.0.0.0/8"]);
