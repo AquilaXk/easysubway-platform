@@ -773,3 +773,45 @@ test("activateCandidate sends tupleSha256 as activationRequestIdentity matching 
   assert.equal(activation.activeReadinessEvidenceDigest, `sha256:${"e".repeat(64)}`);
 });
 
+test("drainOldWorkloads queries running Compose services with base compose and backend image and stops them", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-drain-workloads-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  const commands = [];
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args, options) => {
+      commands.push({ command, args, options });
+      if (command === "docker" && args.includes("ps")) {
+        return { stdout: "backend\n", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  const drain = await effects.drainOldWorkloads({
+    candidate: { candidateToken: "c-1" },
+    preparedActiveService: {},
+  });
+  assert.equal(drain.signal, "SIGTERM");
+  assert.equal(drain.stopGracePeriodSeconds, 30);
+  assert.equal(drain.oldWorkloadCount, 1);
+  const psCall = commands.find((entry) => entry.command === "docker" && entry.args.includes("ps"));
+  assert.ok(psCall);
+  assert.ok(!psCall.args.includes(activationRequest.candidateComposePath));
+  assert.ok(!psCall.args.includes("--profile"));
+  assert.ok(psCall.args.includes(activationRequest.baseComposePath));
+  assert.equal(
+    psCall.options.env.EASYSUBWAY_BACKEND_IMAGE,
+    `ghcr.io/aquilaxk/easysubway-backend@${activationRequest.releaseTuple.backendImageDigest}`,
+  );
+  assert.equal(psCall.options.env.EASYSUBWAY_BACKEND_ENV_FILE, activationRequest.backendEnvPath);
+  const stopCall = commands.find((entry) => entry.command === "docker" && entry.args.includes("stop"));
+  assert.ok(stopCall);
+  assert.ok(stopCall.args.includes("backend"));
+  assert.equal(stopCall.options.timeoutMs, 35_000);
+});
+

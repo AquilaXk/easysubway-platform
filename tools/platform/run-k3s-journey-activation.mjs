@@ -665,11 +665,13 @@ export function createK3sJourneyActivationEffects({
         "compose", "--project-name", request.projectName,
         "--env-file", request.composeEnvPath,
         "-f", request.baseComposePath,
-        "-f", request.candidateComposePath,
-        "--profile", "journey-candidate",
       ];
       const composeOptions = {
-        env: { ...process.env, EASYSUBWAY_BACKEND_ENV_FILE: request.backendEnvPath },
+        env: {
+          ...process.env,
+          EASYSUBWAY_BACKEND_ENV_FILE: request.backendEnvPath,
+          EASYSUBWAY_BACKEND_IMAGE: `ghcr.io/aquilaxk/easysubway-backend@${request.releaseTuple.backendImageDigest}`,
+        },
       };
       const running = parseRunningComposeServices((await commandRunner("docker", [
         ...composePrefix, "ps", "--services", "--status", "running",
@@ -1051,7 +1053,7 @@ async function openPortForward({ command, args }) {
 
 class HostCommandError extends Error {
   constructor(command, code, stderr) {
-    super(`host command failed: ${command}`);
+    super(`host command failed: ${command}${stderr ? `: ${stderr.trim()}` : ""}`);
     this.name = "HostCommandError";
     this.code = code;
     this.stderr = stderr;
