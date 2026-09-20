@@ -688,6 +688,7 @@ test("activation normalizes quoted public key PEM and injects startup bundle pro
   const backendEnvironment = [
     `EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM=${rawPem}`,
     "EASYSUBWAY_TIMETABLE_SEED_ENABLED=true",
+    "EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX=true",
     "SAFE_FLAG=true",
     "",
   ].join("\n");
@@ -724,5 +725,6 @@ test("activation normalizes quoted public key PEM and injects startup bundle pro
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM, expectedPem);
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_KEY_ID, "test-key-v1");
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_TIMETABLE_SEED_ENABLED, "false");
+  assert.equal(createdSecrets[0].stringData.EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX, "false");
 });
 

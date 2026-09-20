@@ -376,6 +376,9 @@ export function createK3sJourneyActivationEffects({
       if (candidateEnv.EASYSUBWAY_TIMETABLE_SEED_ENABLED !== undefined) {
         candidateEnv.EASYSUBWAY_TIMETABLE_SEED_ENABLED = "false";
       }
+      if (candidateEnv.EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX !== undefined) {
+        candidateEnv.EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX = "false";
+      }
       const descriptorPath = path.join(
         path.dirname(request.tuplePath),
         "server-route-bundle-publication-descriptor.json",
