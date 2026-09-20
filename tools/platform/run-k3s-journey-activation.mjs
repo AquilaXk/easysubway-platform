@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants, realpathSync } from "node:fs";
 import {
   chmod,
@@ -348,18 +349,64 @@ export function createK3sJourneyActivationEffects({
         immutable: true,
         data: rendered.configPlan.overrides,
       };
+      const candidateEnv = {
+        ...Object.fromEntries(
+          Object.entries(backendEnvironment).filter(([key]) => !OVERRIDE_KEYS.has(key)),
+        ),
+      };
+      if (candidateEnv.EASYSUBWAY_DATASOURCE_URL && rendered.configPlan?.internalEndpoints?.postgres) {
+        const pgEndpoint = rendered.configPlan.internalEndpoints.postgres;
+        candidateEnv.EASYSUBWAY_DATASOURCE_URL = candidateEnv.EASYSUBWAY_DATASOURCE_URL.replace(
+          /:\/\/[^:]+:[0-9]+/,
+          `://${pgEndpoint.host}:${pgEndpoint.port}`,
+        );
+      }
+      if (candidateEnv.EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT && rendered.configPlan?.internalEndpoints?.objectStorage) {
+        const osEndpoint = rendered.configPlan.internalEndpoints.objectStorage;
+        candidateEnv.EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT =
+          `${osEndpoint.scheme.toLowerCase()}://${osEndpoint.host}:${osEndpoint.port}`;
+      }
+      if (!candidateEnv.EASYSUBWAY_ADMIN_REMEMBER_ME_KEY || candidateEnv.EASYSUBWAY_ADMIN_REMEMBER_ME_KEY.length < 32) {
+        if (candidateEnv.EASYSUBWAY_ADMIN_PASSWORD || candidateEnv.EASYSUBWAY_DATASOURCE_URL) {
+          candidateEnv.EASYSUBWAY_ADMIN_REMEMBER_ME_KEY = createHash("sha256")
+            .update(`${request.releaseTuple?.tupleSha256 ?? "easysubway"}:remember-me`)
+            .digest("hex");
+        }
+      }
+      const descriptorPath = path.join(
+        path.dirname(request.tuplePath),
+        "server-route-bundle-publication-descriptor.json",
+      );
+      try {
+        const descriptorBytes = await readStableRegularFile(descriptorPath);
+        const descriptorJson = JSON.parse(descriptorBytes.toString("utf8"));
+        if (descriptorJson?.publicationReceipt?.locator?.publicBaseUrl) {
+          candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_DESCRIPTOR_BASE64 =
+            descriptorBytes.toString("base64");
+          candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_ACTIVATION_REQUEST_IDENTITY =
+            request.releaseTuple.tupleSha256;
+          candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_TRUSTED_RAW_DESCRIPTOR_BASE_URL =
+            descriptorJson.publicationReceipt.locator.publicBaseUrl;
+          candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_KEY_ID =
+            descriptorJson.manifest?.keyId ?? "production-v1";
+          const signingKey = candidateEnv.EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM;
+          if (signingKey) {
+            candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM =
+              signingKey.trim();
+          }
+        }
+      } catch {
+        // Optional startup route bundle descriptor injection
+      }
+      candidateEnv.EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN = serviceToken;
+
       const secret = {
         apiVersion: "v1",
         kind: "Secret",
         metadata: { name: rendered.secretPlan.name, namespace: NAMESPACE },
         immutable: true,
         type: "Opaque",
-        stringData: {
-          ...Object.fromEntries(
-            Object.entries(backendEnvironment).filter(([key]) => !OVERRIDE_KEYS.has(key)),
-          ),
-          EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN: serviceToken,
-        },
+        stringData: candidateEnv,
       };
       await kubectl(["create", "-f", "-"], { input: jsonBytes(secret) });
       const objects = [
@@ -371,10 +418,28 @@ export function createK3sJourneyActivationEffects({
         kind: "List",
         items: objects,
       }) });
-      await kubectl([
-        "rollout", "status", `deployment/${rendered.activationPlan.candidateDeploymentName}`,
-        "--namespace", NAMESPACE, "--timeout=360s",
-      ], { timeoutMs: 370_000 });
+      try {
+        await kubectl([
+          "rollout", "status", `deployment/${rendered.activationPlan.candidateDeploymentName}`,
+          "--namespace", NAMESPACE, "--timeout=360s",
+        ], { timeoutMs: 370_000 });
+      } catch (rolloutError) {
+        try {
+          const desc = await kubectl([
+            "describe", "deployment", rendered.activationPlan.candidateDeploymentName,
+            "--namespace", NAMESPACE,
+          ]);
+          process.stderr.write(`\n=== CANDIDATE DEPLOYMENT DESCRIBE ===\n${desc.stdout}\n`);
+          const podLogs = await kubectl([
+            "logs", `deployment/${rendered.activationPlan.candidateDeploymentName}`,
+            "--namespace", NAMESPACE, "--tail=100", "--all-containers=true",
+          ]);
+          process.stderr.write(`\n=== CANDIDATE POD LOGS ===\n${podLogs.stdout}\n${podLogs.stderr}\n`);
+        } catch {
+          // ignore diagnostic capture errors
+        }
+        throw rolloutError;
+      }
       return {
         deploymentName: rendered.activationPlan.candidateDeploymentName,
         candidateServiceName: rendered.activationPlan.candidateServiceName,
