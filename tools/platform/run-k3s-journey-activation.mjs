@@ -391,8 +391,9 @@ export function createK3sJourneyActivationEffects({
             descriptorJson.manifest?.keyId ?? "production-v1";
           const signingKey = candidateEnv.EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM;
           if (signingKey) {
-            candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM =
-              signingKey.trim();
+            const pem = normalizePem(signingKey);
+            candidateEnv.EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM = pem;
+            candidateEnv.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM = pem;
           }
         }
       } catch {
@@ -1065,17 +1066,35 @@ async function runCommand(command, args, {
   });
 }
 
-function parseEnvironment(bytes) {
+export function normalizePem(value) {
+  if (typeof value !== "string") return value;
+  let pem = value.trim();
+  if (
+    (pem.startsWith('"') && pem.endsWith('"')) ||
+    (pem.startsWith("'") && pem.endsWith("'"))
+  ) {
+    pem = pem.slice(1, -1).trim();
+  }
+  return pem.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trim();
+}
+
+export function parseEnvironment(bytes) {
   const environment = {};
   const lines = bytes.toString("utf8").split(/\r?\n/);
   for (const line of lines) {
     if (line === "" || line.startsWith("#")) continue;
     const separator = line.indexOf("=");
     const key = line.slice(0, separator);
-    const value = line.slice(separator + 1);
+    let value = line.slice(separator + 1);
     if (separator < 1 || !/^[A-Z][A-Z0-9_]*$/.test(key) ||
       Object.hasOwn(environment, key) || value.includes("\0")) {
       throw new Error("backend environment projection is invalid");
+    }
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
     }
     environment[key] = value;
   }
