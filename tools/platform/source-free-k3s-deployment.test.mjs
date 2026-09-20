@@ -8,6 +8,7 @@ import {
   commitServiceCasWithReconciliation,
   createK3sJourneyActivationEffects,
   K3sJourneyActivationError,
+  normalizePem,
   parseRunningComposeServices,
   renderK3sNginxConfig,
   runK3sJourneyActivation,
@@ -642,3 +643,86 @@ test("failure receipt schema accepts only the phase-specific terminal failure co
     );
   }
 });
+
+test("normalizePem strips quotes, unescapes newlines, and preserves exact PEM boundaries", () => {
+  const rawQuotedEscaped = "\"-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\n-----END PUBLIC KEY-----\\n\"";
+  const normalized = normalizePem(rawQuotedEscaped);
+  assert.equal(normalized, "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----");
+  assert.equal(normalizePem("   '-----BEGIN PUBLIC KEY-----\\nKEY\\n-----END PUBLIC KEY-----\\n'   "), "-----BEGIN PUBLIC KEY-----\nKEY\n-----END PUBLIC KEY-----");
+  assert.equal(normalizePem(null), null);
+  assert.equal(normalizePem(undefined), undefined);
+});
+
+test("activation normalizes quoted public key PEM and injects startup bundle properties into Secret", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-public-key-normalize-"));
+  const activationRequest = request(root);
+  activationRequest.platformBundle = await writePlatformBundle(root);
+  delete activationRequest.platformBundle.bundleRoot;
+  const runtimeBytes = await readFile(new URL(
+    "../../contracts/release/platform-k3s-runtime-contract.json", import.meta.url,
+  ));
+  activationRequest.runtimeContractSha256 = sha256(runtimeBytes);
+  const rawPem = "\"-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\n-----END PUBLIC KEY-----\\n\"";
+  const backendEnvironment = [
+    `EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM=${rawPem}`,
+    "SAFE_FLAG=true",
+    "",
+  ].join("\n");
+  const descriptor = {
+    publicationReceipt: { locator: { publicBaseUrl: "https://datapack.aquilaxk.site" } },
+    manifest: { keyId: "test-key-v1" },
+  };
+  const descriptorPath = path.join(path.dirname(activationRequest.tuplePath), "server-route-bundle-publication-descriptor.json");
+  const candidateInput = {
+    tupleSha256: activationRequest.releaseTuple.tupleSha256,
+    candidateGeneration: activationRequest.candidateGeneration,
+    trafficGeneration: activationRequest.trafficGeneration,
+    secretIdentity: sha256(backendEnvironment),
+    nodeInternalIp: "10.0.0.17",
+  };
+  await Promise.all([
+    writeFile(activationRequest.candidateInputPath, JSON.stringify(candidateInput)),
+    writeFile(activationRequest.backendEnvPath, backendEnvironment),
+    writeFile(descriptorPath, JSON.stringify(descriptor)),
+  ]);
+  const createdSecrets = [];
+  const rendered = {
+    schemaVersion: "PLATFORM_K3S_CANDIDATE_RENDER_V1",
+    artifactKind: "platform-k3s-candidate-render",
+    releaseIdentity: { tupleSha256: activationRequest.releaseTuple.tupleSha256, candidateToken: "c-1" },
+    configPlan: {
+      name: "c-cfg",
+      overrides: {
+        EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION:
+          activationRequest.releaseTuple.deploymentRevision,
+      },
+    },
+    secretPlan: { name: "c-sec" },
+    candidateObjects: [],
+    activationPlan: {
+      requiredCasField: "metadata.resourceVersion",
+      applyDuringCandidatePreparation: false,
+      activeServiceTemplate: { spec: { ports: [{ nodePort: 32080 }] } },
+      candidateDeploymentName: "c-dep",
+      candidateServiceName: "c-svc",
+    },
+  };
+  const commandRunner = async (command, args, options = {}) => {
+    if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
+    if (args.includes("create")) createdSecrets.push(JSON.parse(Buffer.from(options.input).toString("utf8")));
+    return { stdout: Buffer.alloc(0) };
+  };
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner,
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await effects.verifyInputs();
+  await effects.applyCandidate();
+  const expectedPem = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----";
+  assert.equal(createdSecrets[0].stringData.EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM, expectedPem);
+  assert.equal(createdSecrets[0].stringData.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM, expectedPem);
+  assert.equal(createdSecrets[0].stringData.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_KEY_ID, "test-key-v1");
+});
+
