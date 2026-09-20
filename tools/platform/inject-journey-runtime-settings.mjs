@@ -5,6 +5,8 @@ const searchTimeoutKey = "EASYSUBWAY_JOURNEY_SEARCH_TIMEOUT";
 const maxSearchesKey = "EASYSUBWAY_JOURNEY_MAX_SEARCHES_PER_SESSION";
 const sessionCertKey = "EASYSUBWAY_JOURNEY_SESSION_CERTIFICATE_SHA256";
 const playIntegrityCertKey = "EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256";
+const timetableSeedEnabledKey = "EASYSUBWAY_TIMETABLE_SEED_ENABLED";
+const timetableSeedIncludesItxKey = "EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX";
 
 const DEFAULT_SEARCH_TIMEOUT = "PT2S";
 const DEFAULT_MAX_SEARCHES = "12";
@@ -87,6 +89,8 @@ const DEPRECATED_ADMIN_KEYS = [
     searchTimeoutKey,
     maxSearchesKey,
     sessionCertKey,
+    timetableSeedEnabledKey,
+    timetableSeedIncludesItxKey,
     ...DEPRECATED_ADMIN_KEYS,
   ]);
   const preserved = lines.filter((line) => {
@@ -104,6 +108,8 @@ const DEPRECATED_ADMIN_KEYS = [
     `${searchTimeoutKey}=${searchTimeout}`,
     `${maxSearchesKey}=${maxSearches}`,
     `${sessionCertKey}=${sessionCert}`,
+    `${timetableSeedEnabledKey}=false`,
+    `${timetableSeedIncludesItxKey}=false`,
     "",
   ].join("\n");
 
