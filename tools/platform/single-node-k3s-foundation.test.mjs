@@ -113,6 +113,22 @@ test("renderer produces deterministic source-free candidate objects and an inact
     rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION,
     input.releaseTuple.deploymentRevision,
   );
+  assert.equal(
+    rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_PATH,
+    "/etc/easysubway/journey-profile-resource-policy.json",
+  );
+  assert.equal(
+    rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_SHA256,
+    "4c5d0f1570f88264c666cee4e50039da41e3a4a38062f7114a603c3d2c6305dc",
+  );
+  assert.equal(
+    rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_PROFILE_MAX_REQUEST_BYTES,
+    "65536",
+  );
+  assert.equal(
+    JSON.parse(rendered.configPlan.overrides["journey-profile-resource-policy.json"]).resourcePolicyId,
+    "RAPTOR_RESOURCE_POLICY_V1",
+  );
   assert.equal(rendered.secretPlan.immutable, true);
   assert.equal(rendered.secretPlan.requiredKeyProjection, "EXACT_VALIDATED_BACKEND_ENV_ALLOWLIST");
   assert.equal(rendered.secretPlan.serializedValueCount, 0);
@@ -152,6 +168,12 @@ test("renderer produces deterministic source-free candidate objects and an inact
     { configMapRef: { name: rendered.configPlan.name } },
     { secretRef: { name: rendered.secretPlan.name } },
   ]);
+  assert.ok(
+    container.volumeMounts.some(({ name, mountPath }) => name === "policy" && mountPath === "/etc/easysubway"),
+  );
+  assert.ok(
+    pod.volumes.some(({ name, configMap }) => name === "policy" && configMap?.name === rendered.configPlan.name),
+  );
   for (const probe of [container.startupProbe, container.readinessProbe, container.livenessProbe]) {
     assert.equal(probe.httpGet.port, 8080);
   }

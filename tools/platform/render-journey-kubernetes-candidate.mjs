@@ -29,6 +29,31 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const ENVIRONMENT = /^[A-Za-z0-9._-]{1,255}$/;
 const NAMESPACE = "easysubway-journey";
+const JOURNEY_PROFILE_RESOURCE_POLICY = Object.freeze({
+  schemaVersion: 1,
+  artifactKind: "journey-profile-resource-policy",
+  resourcePolicyId: "RAPTOR_RESOURCE_POLICY_V1",
+  semanticVersion: "1.0.0",
+  maxTemporalWindowSeconds: 3600,
+  maxServiceDayCount: 2,
+  maxEstimatedWork: 1000,
+  maxLabelsPerState: 8,
+  maxDestinationProfileLabels: 16,
+  maxProfileBreakpoints: 32,
+  realtimeApplicableFutureHorizonSeconds: 3600,
+  pointSearchDeadlineSeconds: 2,
+  profileSearchDeadlineSeconds: 5,
+  lastConnectionDeadlineSeconds: 8,
+  pointSearchCostUnits: 1,
+  shortDepartureProfileCostUnits: 2,
+  arriveByProfileCostUnits: 3,
+  lastConnectionCostUnits: 4,
+  maxCostUnitsPerSession: 10,
+});
+const JOURNEY_PROFILE_RESOURCE_POLICY_JSON = JSON.stringify(JOURNEY_PROFILE_RESOURCE_POLICY);
+const JOURNEY_PROFILE_RESOURCE_POLICY_SHA256 = createHash("sha256")
+  .update(JOURNEY_PROFILE_RESOURCE_POLICY_JSON, "utf8")
+  .digest("hex");
 
 class K3sRenderError extends Error {
   constructor(code, message) {
@@ -246,11 +271,19 @@ function deployment(input, token, deploymentName, configName, secretName) {
             volumeMounts: [
               { name: "tmp", mountPath: "/tmp" },
               { name: "logs", mountPath: "/app/logs" },
+              { name: "policy", mountPath: "/etc/easysubway" },
             ],
           }],
           volumes: [
             { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: "128Mi" } },
             { name: "logs", emptyDir: { sizeLimit: "256Mi" } },
+            {
+              name: "policy",
+              configMap: {
+                name: configName,
+                items: [{ key: "journey-profile-resource-policy.json", path: "journey-profile-resource-policy.json" }],
+              },
+            },
           ],
         },
       },
@@ -348,6 +381,10 @@ function render(input) {
     overrides: {
       SPRING_PROFILES_ACTIVE: "prod",
       EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false",
+      EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_PATH: "/etc/easysubway/journey-profile-resource-policy.json",
+      EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_SHA256: JOURNEY_PROFILE_RESOURCE_POLICY_SHA256,
+      EASYSUBWAY_JOURNEY_PROFILE_MAX_REQUEST_BYTES: "65536",
+      "journey-profile-resource-policy.json": JOURNEY_PROFILE_RESOURCE_POLICY_JSON,
       EASYSUBWAY_JOURNEY_V3_READINESS_RELEASE_TUPLE_SHA256: digestHex(input.tupleSha256),
       EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST: input.releaseTuple.backendImageDigest,
       EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_CONFIG_SHA256: digestHex(input.releaseTuple.backendConfigDigest),
