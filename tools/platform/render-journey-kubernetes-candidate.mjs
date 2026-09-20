@@ -270,7 +270,7 @@ function deployment(input, token, deploymentName, configName, secretName) {
             livenessProbe: probe("/actuator/health/liveness", 10, 3),
             volumeMounts: [
               { name: "tmp", mountPath: "/tmp" },
-              { name: "logs", mountPath: "/app/logs" },
+              { name: "logs", mountPath: "/opt/easysubway/logs" },
               { name: "policy", mountPath: "/etc/easysubway" },
             ],
           }],

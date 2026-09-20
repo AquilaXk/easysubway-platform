@@ -172,6 +172,9 @@ test("renderer produces deterministic source-free candidate objects and an inact
     container.volumeMounts.some(({ name, mountPath }) => name === "policy" && mountPath === "/etc/easysubway"),
   );
   assert.ok(
+    container.volumeMounts.some(({ name, mountPath }) => name === "logs" && mountPath === "/opt/easysubway/logs"),
+  );
+  assert.ok(
     pod.volumes.some(({ name, configMap }) => name === "policy" && configMap?.name === rendered.configPlan.name),
   );
   for (const probe of [container.startupProbe, container.readinessProbe, container.livenessProbe]) {
