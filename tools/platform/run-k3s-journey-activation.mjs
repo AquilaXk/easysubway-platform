@@ -949,7 +949,7 @@ async function requestJson(url, {
   }
   if (response.status !== 200 ||
     !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
-    throw new Error("Journey response boundary failed");
+    throw new Error(`Journey response boundary failed (status: ${response.status})`);
   }
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length < 2 || bytes.length > 64 * 1024) {
@@ -962,7 +962,7 @@ async function openPortForward({ command, args }) {
   const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   const port = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("K3s port-forward timed out")), 10_000);
+    const timeout = setTimeout(() => reject(new Error(`K3s port-forward timed out (output: ${output.trim()})`)), 10_000);
     const consume = (chunk) => {
       output += chunk.toString("utf8");
       if (output.length > 16 * 1024) {
@@ -984,7 +984,7 @@ async function openPortForward({ command, args }) {
     });
     child.once("exit", (code) => {
       clearTimeout(timeout);
-      reject(new Error(`K3s port-forward exited with ${code}`));
+      reject(new Error(`K3s port-forward exited with ${code}: ${output.trim()}`));
     });
   }).catch((error) => {
     child.kill("SIGTERM");
@@ -1297,6 +1297,9 @@ if (isMainModule()) {
       ? error
       : typed("K3S_PRECOMMIT_FAILED", error);
     process.stderr.write(`${failure.code} ${failure.message}\n`);
+    if (failure.cause) {
+      process.stderr.write(`\n=== ACTIVATION ERROR CAUSE ===\n${failure.cause?.stack ?? failure.cause}\n`);
+    }
     process.exitCode = failure.exitCode;
   }
 }

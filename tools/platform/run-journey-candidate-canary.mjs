@@ -65,8 +65,8 @@ const ERROR_MESSAGES = Object.freeze({
 });
 
 export class JourneyCandidateCanaryAdapterError extends Error {
-  constructor(code, exitCode = 1) {
-    super(ERROR_MESSAGES[code] ?? "Journey candidate canary failed");
+  constructor(code, exitCode = 1, options = undefined) {
+    super(ERROR_MESSAGES[code] ?? "Journey candidate canary failed", options);
     this.name = "JourneyCandidateCanaryAdapterError";
     this.code = code;
     this.exitCode = exitCode;
@@ -277,8 +277,8 @@ async function requestCanary({ baseUrl, command, serviceToken, fetchImpl, now })
       redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-  } catch {
-    throw failure("JOURNEY_CANARY_NETWORK");
+  } catch (networkError) {
+    throw failure("JOURNEY_CANARY_NETWORK", 1, { cause: networkError });
   }
   requireHttpContract(response);
   const bytes = await readResponse(response);
@@ -308,7 +308,9 @@ function requireHttpContract(response) {
     mediaType !== "application/json" ||
     !cacheDirectives.has("no-store")
   ) {
-    throw failure("JOURNEY_CANARY_HTTP");
+    throw failure("JOURNEY_CANARY_HTTP", 1, {
+      cause: new Error(`status=${response?.status}, mediaType=${mediaType}, cacheControl=${response?.headers?.get("cache-control")}`),
+    });
   }
 }
 
@@ -435,8 +437,8 @@ function isExactObject(value, fields) {
     fields.every((field, index) => actual[index] === field);
 }
 
-function failure(code, exitCode = 1) {
-  return new JourneyCandidateCanaryAdapterError(code, exitCode);
+function failure(code, exitCode = 1, options = undefined) {
+  return new JourneyCandidateCanaryAdapterError(code, exitCode, options);
 }
 
 function parseCliArguments(args) {
