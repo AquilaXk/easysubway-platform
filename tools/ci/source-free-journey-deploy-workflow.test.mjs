@@ -92,12 +92,30 @@ test("K3s injects DataPack callback secrets only for DEPLOY before environment p
   ]) assert.ok(prepareIndex < workflow.indexOf(productionMutation), productionMutation);
 });
 
+test("both workflows inject Journey V3 runtime settings before environment preparation", () => {
+  const k3sWorkflow = readFileSync(k3sWorkflowUrl, "utf8");
+  const fixedHostWorkflow = readFileSync(fixedHostWorkflowUrl, "utf8");
+  const injection = "node tools/platform/inject-journey-runtime-settings.mjs";
+
+  assert.equal(count(k3sWorkflow, injection), 1);
+  assert.equal(count(fixedHostWorkflow, injection), 1);
+
+  const k3sInjectionIndex = k3sWorkflow.indexOf(injection);
+  const k3sPrepareIndex = k3sWorkflow.indexOf("tools/deploy/prepare-deployment-env.sh");
+  assert.ok(k3sInjectionIndex < k3sPrepareIndex);
+
+  const fixedHostInjectionIndex = fixedHostWorkflow.indexOf(injection);
+  const fixedHostPrepareIndex = fixedHostWorkflow.indexOf("tools/deploy/prepare-deployment-env.sh");
+  assert.ok(fixedHostInjectionIndex < fixedHostPrepareIndex);
+});
+
 test("Platform CI owns the exact new focused contracts", () => {
   const ci = readFileSync(ciUrl, "utf8");
   for (const command of [
     "node --test tools/platform/bind-journey-release-candidate-v2.test.mjs",
     "node --test tools/platform/prepare-source-free-fixed-host-deployment.test.mjs",
     "node --test tools/platform/inject-datapack-callback-secrets.test.mjs",
+    "node --test tools/platform/inject-journey-runtime-settings.test.mjs",
     "node --test tools/ci/source-free-journey-deploy-workflow.test.mjs",
   ]) assert.equal(count(ci, command), 1, command);
 });

@@ -137,6 +137,7 @@ jobs:
           if [[ "${MODE}" == "DEPLOY" ]]; then
             node tools/platform/inject-datapack-callback-secrets.mjs
           fi
+          node tools/platform/inject-journey-runtime-settings.mjs
           tools/deploy/prepare-deployment-env.sh \
             "${RUNNER_TEMP}/deployment.env" \
             tools/deploy/compose-server-env.allowlist \
