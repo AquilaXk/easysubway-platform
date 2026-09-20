@@ -1,18 +1,8 @@
 import {
-  closeSync,
-  constants,
-  fchmodSync,
-  fsyncSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+  atomicReplace,
+  deploymentEnvPath,
+  stableRead,
+} from "./inject-datapack-callback-secrets.mjs";
 
 const searchTimeoutKey = "EASYSUBWAY_JOURNEY_SEARCH_TIMEOUT";
 const maxSearchesKey = "EASYSUBWAY_JOURNEY_MAX_SEARCHES_PER_SESSION";
@@ -25,50 +15,6 @@ const DEFAULT_MAX_SEARCHES = "12";
 
 function fail(message) {
   throw new Error(message);
-}
-
-function regularFileSnapshot(path) {
-  const metadata = lstatSync(path, { bigint: true });
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    fail("dotenv input must be a regular non-symlink dotenv file");
-  }
-  return metadata;
-}
-
-function deploymentEnvPath(environment) {
-  const runnerTemp = environment.RUNNER_TEMP;
-  if (typeof runnerTemp !== "string" || runnerTemp.length === 0
-    || !isAbsolute(runnerTemp) || resolve(runnerTemp) !== runnerTemp) {
-    fail("RUNNER_TEMP must be a nonempty absolute path resolving to itself");
-  }
-  let metadata;
-  let resolved;
-  try {
-    metadata = lstatSync(runnerTemp, { bigint: true });
-    resolved = realpathSync(runnerTemp);
-  } catch {
-    fail("RUNNER_TEMP must be an existing regular non-symlink directory");
-  }
-  if (metadata.isSymbolicLink() || !metadata.isDirectory() || resolved !== runnerTemp) {
-    fail("RUNNER_TEMP must be an existing regular non-symlink directory resolving to itself");
-  }
-  return join(runnerTemp, "deployment.env");
-}
-
-function sameFileSnapshot(before, after) {
-  return before.dev === after.dev
-    && before.ino === after.ino
-    && before.size === after.size
-    && before.mtimeNs === after.mtimeNs
-    && before.ctimeNs === after.ctimeNs;
-}
-
-function stableRead(path) {
-  const before = regularFileSnapshot(path);
-  const contents = readFileSync(path, "utf8");
-  const after = regularFileSnapshot(path);
-  if (!sameFileSnapshot(before, after)) fail("dotenv input changed while being read");
-  return { contents, snapshot: after };
 }
 
 function parseDotenvValue(line, key) {
@@ -103,30 +49,6 @@ function replacementContents(contents, values) {
     + `${searchTimeoutKey}=${values.searchTimeout}\n`
     + `${maxSearchesKey}=${values.maxSearches}\n`
     + `${sessionCertKey}=${values.sessionCert}\n`;
-}
-
-function atomicReplace(path, contents, expectedSnapshot) {
-  const temporaryPath = join(dirname(path), `.journey-runtime-${randomBytes(16).toString("hex")}`);
-  let descriptor;
-  try {
-    descriptor = openSync(temporaryPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    writeFileSync(descriptor, contents, "utf8");
-    fchmodSync(descriptor, 0o600);
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    const current = regularFileSnapshot(path);
-    if (!sameFileSnapshot(expectedSnapshot, current)) fail("dotenv input changed before replacement");
-    renameSync(temporaryPath, path);
-  } catch (error) {
-    if (descriptor !== undefined) closeSync(descriptor);
-    try {
-      unlinkSync(temporaryPath);
-    } catch (cleanupError) {
-      if (cleanupError.code !== "ENOENT") throw cleanupError;
-    }
-    throw error;
-  }
 }
 
 export function inject(environment = process.env) {

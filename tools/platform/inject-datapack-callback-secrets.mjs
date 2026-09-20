@@ -126,6 +126,8 @@ export function inject(environment = process.env) {
   atomicReplace(path, replacementContents(source.contents, values), source.snapshot);
 }
 
+export { deploymentEnvPath, regularFileSnapshot, sameFileSnapshot, stableRead, atomicReplace };
+
 if (import.meta.url === new URL(process.argv[1], "file:").href) {
   try {
     if (process.argv.length !== 2) fail("usage: inject-datapack-callback-secrets.mjs");
