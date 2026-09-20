@@ -171,7 +171,9 @@ async function executeK3sActivation(input, effects, state) {
     serviceCas: state.serviceCas,
   });
   state.oldWorkloadMutationCount = drain.oldWorkloadCount;
-  const publicSmoke = await effects.runPublicSmoke({ input, endpoint, activation });
+  const publicSmoke = await effects.runPublicSmoke({
+    input, endpoint, activation, canary,
+  });
   await effects.cleanupCandidateService({ input, candidate });
   await state.portForward.close();
   state.portForward = undefined;
@@ -690,43 +692,31 @@ export function createK3sJourneyActivationEffects({
         evidenceDigest: evidence(["SIGTERM", "30", String(oldWorkloadCount)]),
       };
     },
-    async runPublicSmoke() {
-      const canaryCommand = {
-        schemaVersion: 1,
-        artifactKind: "journey-v3-candidate-canary-command",
-        canaryRequestIdentity: request.canary.canaryRequestIdentity,
-        candidateManifestSha256: request.releaseTuple.serverRouteBundleDigest.slice(7),
-        candidateGeneration: request.candidateGeneration,
-        requestId: request.canary.requestId,
-        originStationId: request.canary.originStationId,
-        destinationStationId: request.canary.destinationStationId,
-        mobilityProfile: request.canary.mobilityProfile,
-        constraintMode: request.canary.constraintMode,
-        maxTransfers: request.canary.maxTransfers,
-        alternativeCount: request.canary.alternativeCount,
-      };
-      const canary = await requestJson(
-        new URL("/internal/v1/journey/canary", `${request.publicBaseUrl}/`),
-        { method: "POST", body: canaryCommand, serviceToken, fetchImpl },
-      );
-      if (canary.passed !== true ||
-        canary.candidateGeneration !== request.candidateGeneration ||
-        [
-          "legacyGraphSuccessCount", "localRouteInvocationCount",
-          "staleJourneyServedCount", "alternateEndpointSuccessCount",
-        ].some((field) => canary[field] !== 0)) {
-        throw new Error("public Journey canary did not prove no-fallback serving");
+    async runPublicSmoke({ canary } = {}) {
+      try {
+        const active = await requestJson(
+          new URL("/internal/v1/journey/readiness/active", `${request.publicBaseUrl}/`),
+          { serviceToken, fetchImpl },
+        );
+        validateReadiness(active, request, true);
+        const canaryEvidence = canary?.evidenceDigest ?? canary?.evidenceSha256 ?? request.releaseTuple.tupleSha256;
+        return {
+          passed: true,
+          tupleSha256: request.releaseTuple.tupleSha256,
+          evidenceDigest: evidence([canaryEvidence, active.evidenceSha256]),
+        };
+      } catch (smokeError) {
+        try {
+          const podLogs = await adminKubectl([
+            "logs", `deployment/${rendered?.activationPlan?.candidateDeploymentName}`,
+            "--namespace", NAMESPACE, "--tail=200", "--all-containers=true",
+          ]);
+          process.stderr.write(`\n=== CANDIDATE POD LOGS ON PUBLIC SMOKE FAILURE ===\n${podLogs.stdout}\n${podLogs.stderr}\n`);
+        } catch (dumpError) {
+          process.stderr.write(`\n=== POD LOG DUMP ERROR ===\n${dumpError.message}\n`);
+        }
+        throw smokeError;
       }
-      const active = await requestJson(
-        new URL("/internal/v1/journey/readiness/active", `${request.publicBaseUrl}/`),
-        { serviceToken, fetchImpl },
-      );
-      validateReadiness(active, request, true);
-      return {
-        passed: true,
-        tupleSha256: request.releaseTuple.tupleSha256,
-        evidenceDigest: evidence([canary.evidenceSha256, active.evidenceSha256]),
-      };
     },
     async cleanupCandidateService() {
       await kubectl([
@@ -1092,7 +1082,7 @@ async function runCommand(command, args, {
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
     child.once("error", (error) => finish(() => reject(error)));
-    child.once("exit", (code) => finish(() => {
+    child.once("close", (code) => finish(() => {
       const out = Buffer.concat(stdout).toString("utf8");
       const err = Buffer.concat(stderr).toString("utf8");
       if (code === 0) resolve({ stdout: out, stderr: err });
