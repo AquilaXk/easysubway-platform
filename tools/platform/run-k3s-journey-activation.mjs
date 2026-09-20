@@ -373,6 +373,9 @@ export function createK3sJourneyActivationEffects({
             .digest("hex");
         }
       }
+      if (candidateEnv.EASYSUBWAY_TIMETABLE_SEED_ENABLED !== undefined) {
+        candidateEnv.EASYSUBWAY_TIMETABLE_SEED_ENABLED = "false";
+      }
       const descriptorPath = path.join(
         path.dirname(request.tuplePath),
         "server-route-bundle-publication-descriptor.json",

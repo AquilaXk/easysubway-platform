@@ -21,6 +21,7 @@ const searchTimeoutKey = "EASYSUBWAY_JOURNEY_SEARCH_TIMEOUT";
 const maxSearchesKey = "EASYSUBWAY_JOURNEY_MAX_SEARCHES_PER_SESSION";
 const sessionCertKey = "EASYSUBWAY_JOURNEY_SESSION_CERTIFICATE_SHA256";
 const playIntegrityCertKey = "EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256";
+const timetableSeedEnabledKey = "EASYSUBWAY_TIMETABLE_SEED_ENABLED";
 
 const dummyCert = "A".repeat(43);
 
@@ -62,6 +63,7 @@ test("injects default Journey V3 runtime settings using Play Integrity cert from
     assert.match(content, new RegExp(`^${searchTimeoutKey}=PT2S$`, "m"));
     assert.match(content, new RegExp(`^${maxSearchesKey}=12$`, "m"));
     assert.match(content, new RegExp(`^${sessionCertKey}=${dummyCert}$`, "m"));
+    assert.match(content, new RegExp(`^${timetableSeedEnabledKey}=false$`, "m"));
     assert.equal(lstatSync(fixture.path).mode & 0o777, 0o600);
   } finally {
     fixture.cleanup();
@@ -82,6 +84,7 @@ test("preserves existing Journey V3 settings if already in dotenv", () => {
     assert.match(content, new RegExp(`^${searchTimeoutKey}=PT5S$`, "m"));
     assert.match(content, new RegExp(`^${maxSearchesKey}=20$`, "m"));
     assert.match(content, new RegExp(`^${sessionCertKey}=${"B".repeat(43)}$`, "m"));
+    assert.match(content, new RegExp(`^${timetableSeedEnabledKey}=false$`, "m"));
   } finally {
     fixture.cleanup();
   }
