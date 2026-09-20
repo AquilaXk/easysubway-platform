@@ -65,7 +65,7 @@ const ERROR_MESSAGES = Object.freeze({
 });
 
 export class JourneyCandidateCanaryAdapterError extends Error {
-  constructor(code, exitCode = 1, options) {
+  constructor(code, exitCode = 1, options = undefined) {
     super(ERROR_MESSAGES[code] ?? "Journey candidate canary failed", options);
     this.name = "JourneyCandidateCanaryAdapterError";
     this.code = code;
@@ -437,7 +437,7 @@ function isExactObject(value, fields) {
     fields.every((field, index) => actual[index] === field);
 }
 
-function failure(code, exitCode = 1, options) {
+function failure(code, exitCode = 1, options = undefined) {
   return new JourneyCandidateCanaryAdapterError(code, exitCode, options);
 }
 
