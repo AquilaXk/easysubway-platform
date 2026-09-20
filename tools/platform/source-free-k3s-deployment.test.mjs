@@ -312,11 +312,11 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
   assert.doesNotMatch(JSON.stringify(result), /private-test-value/);
   assert.doesNotMatch(JSON.stringify(k3sRequest), /private-test-value/);
 });
-test("activation keeps trusted readiness identity in ConfigMap and secrets out of evidence", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "k3s-protected-secret-"));
-  const protectedToken = "p".repeat(32);
-  const untrustedToken = "u".repeat(32);
-  const untrustedRevision = "0".repeat(40);
+async function prepareStagedCandidateEnvironment({
+  root,
+  backendEnvironment,
+  extraFiles = [],
+}) {
   const activationRequest = request(root);
   activationRequest.platformBundle = await writePlatformBundle(root);
   delete activationRequest.platformBundle.bundleRoot;
@@ -324,13 +324,6 @@ test("activation keeps trusted readiness identity in ConfigMap and secrets out o
     "../../contracts/release/platform-k3s-runtime-contract.json", import.meta.url,
   ));
   activationRequest.runtimeContractSha256 = sha256(runtimeBytes);
-  const backendEnvironment = [
-    "DATABASE_PASSWORD=private-test-value",
-    "SAFE_FLAG=true",
-    `EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN=${untrustedToken}`,
-    `EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION=${untrustedRevision}`,
-    "",
-  ].join("\n");
   const candidateInput = {
     tupleSha256: activationRequest.releaseTuple.tupleSha256,
     candidateGeneration: activationRequest.candidateGeneration,
@@ -341,38 +334,74 @@ test("activation keeps trusted readiness identity in ConfigMap and secrets out o
   await Promise.all([
     writeFile(activationRequest.candidateInputPath, JSON.stringify(candidateInput)),
     writeFile(activationRequest.backendEnvPath, backendEnvironment),
+    ...extraFiles,
   ]);
-  const createdSecrets = [];
-  const rendered = {
+  return activationRequest;
+}
+
+function mockCandidateRenderPlan({
+  activationRequest,
+  candidateToken = "candidate-23",
+  configName = "journey-config-23",
+  secretName = "journey-secret-23",
+  configOverrides = {},
+  candidateDeploymentName = "journey-candidate-23",
+  candidateServiceName = "journey-candidate-23",
+}) {
+  return {
     schemaVersion: "PLATFORM_K3S_CANDIDATE_RENDER_V1",
     artifactKind: "platform-k3s-candidate-render",
     releaseIdentity: {
       tupleSha256: activationRequest.releaseTuple.tupleSha256,
-      candidateToken: "candidate-23",
+      candidateToken,
     },
     configPlan: {
-      name: "journey-config-23",
+      name: configName,
       overrides: {
-        SAFE_CONFIG: "true",
         EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION:
           activationRequest.releaseTuple.deploymentRevision,
+        ...configOverrides,
       },
     },
-    secretPlan: { name: "journey-secret-23" },
+    secretPlan: { name: secretName },
     candidateObjects: [],
     activationPlan: {
       requiredCasField: "metadata.resourceVersion",
       applyDuringCandidatePreparation: false,
       activeServiceTemplate: { spec: { ports: [{ nodePort: 32080 }] } },
-      candidateDeploymentName: "journey-candidate-23",
-      candidateServiceName: "journey-candidate-23",
+      candidateDeploymentName,
+      candidateServiceName,
     },
   };
-  const commandRunner = async (command, args, options = {}) => {
+}
+
+function createMockCommandRunner(rendered, createdSecrets = []) {
+  return async (command, args, options = {}) => {
     if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
     if (args.includes("create")) createdSecrets.push(JSON.parse(Buffer.from(options.input).toString("utf8")));
     return { stdout: Buffer.alloc(0) };
   };
+}
+
+test("activation keeps trusted readiness identity in ConfigMap and secrets out of evidence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-protected-secret-"));
+  const protectedToken = "p".repeat(32);
+  const untrustedToken = "u".repeat(32);
+  const untrustedRevision = "0".repeat(40);
+  const backendEnvironment = [
+    "DATABASE_PASSWORD=private-test-value",
+    "SAFE_FLAG=true",
+    `EASYSUBWAY_JOURNEY_V3_READINESS_SERVICE_TOKEN=${untrustedToken}`,
+    `EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION=${untrustedRevision}`,
+    "",
+  ].join("\n");
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment });
+  const createdSecrets = [];
+  const rendered = mockCandidateRenderPlan({
+    activationRequest,
+    configOverrides: { SAFE_CONFIG: "true" },
+  });
+  const commandRunner = createMockCommandRunner(rendered, createdSecrets);
   const activationEffects = createK3sJourneyActivationEffects({
     request: activationRequest,
     commandRunner,
@@ -655,13 +684,6 @@ test("normalizePem strips quotes, unescapes newlines, and preserves exact PEM bo
 
 test("activation normalizes quoted public key PEM and injects startup bundle properties into Secret", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-public-key-normalize-"));
-  const activationRequest = request(root);
-  activationRequest.platformBundle = await writePlatformBundle(root);
-  delete activationRequest.platformBundle.bundleRoot;
-  const runtimeBytes = await readFile(new URL(
-    "../../contracts/release/platform-k3s-runtime-contract.json", import.meta.url,
-  ));
-  activationRequest.runtimeContractSha256 = sha256(runtimeBytes);
   const rawPem = "\"-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\n-----END PUBLIC KEY-----\\n\"";
   const backendEnvironment = [
     `EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM=${rawPem}`,
@@ -672,46 +694,22 @@ test("activation normalizes quoted public key PEM and injects startup bundle pro
     publicationReceipt: { locator: { publicBaseUrl: "https://datapack.aquilaxk.site" } },
     manifest: { keyId: "test-key-v1" },
   };
-  const descriptorPath = path.join(path.dirname(activationRequest.tuplePath), "server-route-bundle-publication-descriptor.json");
-  const candidateInput = {
-    tupleSha256: activationRequest.releaseTuple.tupleSha256,
-    candidateGeneration: activationRequest.candidateGeneration,
-    trafficGeneration: activationRequest.trafficGeneration,
-    secretIdentity: sha256(backendEnvironment),
-    nodeInternalIp: "10.0.0.17",
-  };
-  await Promise.all([
-    writeFile(activationRequest.candidateInputPath, JSON.stringify(candidateInput)),
-    writeFile(activationRequest.backendEnvPath, backendEnvironment),
-    writeFile(descriptorPath, JSON.stringify(descriptor)),
-  ]);
+  const descriptorPath = path.join(root, "server-route-bundle-publication-descriptor.json");
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment,
+    extraFiles: [writeFile(descriptorPath, JSON.stringify(descriptor))],
+  });
   const createdSecrets = [];
-  const rendered = {
-    schemaVersion: "PLATFORM_K3S_CANDIDATE_RENDER_V1",
-    artifactKind: "platform-k3s-candidate-render",
-    releaseIdentity: { tupleSha256: activationRequest.releaseTuple.tupleSha256, candidateToken: "c-1" },
-    configPlan: {
-      name: "c-cfg",
-      overrides: {
-        EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION:
-          activationRequest.releaseTuple.deploymentRevision,
-      },
-    },
-    secretPlan: { name: "c-sec" },
-    candidateObjects: [],
-    activationPlan: {
-      requiredCasField: "metadata.resourceVersion",
-      applyDuringCandidatePreparation: false,
-      activeServiceTemplate: { spec: { ports: [{ nodePort: 32080 }] } },
-      candidateDeploymentName: "c-dep",
-      candidateServiceName: "c-svc",
-    },
-  };
-  const commandRunner = async (command, args, options = {}) => {
-    if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
-    if (args.includes("create")) createdSecrets.push(JSON.parse(Buffer.from(options.input).toString("utf8")));
-    return { stdout: Buffer.alloc(0) };
-  };
+  const rendered = mockCandidateRenderPlan({
+    activationRequest,
+    candidateToken: "c-1",
+    configName: "c-cfg",
+    secretName: "c-sec",
+    candidateDeploymentName: "c-dep",
+    candidateServiceName: "c-svc",
+  });
+  const commandRunner = createMockCommandRunner(rendered, createdSecrets);
   const effects = createK3sJourneyActivationEffects({
     request: activationRequest,
     commandRunner,
