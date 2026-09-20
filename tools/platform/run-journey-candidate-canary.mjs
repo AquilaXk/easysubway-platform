@@ -280,7 +280,7 @@ async function requestCanary({ baseUrl, command, serviceToken, fetchImpl, now })
   } catch (networkError) {
     throw failure("JOURNEY_CANARY_NETWORK", 1, { cause: networkError });
   }
-  requireHttpContract(response);
+  await requireHttpContract(response);
   const bytes = await readResponse(response);
   const receivedAt = readClock(now);
   const result = parseJson(bytes);
@@ -294,7 +294,7 @@ function readClock(now) {
   throw failure("JOURNEY_CANARY_USAGE", 2);
 }
 
-function requireHttpContract(response) {
+async function requireHttpContract(response) {
   const contentType = response?.headers?.get("content-type")?.toLowerCase() ?? "";
   const mediaType = contentType.split(";", 1)[0].trim();
   const cacheDirectives = new Set(
@@ -308,8 +308,15 @@ function requireHttpContract(response) {
     mediaType !== "application/json" ||
     !cacheDirectives.has("no-store")
   ) {
+    let body = "";
+    try {
+      const bytes = await readBoundedResponse(response);
+      body = bytes.toString("utf8");
+    } catch {
+      // ignore body read error on failure diagnostic
+    }
     throw failure("JOURNEY_CANARY_HTTP", 1, {
-      cause: new Error(`status=${response?.status}, mediaType=${mediaType}, cacheControl=${response?.headers?.get("cache-control")}`),
+      cause: new Error(`status=${response?.status}, mediaType=${mediaType}, cacheControl=${response?.headers?.get("cache-control")}, body=${body.slice(0, 1000)}`),
     });
   }
 }
