@@ -815,3 +815,49 @@ test("drainOldWorkloads queries running Compose services with base compose and b
   assert.equal(stopCall.options.timeoutMs, 35_000);
 });
 
+test("runPublicSmoke verifies active readiness over publicBaseUrl and binds canary evidence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-public-smoke-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  let requestedUrl;
+  let requestedHeaders;
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async () => ({ stdout: Buffer.alloc(0) }),
+    serviceToken: "token".repeat(7),
+    fetchImpl: async (url, options) => {
+      requestedUrl = String(url);
+      requestedHeaders = options.headers;
+      const readiness = {
+        releaseTupleSha256: activationRequest.releaseTuple.tupleSha256.slice(7),
+        backendImageDigest: activationRequest.releaseTuple.backendImageDigest,
+        backendConfigSha256: activationRequest.releaseTuple.backendConfigDigest.slice(7),
+        journeyContractSha256: activationRequest.releaseTuple.journeyContractDigest.slice(7),
+        routeBundleManifestSha256: activationRequest.releaseTuple.serverRouteBundleDigest.slice(7),
+        generation: activationRequest.candidateGeneration,
+        evidenceSha256: "e".repeat(64),
+        trafficGeneration: activationRequest.trafficGeneration,
+        servingReady: true,
+        draining: false,
+      };
+      return new Response(JSON.stringify(readiness), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const canaryProof = { evidenceDigest: digest("c") };
+  const smoke = await effects.runPublicSmoke({ canary: canaryProof });
+  assert.equal(smoke.passed, true);
+  assert.equal(smoke.tupleSha256, activationRequest.releaseTuple.tupleSha256);
+  assert.ok(requestedUrl.startsWith(activationRequest.publicBaseUrl));
+  assert.ok(requestedUrl.endsWith("/internal/v1/journey/readiness/active"));
+  assert.equal(requestedHeaders.Authorization, `Bearer ${"token".repeat(7)}`);
+  assert.equal(
+    smoke.evidenceDigest,
+    sha256(Buffer.from(`${digest("c")}\n${"e".repeat(64)}\n`, "utf8")),
+  );
+});
+
