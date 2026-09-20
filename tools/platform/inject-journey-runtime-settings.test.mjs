@@ -129,3 +129,24 @@ test("fails if certificate format is invalid", () => {
     fixture.cleanup();
   }
 });
+
+test("strips deprecated admin configuration keys from deployment.env", () => {
+  const fixture = makeFixture(
+    `OTHER=foo\n${playIntegrityCertKey}=${dummyCert}\n`
+    + "EASYSUBWAY_ADMIN_PLATFORM_FLAGS_RBAC_ENFORCEMENT=true\n"
+    + "EASYSUBWAY_ADMIN_PLATFORM_FLAGS_AUDIT_ENFORCEMENT=true\n"
+    + "EASYSUBWAY_ADMIN_BREAK_GLASS_BOOTSTRAP_ENABLED=true\n",
+  );
+  try {
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const content = readFileSync(fixture.path, "utf8");
+    assert.doesNotMatch(content, /EASYSUBWAY_ADMIN_PLATFORM_FLAGS_RBAC_ENFORCEMENT/);
+    assert.doesNotMatch(content, /EASYSUBWAY_ADMIN_PLATFORM_FLAGS_AUDIT_ENFORCEMENT/);
+    assert.doesNotMatch(content, /EASYSUBWAY_ADMIN_BREAK_GLASS_BOOTSTRAP_ENABLED/);
+    assert.match(content, /^OTHER=foo$/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
