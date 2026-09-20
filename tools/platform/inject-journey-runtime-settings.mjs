@@ -1,176 +1,94 @@
-import {
-  closeSync,
-  constants,
-  fchmodSync,
-  fsyncSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const searchTimeoutKey = "EASYSUBWAY_JOURNEY_SEARCH_TIMEOUT";
 const maxSearchesKey = "EASYSUBWAY_JOURNEY_MAX_SEARCHES_PER_SESSION";
 const sessionCertKey = "EASYSUBWAY_JOURNEY_SESSION_CERTIFICATE_SHA256";
 const playIntegrityCertKey = "EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256";
-const managedKeys = [searchTimeoutKey, maxSearchesKey, sessionCertKey];
 
 const DEFAULT_SEARCH_TIMEOUT = "PT2S";
 const DEFAULT_MAX_SEARCHES = "12";
 
-function fail(message) {
-  throw new Error(message);
-}
-
-function regularFileSnapshot(path) {
-  const metadata = lstatSync(path, { bigint: true });
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    fail("dotenv input must be a regular non-symlink dotenv file");
+function unquote(val) {
+  if (typeof val !== "string") return "";
+  const trimmed = val.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
   }
-  return metadata;
-}
-
-function deploymentEnvPath(environment) {
-  const runnerTemp = environment.RUNNER_TEMP;
-  if (typeof runnerTemp !== "string" || runnerTemp.length === 0
-    || !isAbsolute(runnerTemp) || resolve(runnerTemp) !== runnerTemp) {
-    fail("RUNNER_TEMP must be a nonempty absolute path resolving to itself");
-  }
-  let metadata;
-  let resolved;
-  try {
-    metadata = lstatSync(runnerTemp, { bigint: true });
-    resolved = realpathSync(runnerTemp);
-  } catch {
-    fail("RUNNER_TEMP must be an existing regular non-symlink directory");
-  }
-  if (metadata.isSymbolicLink() || !metadata.isDirectory() || resolved !== runnerTemp) {
-    fail("RUNNER_TEMP must be an existing regular non-symlink directory resolving to itself");
-  }
-  return join(runnerTemp, "deployment.env");
-}
-
-function sameFileSnapshot(before, after) {
-  return before.dev === after.dev
-    && before.ino === after.ino
-    && before.size === after.size
-    && before.mtimeNs === after.mtimeNs
-    && before.ctimeNs === after.ctimeNs;
-}
-
-function stableRead(path) {
-  const before = regularFileSnapshot(path);
-  const contents = readFileSync(path, "utf8");
-  const after = regularFileSnapshot(path);
-  if (!sameFileSnapshot(before, after)) fail("dotenv input changed while being read");
-  return { contents, snapshot: after };
-}
-
-function parseDotenvValue(line, key) {
-  if (!line.startsWith(`${key}=`)) return undefined;
-  let raw = line.slice(key.length + 1).trim();
-  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-    raw = raw.slice(1, -1);
-  }
-  return raw;
-}
-
-function findValueInEnv(contents, key) {
-  for (const line of contents.split(/(?<=\n)/)) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("#")) continue;
-    const parsed = parseDotenvValue(trimmed, key);
-    if (parsed !== undefined) return parsed;
-  }
-  return undefined;
-}
-
-function withoutManagedDefinitions(contents) {
-  return contents.split(/(?<=\n)/).filter((line) =>
-    !managedKeys.some((key) => line.startsWith(`${key}=`)),
-  ).join("");
-}
-
-function replacementContents(contents, values) {
-  const preserved = withoutManagedDefinitions(contents);
-  const separator = preserved.length > 0 && !preserved.endsWith("\n") ? "\n" : "";
-  return `${preserved}${separator}`
-    + `${searchTimeoutKey}=${values.searchTimeout}\n`
-    + `${maxSearchesKey}=${values.maxSearches}\n`
-    + `${sessionCertKey}=${values.sessionCert}\n`;
-}
-
-function atomicReplace(path, contents, expectedSnapshot) {
-  const temporaryPath = join(dirname(path), `.journey-runtime-${randomBytes(16).toString("hex")}`);
-  let descriptor;
-  try {
-    descriptor = openSync(temporaryPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    writeFileSync(descriptor, contents, "utf8");
-    fchmodSync(descriptor, 0o600);
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    const current = regularFileSnapshot(path);
-    if (!sameFileSnapshot(expectedSnapshot, current)) fail("dotenv input changed before replacement");
-    renameSync(temporaryPath, path);
-  } catch (error) {
-    if (descriptor !== undefined) closeSync(descriptor);
-    try {
-      unlinkSync(temporaryPath);
-    } catch (cleanupError) {
-      if (cleanupError.code !== "ENOENT") throw cleanupError;
-    }
-    throw error;
-  }
+  return trimmed;
 }
 
 export function inject(environment = process.env) {
-  const path = deploymentEnvPath(environment);
-  const source = stableRead(path);
+  const runnerTemp = environment.RUNNER_TEMP;
+  if (!runnerTemp || typeof runnerTemp !== "string") {
+    throw new Error("RUNNER_TEMP must be a nonempty string");
+  }
+  const path = join(runnerTemp, "deployment.env");
+  const raw = readFileSync(path, "utf8");
 
-  const existingTimeout = findValueInEnv(source.contents, searchTimeoutKey);
-  const searchTimeout = environment[searchTimeoutKey] || existingTimeout || DEFAULT_SEARCH_TIMEOUT;
+  const lines = raw.split(/\r?\n/);
+  const values = new Map();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const idx = line.indexOf("=");
+    if (idx !== -1) {
+      values.set(line.slice(0, idx).trim(), unquote(line.slice(idx + 1)));
+    }
+  }
+
+  const existingTimeout = values.get(searchTimeoutKey);
+  const searchTimeout = environment[searchTimeoutKey] || (existingTimeout && existingTimeout.length > 0 ? existingTimeout : DEFAULT_SEARCH_TIMEOUT);
   if (/[\r\n\0]/.test(searchTimeout) || searchTimeout.length === 0) {
-    fail(`${searchTimeoutKey} must be a nonempty single-line value`);
+    throw new Error(`${searchTimeoutKey} must be a nonempty single-line value`);
   }
 
-  const existingMaxSearches = findValueInEnv(source.contents, maxSearchesKey);
-  const maxSearches = environment[maxSearchesKey] || existingMaxSearches || DEFAULT_MAX_SEARCHES;
-  if (!/^[1-9][0-9]*$/.test(maxSearches)) {
-    fail(`${maxSearchesKey} must be a positive integer`);
+  const existingMax = values.get(maxSearchesKey);
+  const maxSearches = environment[maxSearchesKey] || (existingMax && existingMax.length > 0 ? existingMax : DEFAULT_MAX_SEARCHES);
+  if (!/^[1-9]\d*$/.test(maxSearches)) {
+    throw new Error(`${maxSearchesKey} must be a positive integer`);
   }
 
-  const existingSessionCert = findValueInEnv(source.contents, sessionCertKey);
-  const existingPlayIntegrityCert = findValueInEnv(source.contents, playIntegrityCertKey);
+  const existingSessionCert = values.get(sessionCertKey);
+  const existingPlayIntegrityCert = values.get(playIntegrityCertKey);
   const sessionCert = environment[sessionCertKey]
-    || existingSessionCert
+    || (existingSessionCert && existingSessionCert.length > 0 ? existingSessionCert : undefined)
     || environment[playIntegrityCertKey]
-    || existingPlayIntegrityCert;
+    || (existingPlayIntegrityCert && existingPlayIntegrityCert.length > 0 ? existingPlayIntegrityCert : undefined);
 
   if (!sessionCert || typeof sessionCert !== "string" || sessionCert.length === 0) {
-    fail(`${sessionCertKey} is required and could not be derived from ${playIntegrityCertKey}`);
+    throw new Error(`${sessionCertKey} is required and could not be derived from ${playIntegrityCertKey}`);
   }
   if (!/^[A-Za-z0-9_-]{43}$/.test(sessionCert)) {
-    fail(`invalid certificate SHA-256 for ${sessionCertKey}`);
+    throw new Error(`invalid certificate SHA-256 for ${sessionCertKey}`);
   }
 
-  const values = {
-    searchTimeout,
-    maxSearches,
-    sessionCert,
-  };
+  const managed = new Set([searchTimeoutKey, maxSearchesKey, sessionCertKey]);
+  const preserved = lines.filter((line) => {
+    const idx = line.indexOf("=");
+    if (idx === -1) return true;
+    return !managed.has(line.slice(0, idx).trim());
+  });
 
-  atomicReplace(path, replacementContents(source.contents, values), source.snapshot);
+  while (preserved.length > 0 && preserved[preserved.length - 1].trim() === "") {
+    preserved.pop();
+  }
+
+  const output = [
+    ...preserved,
+    `${searchTimeoutKey}=${searchTimeout}`,
+    `${maxSearchesKey}=${maxSearches}`,
+    `${sessionCertKey}=${sessionCert}`,
+    "",
+  ].join("\n");
+
+  writeFileSync(path, output, { mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 if (import.meta.url === new URL(process.argv[1], "file:").href) {
   try {
-    if (process.argv.length !== 2) fail("usage: inject-journey-runtime-settings.mjs");
+    if (process.argv.length !== 2) throw new Error("usage: inject-journey-runtime-settings.mjs");
     inject();
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
