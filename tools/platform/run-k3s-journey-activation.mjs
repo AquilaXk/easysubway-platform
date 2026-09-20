@@ -525,22 +525,35 @@ export function createK3sJourneyActivationEffects({
       const command = {
         schemaVersion: 1,
         artifactKind: "journey-v3-activation-command",
-        activationRequestIdentity: admission.candidateAdmissionSha256,
+        activationRequestIdentity: request.releaseTuple.tupleSha256,
         candidateManifestSha256: request.releaseTuple.serverRouteBundleDigest.slice(7),
         candidateGeneration: request.candidateGeneration,
         expectedActiveGeneration: request.candidateGeneration - 1,
         trafficGeneration: request.trafficGeneration,
       };
-      const body = await requestJson(
-        new URL("/internal/v1/journey/activation", `${baseUrl}/`),
-        { method: "POST", body: command, serviceToken, fetchImpl },
-      );
-      validateReadiness(body, request, true);
-      return {
-        trafficGeneration: request.trafficGeneration,
-        activeReadinessEvidenceDigest: `sha256:${body.evidenceSha256}`,
-        evidenceDigest: `sha256:${body.evidenceSha256}`,
-      };
+      try {
+        const body = await requestJson(
+          new URL("/internal/v1/journey/activation", `${baseUrl}/`),
+          { method: "POST", body: command, serviceToken, fetchImpl },
+        );
+        validateReadiness(body, request, true);
+        return {
+          trafficGeneration: request.trafficGeneration,
+          activeReadinessEvidenceDigest: `sha256:${body.evidenceSha256}`,
+          evidenceDigest: `sha256:${body.evidenceSha256}`,
+        };
+      } catch (activationError) {
+        try {
+          const podLogs = await adminKubectl([
+            "logs", `deployment/${rendered?.activationPlan?.candidateDeploymentName}`,
+            "--namespace", NAMESPACE, "--tail=200", "--all-containers=true",
+          ]);
+          process.stderr.write(`\n=== CANDIDATE POD LOGS ON ACTIVATION FAILURE ===\n${podLogs.stdout}\n${podLogs.stderr}\n`);
+        } catch (dumpError) {
+          process.stderr.write(`\n=== POD LOG DUMP ERROR ===\n${dumpError.message}\n`);
+        }
+        throw activationError;
+      }
     },
     async prepareActiveService() {
       let current;
@@ -966,7 +979,9 @@ async function requestJson(url, {
   }
   if (response.status !== 200 ||
     !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
-    throw new Error(`Journey response boundary failed (status: ${response.status})`);
+    let text = "";
+    try { text = await response.text(); } catch {}
+    throw new Error(`Journey response boundary failed (status: ${response.status}${text ? `, body: ${text.slice(0, 1000)}` : ""})`);
   }
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length < 2 || bytes.length > 64 * 1024) {

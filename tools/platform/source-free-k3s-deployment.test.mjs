@@ -728,3 +728,48 @@ test("activation normalizes quoted public key PEM and injects startup bundle pro
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX, "false");
 });
 
+test("activateCandidate sends tupleSha256 as activationRequestIdentity matching candidate startup configuration", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activate-candidate-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  let sentCommand;
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async () => ({ stdout: Buffer.alloc(0) }),
+    serviceToken: "token".repeat(7),
+    fetchImpl: async (url, options) => {
+      sentCommand = JSON.parse(options.body);
+      const readiness = {
+        releaseTupleSha256: activationRequest.releaseTuple.tupleSha256.slice(7),
+        backendImageDigest: activationRequest.releaseTuple.backendImageDigest,
+        backendConfigSha256: activationRequest.releaseTuple.backendConfigDigest.slice(7),
+        journeyContractSha256: activationRequest.releaseTuple.journeyContractDigest.slice(7),
+        routeBundleManifestSha256: activationRequest.releaseTuple.serverRouteBundleDigest.slice(7),
+        generation: activationRequest.candidateGeneration,
+        evidenceSha256: "e".repeat(64),
+        trafficGeneration: activationRequest.trafficGeneration,
+        servingReady: true,
+        draining: false,
+      };
+      return new Response(JSON.stringify(readiness), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const activation = await effects.activateCandidate({
+    baseUrl: "http://127.0.0.1:8080",
+    admission: { candidateAdmissionSha256: digest("6") },
+  });
+  assert.equal(sentCommand.activationRequestIdentity, activationRequest.releaseTuple.tupleSha256);
+  assert.notEqual(sentCommand.activationRequestIdentity, digest("6"));
+  assert.equal(sentCommand.candidateManifestSha256, activationRequest.releaseTuple.serverRouteBundleDigest.slice(7));
+  assert.equal(sentCommand.candidateGeneration, activationRequest.candidateGeneration);
+  assert.equal(sentCommand.expectedActiveGeneration, activationRequest.candidateGeneration - 1);
+  assert.equal(sentCommand.trafficGeneration, activationRequest.trafficGeneration);
+  assert.equal(activation.trafficGeneration, activationRequest.trafficGeneration);
+  assert.equal(activation.activeReadinessEvidenceDigest, `sha256:${"e".repeat(64)}`);
+});
+
