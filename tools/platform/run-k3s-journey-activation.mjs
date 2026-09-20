@@ -432,18 +432,22 @@ export function createK3sJourneyActivationEffects({
         ], { timeoutMs: 370_000 });
       } catch (rolloutError) {
         try {
-          const desc = await kubectl([
+          const desc = await adminKubectl([
             "describe", "deployment", rendered.activationPlan.candidateDeploymentName,
             "--namespace", NAMESPACE,
           ]);
           process.stderr.write(`\n=== CANDIDATE DEPLOYMENT DESCRIBE ===\n${desc.stdout}\n`);
-          const podLogs = await kubectl([
+        } catch (descError) {
+          process.stderr.write(`\n=== DESCRIBE ERROR ===\n${descError.message}\n`);
+        }
+        try {
+          const podLogs = await adminKubectl([
             "logs", `deployment/${rendered.activationPlan.candidateDeploymentName}`,
             "--namespace", NAMESPACE, "--tail=100", "--all-containers=true",
           ]);
           process.stderr.write(`\n=== CANDIDATE POD LOGS ===\n${podLogs.stdout}\n${podLogs.stderr}\n`);
-        } catch {
-          // ignore diagnostic capture errors
+        } catch (logsError) {
+          process.stderr.write(`\n=== LOGS ERROR ===\n${logsError.message}\n`);
         }
         throw rolloutError;
       }
@@ -468,15 +472,28 @@ export function createK3sJourneyActivationEffects({
         ],
       });
     },
-    runCandidateCanary({ baseUrl }) {
-      return runJourneyCandidateCanary({
-        tuplePath: request.tuplePath,
-        baseUrl,
-        candidateGeneration: request.candidateGeneration,
-        ...request.canary,
-        serviceToken,
-        fetchImpl,
-      });
+    async runCandidateCanary({ candidate, baseUrl }) {
+      try {
+        return await runJourneyCandidateCanary({
+          tuplePath: request.tuplePath,
+          baseUrl,
+          candidateGeneration: request.candidateGeneration,
+          ...request.canary,
+          serviceToken,
+          fetchImpl,
+        });
+      } catch (canaryError) {
+        try {
+          const podLogs = await adminKubectl([
+            "logs", `deployment/${candidate?.deploymentName ?? rendered?.activationPlan?.candidateDeploymentName}`,
+            "--namespace", NAMESPACE, "--tail=200", "--all-containers=true",
+          ]);
+          process.stderr.write(`\n=== CANDIDATE POD LOGS ON CANARY FAILURE ===\n${podLogs.stdout}\n${podLogs.stderr}\n`);
+        } catch (dumpError) {
+          process.stderr.write(`\n=== POD LOG DUMP ERROR ===\n${dumpError.message}\n`);
+        }
+        throw canaryError;
+      }
     },
     async observeCandidate({ baseUrl, canary }) {
       requireFallbackZero(canary);
@@ -1299,6 +1316,11 @@ if (isMainModule()) {
     process.stderr.write(`${failure.code} ${failure.message}\n`);
     if (failure.cause) {
       process.stderr.write(`\n=== ACTIVATION ERROR CAUSE ===\n${failure.cause?.stack ?? failure.cause}\n`);
+      let cause = failure.cause.cause;
+      while (cause) {
+        process.stderr.write(`\n=== ROOT CAUSE ===\n${cause?.stack ?? cause}\n`);
+        cause = cause.cause;
+      }
     }
     process.exitCode = failure.exitCode;
   }
