@@ -422,7 +422,18 @@ export function createK3sJourneyActivationEffects({
         type: "Opaque",
         stringData: candidateEnv,
       };
-      await kubectl(["create", "-f", "-"], { input: jsonBytes(secret) });
+      try {
+        await kubectl(["create", "-f", "-"], { input: jsonBytes(secret) });
+      } catch (error) {
+        if (!String(error?.message ?? "").includes("AlreadyExists")) {
+          throw error;
+        }
+        await kubectl([
+          "delete", "secret", rendered.secretPlan.name,
+          "--namespace", NAMESPACE, "--ignore-not-found=true",
+        ]);
+        await kubectl(["create", "-f", "-"], { input: jsonBytes(secret) });
+      }
       const objects = [
         configMap,
         ...rendered.candidateObjects.filter((object) => object.kind !== "Namespace"),
