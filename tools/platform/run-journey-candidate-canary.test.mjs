@@ -58,6 +58,44 @@ test("one authenticated canary POST returns canonical Platform evidence", async 
   );
 });
 
+test("multi-probe canary executes all 5 regional probes and returns aggregated evidence", async () => {
+  const fixture = await createFixture();
+  const probes = [
+    { regionId: "capital", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2V", originStationId: "station-6a5e08288b46", destinationStationId: "station-gangnam", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "busan", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2W", originStationId: "station-1fc7a7c971c8", destinationStationId: "station-3752d457e1c0", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "daegu", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2X", originStationId: "station-44dc03b65cae", destinationStationId: "station-5b51eac5a29c", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "daejeon", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Y", originStationId: "station-ee3cc9d04ee7", destinationStationId: "station-b35cc28f2c19", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "gwangju", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Z", originStationId: "station-45d732c94df2", destinationStationId: "station-956d3c1b71cf", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+  ];
+  const calls = [];
+  const responses = probes.map((p) => canaryResponse(fixture.tuple, { requestId: p.requestId, queryId: p.requestId }));
+  let callIndex = 0;
+  const result = await runJourneyCandidateCanary({
+    tuplePath: fixture.path,
+    baseUrl: "http://127.0.0.1:8082",
+    candidateGeneration: 7,
+    canaryRequestIdentity: "deploy-abc:standby",
+    probes,
+    serviceToken: TOKEN,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response(responses[callIndex++]);
+    },
+    now: () => NOW,
+  });
+
+  assert.equal(calls.length, 5);
+  for (let i = 0; i < 5; i++) {
+    const body = JSON.parse(calls[i].options.body);
+    assert.equal(body.requestId, probes[i].requestId);
+    assert.equal(body.originStationId, probes[i].originStationId);
+    assert.equal(body.destinationStationId, probes[i].destinationStationId);
+  }
+  const expectedDigest = `sha256:${createHash("sha256").update(responses.map((r) => r.evidenceSha256).join(",")).digest("hex")}`;
+  assert.equal(result.passed, true);
+  assert.equal(result.evidenceDigest, expectedDigest);
+});
+
 test("tuple, command, host, and secret failures make no network request", async () => {
   const fixture = await createFixture();
   const cases = [
@@ -286,23 +324,25 @@ function command(tuple) {
   };
 }
 
-function canaryResponse(tuple) {
+function canaryResponse(tuple, overrides = {}) {
+  const reqId = overrides.requestId ?? REQUEST_ID;
   const value = {
     schemaVersion: 1,
     artifactKind: "journey-v3-candidate-canary-result",
     canaryRequestIdentity: "deploy-abc:standby",
-    requestId: REQUEST_ID,
+    requestId: reqId,
     candidateManifestSha256: tuple.serverRouteBundleDigest.slice(7),
     candidateGeneration: 7,
     bundleId: "route-bundle-20260813",
     bundleReleaseSequence: 23,
-    queryId: REQUEST_ID,
+    queryId: reqId,
     capturedAt: "2026-08-13T03:00:00Z",
     passed: true,
     legacyGraphSuccessCount: 0,
     localRouteInvocationCount: 0,
     staleJourneyServedCount: 0,
     alternateEndpointSuccessCount: 0,
+    ...overrides,
   };
   return { ...value, evidenceSha256: canaryEvidenceSha256(value) };
 }

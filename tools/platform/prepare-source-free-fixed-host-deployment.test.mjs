@@ -67,8 +67,22 @@ test("PREVIEW prepares exact descriptor-v2 inputs and one existing fixed-host re
   assert.equal(request.candidateGeneration, 1);
   assert.equal(request.trafficGeneration, 41);
   assert.equal(request.nginxConfigPath, "/etc/nginx/sites-available/easysubway");
-  assert.equal(request.canary.originStationId, "station-sangnoksu");
-  assert.equal(request.canary.destinationStationId, "station-sadang");
+  assert.equal(request.canary.probes.length, 5);
+  assert.equal(request.canary.probes[0].regionId, "capital");
+  assert.equal(request.canary.probes[0].originStationId, "station-6a5e08288b46");
+  assert.equal(request.canary.probes[0].destinationStationId, "station-gangnam");
+  assert.equal(request.canary.probes[1].regionId, "busan");
+  assert.equal(request.canary.probes[1].originStationId, "station-1fc7a7c971c8");
+  assert.equal(request.canary.probes[1].destinationStationId, "station-3752d457e1c0");
+  assert.equal(request.canary.probes[2].regionId, "daegu");
+  assert.equal(request.canary.probes[2].originStationId, "station-44dc03b65cae");
+  assert.equal(request.canary.probes[2].destinationStationId, "station-5b51eac5a29c");
+  assert.equal(request.canary.probes[3].regionId, "daejeon");
+  assert.equal(request.canary.probes[3].originStationId, "station-ee3cc9d04ee7");
+  assert.equal(request.canary.probes[3].destinationStationId, "station-b35cc28f2c19");
+  assert.equal(request.canary.probes[4].regionId, "gwangju");
+  assert.equal(request.canary.probes[4].originStationId, "station-45d732c94df2");
+  assert.equal(request.canary.probes[4].destinationStationId, "station-956d3c1b71cf");
   assert.equal(request.operationDirectory, fixture.input.operationDirectory);
   assert.equal(
     parseFixedHostRequestForTest(

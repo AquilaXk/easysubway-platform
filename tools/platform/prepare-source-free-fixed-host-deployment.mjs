@@ -428,18 +428,43 @@ async function readCanaryPolicy() {
   const value = parseJson(bytes);
   if (
     !bytes.equals(pretty(value)) ||
-    !exactKeys(value, [
-      "schemaVersion", "artifactKind", "canaryRequestIdentity", "requestId",
-      "originStationId", "destinationStationId", "mobilityProfile",
-      "constraintMode", "maxTransfers", "alternativeCount",
-    ]) ||
     value.schemaVersion !== "PLATFORM_JOURNEY_CANARY_POLICY_V1" ||
-    value.artifactKind !== "platform-journey-canary-policy" ||
-    !/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(value.requestId) ||
-    value.originStationId === value.destinationStationId ||
-    value.mobilityProfile !== "STANDARD" || value.constraintMode !== "NONE" ||
-    value.maxTransfers !== 3 || value.alternativeCount !== 3
+    value.artifactKind !== "platform-journey-canary-policy"
   ) throw new Error("invalid Journey canary policy");
+
+  if (Array.isArray(value.probes)) {
+    if (
+      !exactKeys(value, [
+        "schemaVersion", "artifactKind", "canaryRequestIdentity", "probes",
+      ]) ||
+      value.probes.length !== 5
+    ) throw new Error("invalid Journey canary policy");
+    for (const probe of value.probes) {
+      if (
+        !exactKeys(probe, [
+          "regionId", "requestId", "originStationId", "destinationStationId",
+          "mobilityProfile", "constraintMode", "maxTransfers", "alternativeCount",
+        ]) ||
+        !["capital", "busan", "daegu", "daejeon", "gwangju"].includes(probe.regionId) ||
+        !/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(probe.requestId) ||
+        probe.originStationId === probe.destinationStationId ||
+        probe.mobilityProfile !== "STANDARD" || probe.constraintMode !== "NONE" ||
+        probe.maxTransfers !== 3 || probe.alternativeCount !== 3
+      ) throw new Error("invalid Journey canary policy");
+    }
+  } else {
+    if (
+      !exactKeys(value, [
+        "schemaVersion", "artifactKind", "canaryRequestIdentity", "requestId",
+        "originStationId", "destinationStationId", "mobilityProfile",
+        "constraintMode", "maxTransfers", "alternativeCount",
+      ]) ||
+      !/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(value.requestId) ||
+      value.originStationId === value.destinationStationId ||
+      value.mobilityProfile !== "STANDARD" || value.constraintMode !== "NONE" ||
+      value.maxTransfers !== 3 || value.alternativeCount !== 3
+    ) throw new Error("invalid Journey canary policy");
+  }
   const { schemaVersion, artifactKind, ...canary } = value;
   void schemaVersion;
   void artifactKind;

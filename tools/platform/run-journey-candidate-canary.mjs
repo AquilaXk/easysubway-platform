@@ -38,6 +38,7 @@ const ZERO_COUNTER_FIELDS = Object.freeze([
   "legacyGraphSuccessCount", "localRouteInvocationCount",
   "staleJourneyServedCount", "alternateEndpointSuccessCount",
 ]);
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const CLI_OPTIONS = new Map([
   ["--tuple", "tuplePath"],
   ["--base-url", "baseUrl"],
@@ -85,6 +86,7 @@ export async function runJourneyCandidateCanary({
   constraintMode,
   maxTransfers,
   alternativeCount,
+  probes,
   serviceToken,
   fetchImpl = fetch,
   now = () => new Date(),
@@ -101,6 +103,7 @@ export async function runJourneyCandidateCanary({
     constraintMode,
     maxTransfers,
     alternativeCount,
+    probes,
     serviceToken,
     fetchImpl,
     now,
@@ -108,34 +111,45 @@ export async function runJourneyCandidateCanary({
   const input = await openTupleInput(tuplePath);
   try {
     const tuple = validateTuple(input.bytes);
-    const command = Object.freeze({
-      schemaVersion: 1,
-      artifactKind: "journey-v3-candidate-canary-command",
-      canaryRequestIdentity,
-      candidateManifestSha256: tuple.serverRouteBundleDigest.slice(7),
-      candidateGeneration,
-      requestId,
-      originStationId,
-      destinationStationId,
-      mobilityProfile,
-      constraintMode,
-      maxTransfers,
-      alternativeCount,
-    });
-    const result = await requestCanary({
-      baseUrl,
-      command,
-      serviceToken,
-      fetchImpl,
-      now,
-    });
+    const probeList = Array.isArray(probes) && probes.length > 0
+      ? probes
+      : [{ requestId, originStationId, destinationStationId, mobilityProfile, constraintMode, maxTransfers, alternativeCount }];
+
+    const results = [];
+    for (const probe of probeList) {
+      const command = Object.freeze({
+        schemaVersion: 1,
+        artifactKind: "journey-v3-candidate-canary-command",
+        canaryRequestIdentity,
+        candidateManifestSha256: tuple.serverRouteBundleDigest.slice(7),
+        candidateGeneration,
+        requestId: probe.requestId,
+        originStationId: probe.originStationId,
+        destinationStationId: probe.destinationStationId,
+        mobilityProfile: probe.mobilityProfile,
+        constraintMode: probe.constraintMode,
+        maxTransfers: probe.maxTransfers,
+        alternativeCount: probe.alternativeCount,
+      });
+      const result = await requestCanary({
+        baseUrl,
+        command,
+        serviceToken,
+        fetchImpl,
+        now,
+      });
+      results.push(result);
+    }
     await verifyTupleInput(input);
+    const combinedDigest = probeList.length === 1
+      ? `sha256:${results[0].evidenceSha256}`
+      : `sha256:${sha256(results.map((r) => r.evidenceSha256).join(","))}`;
     return {
       schemaVersion: "PLATFORM_JOURNEY_CANDIDATE_CANARY_V1",
       artifactKind: "journey-candidate-canary",
       tupleSha256: tuple.tupleSha256,
       passed: true,
-      evidenceDigest: `sha256:${result.evidenceSha256}`,
+      evidenceDigest: combinedDigest,
       legacyGraphSuccessCount: 0,
       localRouteInvocationCount: 0,
       staleJourneyServedCount: 0,
@@ -156,17 +170,6 @@ function validateInvocation(values) {
     !validBaseUrl(values.baseUrl) ||
     !positiveSafeInteger(values.candidateGeneration) ||
     !validRawText(values.canaryRequestIdentity, 512) ||
-    !matches(values.requestId, ULID) ||
-    !validRawText(values.originStationId, 255) ||
-    !validRawText(values.destinationStationId, 255) ||
-    values.originStationId === values.destinationStationId ||
-    !MOBILITY_PROFILES.has(values.mobilityProfile) ||
-    !CONSTRAINT_MODES.has(values.constraintMode) ||
-    (values.mobilityProfile === "NO_STAIRS" && values.constraintMode === "NONE") ||
-    !Number.isSafeInteger(values.maxTransfers) ||
-    values.maxTransfers < 0 || values.maxTransfers > 3 ||
-    !Number.isSafeInteger(values.alternativeCount) ||
-    values.alternativeCount < 1 || values.alternativeCount > 3 ||
     typeof values.fetchImpl !== "function" ||
     typeof values.now !== "function"
   ) {
@@ -174,6 +177,45 @@ function validateInvocation(values) {
   }
   if (!validServiceToken(values.serviceToken)) {
     throw failure("JOURNEY_CANARY_SECRET", 2);
+  }
+
+  if (Array.isArray(values.probes)) {
+    if (values.probes.length === 0) {
+      throw failure("JOURNEY_CANARY_USAGE", 2);
+    }
+    for (const probe of values.probes) {
+      if (
+        !matches(probe.requestId, ULID) ||
+        !validRawText(probe.originStationId, 255) ||
+        !validRawText(probe.destinationStationId, 255) ||
+        probe.originStationId === probe.destinationStationId ||
+        !MOBILITY_PROFILES.has(probe.mobilityProfile) ||
+        !CONSTRAINT_MODES.has(probe.constraintMode) ||
+        (probe.mobilityProfile === "NO_STAIRS" && probe.constraintMode === "NONE") ||
+        !Number.isSafeInteger(probe.maxTransfers) ||
+        probe.maxTransfers < 0 || probe.maxTransfers > 3 ||
+        !Number.isSafeInteger(probe.alternativeCount) ||
+        probe.alternativeCount < 1 || probe.alternativeCount > 3
+      ) {
+        throw failure("JOURNEY_CANARY_USAGE", 2);
+      }
+    }
+  } else {
+    if (
+      !matches(values.requestId, ULID) ||
+      !validRawText(values.originStationId, 255) ||
+      !validRawText(values.destinationStationId, 255) ||
+      values.originStationId === values.destinationStationId ||
+      !MOBILITY_PROFILES.has(values.mobilityProfile) ||
+      !CONSTRAINT_MODES.has(values.constraintMode) ||
+      (values.mobilityProfile === "NO_STAIRS" && values.constraintMode === "NONE") ||
+      !Number.isSafeInteger(values.maxTransfers) ||
+      values.maxTransfers < 0 || values.maxTransfers > 3 ||
+      !Number.isSafeInteger(values.alternativeCount) ||
+      values.alternativeCount < 1 || values.alternativeCount > 3
+    ) {
+      throw failure("JOURNEY_CANARY_USAGE", 2);
+    }
   }
 }
 

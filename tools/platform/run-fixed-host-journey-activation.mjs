@@ -1582,7 +1582,9 @@ function parseFixedHostRequest(bytes) {
     !/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(value.projectName ?? "") ||
     !positiveInteger(value.candidateGeneration) ||
     !positiveInteger(value.trafficGeneration) ||
-    !isExactObject(value.canary, canaryFields) ||
+    !(Array.isArray(value.canary?.probes)
+      ? isExactObject(value.canary, ["canaryRequestIdentity", "probes"])
+      : isExactObject(value.canary, canaryFields)) ||
     !validCanaryRequest(value.canary)
   ) {
     throw typed("FIXED_HOST_USAGE", undefined, 2);
@@ -1638,6 +1640,27 @@ function validCanaryRequest(value) {
       const codePoint = character.codePointAt(0);
       return codePoint >= 0x20 && codePoint !== 0x7f;
     });
+  if (value && Array.isArray(value.probes)) {
+    return rawText(value.canaryRequestIdentity, 512) &&
+      value.probes.length > 0 &&
+      value.probes.every((probe) =>
+        isExactObject(probe, [
+          "regionId", "requestId", "originStationId",
+          "destinationStationId", "mobilityProfile", "constraintMode",
+          "maxTransfers", "alternativeCount",
+        ]) &&
+        /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(probe.requestId ?? "") &&
+        rawText(probe.originStationId, 255) &&
+        rawText(probe.destinationStationId, 255) &&
+        probe.originStationId !== probe.destinationStationId &&
+        ["STANDARD", "SLOW", "NO_STAIRS", "STEP_FREE"].includes(probe.mobilityProfile) &&
+        ["NONE", "REQUIRE_STEP_FREE"].includes(probe.constraintMode) &&
+        !(probe.mobilityProfile === "NO_STAIRS" && probe.constraintMode === "NONE") &&
+        Number.isSafeInteger(probe.maxTransfers) && probe.maxTransfers >= 0 && probe.maxTransfers <= 3 &&
+        Number.isSafeInteger(probe.alternativeCount) && probe.alternativeCount >= 1 &&
+        probe.alternativeCount <= 3
+      );
+  }
   return rawText(value.canaryRequestIdentity, 512) &&
     /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(value.requestId ?? "") &&
     rawText(value.originStationId, 255) &&

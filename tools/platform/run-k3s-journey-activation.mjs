@@ -56,6 +56,11 @@ const CANARY_FIELDS = Object.freeze([
   "destinationStationId", "mobilityProfile", "constraintMode",
   "maxTransfers", "alternativeCount",
 ]);
+const CANARY_PROBE_FIELDS = Object.freeze([
+  "regionId", "requestId", "originStationId",
+  "destinationStationId", "mobilityProfile", "constraintMode",
+  "maxTransfers", "alternativeCount",
+]);
 const OVERRIDE_KEYS = new Set([
   "SPRING_PROFILES_ACTIVE",
   "EASYSUBWAY_PUSH_DELIVERY_ENABLED",
@@ -848,6 +853,22 @@ function validateTuple(tuple) {
 }
 
 function validateCanary(canary) {
+  if (canary && Array.isArray(canary.probes)) {
+    return exactObject(canary, ["canaryRequestIdentity", "probes"]) &&
+      typeof canary.canaryRequestIdentity === "string" && canary.canaryRequestIdentity.length > 0 &&
+      canary.probes.length > 0 &&
+      canary.probes.every((probe) =>
+        exactObject(probe, CANARY_PROBE_FIELDS) &&
+        typeof probe.regionId === "string" && probe.regionId.length > 0 &&
+        typeof probe.requestId === "string" && probe.requestId.length > 0 &&
+        typeof probe.originStationId === "string" && probe.originStationId.length > 0 &&
+        typeof probe.destinationStationId === "string" && probe.destinationStationId.length > 0 &&
+        typeof probe.mobilityProfile === "string" && probe.mobilityProfile.length > 0 &&
+        typeof probe.constraintMode === "string" && probe.constraintMode.length > 0 &&
+        Number.isSafeInteger(probe.maxTransfers) && probe.maxTransfers >= 0 &&
+        Number.isSafeInteger(probe.alternativeCount) && probe.alternativeCount > 0
+      );
+  }
   return exactObject(canary, CANARY_FIELDS) &&
     typeof canary.canaryRequestIdentity === "string" && canary.canaryRequestIdentity.length > 0 &&
     typeof canary.requestId === "string" && canary.requestId.length > 0 &&
