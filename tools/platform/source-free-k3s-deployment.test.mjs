@@ -431,6 +431,49 @@ test("activation keeps trusted readiness identity in ConfigMap and secrets out o
   const ci = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.equal(ci.split("node --test tools/platform/source-free-k3s-deployment.test.mjs").length - 1, 1);
 });
+
+test("activation deletes and recreates secret if AlreadyExists occurs during candidate apply", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-already-exists-secret-"));
+  const protectedToken = "p".repeat(32);
+  const backendEnvironment = [
+    "DATABASE_PASSWORD=private-test-value",
+    "SAFE_FLAG=true",
+    "",
+  ].join("\n");
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment });
+  const createdSecrets = [];
+  const rendered = mockCandidateRenderPlan({
+    activationRequest,
+    configOverrides: { SAFE_CONFIG: "true" },
+  });
+  let firstCreate = true;
+  const deletedSecrets = [];
+  const commandRunner = async (command, args, options = {}) => {
+    if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
+    if (args.includes("create")) {
+      if (firstCreate) {
+        firstCreate = false;
+        throw new Error('Error from server (AlreadyExists): error when creating "STDIN": secrets "journey-secret-23" already exists');
+      }
+      createdSecrets.push(JSON.parse(Buffer.from(options.input).toString("utf8")));
+    }
+    if (args.includes("delete") && args.includes("secret")) {
+      deletedSecrets.push(args);
+    }
+    return { stdout: Buffer.alloc(0) };
+  };
+  const activationEffects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner,
+    serviceToken: protectedToken,
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await activationEffects.verifyInputs();
+  await activationEffects.applyCandidate();
+  assert.equal(createdSecrets.length, 1);
+  assert.equal(deletedSecrets.length, 1);
+  assert.ok(deletedSecrets[0].includes("journey-secret-23"));
+});
 test("activation rejects a crafted Hub bundle request before it can invoke K3s", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-crafted-hub-bundle-"));
   const activationRequest = request(root);
