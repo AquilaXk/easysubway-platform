@@ -72,7 +72,7 @@ LOCK_FILE="${DEPLOY_ROOT}/deploy.lock"
 
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
-RUNTIME_SERVICES=(backend back-worker route-v2-gateway)
+RUNTIME_SERVICES=(backend back-worker)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana alloy)
 OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana alloy)
 
@@ -287,32 +287,6 @@ backend_port="${backend_port:-8080}"
 # config, only briefly during a deploy's promotion window.
 backend_standby_port="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_BACKEND_STANDBY_PORT)"
 backend_standby_port="${backend_standby_port:-8082}"
-route_v2_gateway_port="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ROUTE_V2_GATEWAY_PORT)"
-route_v2_gateway_port="${route_v2_gateway_port:-8081}"
-route_v2_ingress_enabled="$(read_env_value "${COMPOSE_ENV}" EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED | tr '[:upper:]' '[:lower:]')"
-case "${route_v2_ingress_enabled}" in
-	true|on|yes|1)
-		route_v2_ingress_enabled_normalized=true
-		route_v2_host_action="proxy_pass http://127.0.0.1:${route_v2_gateway_port};"
-		;;
-	""|false|off|no|0)
-		route_v2_ingress_enabled_normalized=false
-		route_v2_host_action="return 404;"
-		;;
-	*) printf 'invalid Route V2 ingress enabled value\n' >&2; exit 2 ;;
-esac
-# A prior signed-RC canary budget breach (issue #2095,
-# tools/ops/verify-production-route-v2-canary-rollback.sh) closes Route V2
-# ingress and leaves this lock so a routine, UNRELATED deploy cannot silently
-# re-open it by re-rendering EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED=true from
-# compose.env's stale desired state. An operator must explicitly remove the
-# lock file after investigating before ingress can open again.
-route_v2_canary_rollback_lock="${SHARED_DIR}/route-v2-canary-rollback-lock.json"
-if [[ -f "${route_v2_canary_rollback_lock}" ]]; then
-	route_v2_ingress_enabled_normalized=false
-	route_v2_host_action="return 404;"
-	printf 'Route V2 ingress forced closed by canary rollback lock: %s\n' "${route_v2_canary_rollback_lock}" >&2
-fi
 report_upload_bucket="$(read_env_value "${BACKEND_ENV}" EASYSUBWAY_REPORT_UPLOAD_BUCKET)"
 if [[ -z "${report_upload_bucket}" ]]; then
 	write_result "blocked" "missing_report_upload_bucket"
@@ -867,10 +841,9 @@ abort_standby_stage() {
 install_route_v2_host_ingress() {
 	local target_backend_port="$1"
 	local site_target="/etc/nginx/sites-available/easysubway"
-	local route_snippet_target="/etc/nginx/snippets/easysubway-route-v2-proxy.conf"
 	local default_snippet_target="/etc/nginx/snippets/easysubway-default-proxy.conf"
-	local candidate site_backup route_snippet_backup default_snippet_backup
-	local site_existed=0 route_snippet_existed=0 default_snippet_existed=0
+	local candidate site_backup default_snippet_backup
+	local site_existed=0 default_snippet_existed=0
 	local install_failed=0 restore_failed=0
 	if ! candidate="$(mktemp)"; then
 		return 1
@@ -879,46 +852,31 @@ install_route_v2_host_ingress() {
 		rm -f "${candidate}"
 		return 1
 	fi
-	if ! route_snippet_backup="$(mktemp)"; then
-		rm -f "${candidate}" "${site_backup}"
-		return 1
-	fi
 	if ! default_snippet_backup="$(mktemp)"; then
-		rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}"
+		rm -f "${candidate}" "${site_backup}"
 		return 1
 	fi
 	if ! sed \
 		-e "s/__BACKEND_PORT__/${target_backend_port}/g" \
-		-e "s|__ROUTE_V2_ACTION__|${route_v2_host_action}|g" \
 		infra/nginx/host-easysubway.conf.template > "${candidate}"; then
-		rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
 		return 1
 	fi
 	if sudo test -f "${site_target}"; then
 		if ! sudo cp "${site_target}" "${site_backup}"; then
-			rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
 			return 1
 		fi
 		site_existed=1
 	fi
-	if sudo test -f "${route_snippet_target}"; then
-		if ! sudo cp "${route_snippet_target}" "${route_snippet_backup}"; then
-			rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
-			return 1
-		fi
-		route_snippet_existed=1
-	fi
 	if sudo test -f "${default_snippet_target}"; then
 		if ! sudo cp "${default_snippet_target}" "${default_snippet_backup}"; then
-			rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
 			return 1
 		fi
 		default_snippet_existed=1
 	fi
-	if ! sudo install -m 0644 infra/nginx/host-route-v2-proxy.conf "${route_snippet_target}"; then
-		install_failed=1
-	fi
-	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 infra/nginx/host-default-proxy.conf "${default_snippet_target}"; then
+	if ! sudo install -m 0644 infra/nginx/host-default-proxy.conf "${default_snippet_target}"; then
 		install_failed=1
 	fi
 	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 "${candidate}" "${site_target}"; then
@@ -936,11 +894,6 @@ install_route_v2_host_ingress() {
 		else
 			if ! sudo rm -f "${site_target}"; then restore_failed=1; fi
 		fi
-		if [[ "${route_snippet_existed}" -eq 1 ]]; then
-			if ! sudo install -m 0644 "${route_snippet_backup}" "${route_snippet_target}"; then restore_failed=1; fi
-		else
-			if ! sudo rm -f "${route_snippet_target}"; then restore_failed=1; fi
-		fi
 		if [[ "${default_snippet_existed}" -eq 1 ]]; then
 			if ! sudo install -m 0644 "${default_snippet_backup}" "${default_snippet_target}"; then restore_failed=1; fi
 		else
@@ -952,13 +905,13 @@ install_route_v2_host_ingress() {
 		if [[ "${restore_failed}" -eq 0 ]] && ! sudo systemctl reload nginx; then
 			restore_failed=1
 		fi
-		rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
 		if [[ "${restore_failed}" -ne 0 ]]; then
-			printf 'failed to restore Route V2 host ingress\n' >&2
+			printf 'failed to restore host ingress\n' >&2
 		fi
 		return 1
 	fi
-	rm -f "${candidate}" "${site_backup}" "${route_snippet_backup}" "${default_snippet_backup}"
+	rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
 }
 
 # --- Stage 1: bring up a standby container on an alternate port running the
@@ -1090,9 +1043,6 @@ if ! install_route_v2_host_ingress "${backend_port}"; then
 	exit 1
 fi
 
-printf '%s\n' "${route_v2_ingress_enabled_normalized}" > "${SHARED_DIR}/current-route-v2-ingress-enabled"
-chmod 600 "${SHARED_DIR}/current-route-v2-ingress-enabled"
-
 # --- Stage 5: Nginx is back on the canonical port and the standby is no
 # longer needed. Retire it promptly — it is pure standby-window memory
 # overhead on the host (issue #2331 background).
@@ -1107,20 +1057,18 @@ write_standby_state "idle"
 # --- Stage 6: recreate the remaining runtime services. Neither sits behind
 # host Nginx's default location (already switched back to canonical above),
 # so their recreation is not on the zero-downtime path: back-worker has no
-# external HTTP exposure at all, and route-v2-gateway's brief restart only
-# affects the two Route V2 endpoints, which already have their own
-# canary/rollback safety net (issue #2095/#2337). The canonical backend is
+# external HTTP exposure at all. The canonical backend is
 # already promoted and serving at this point, so a failure here is reported
 # without touching it further.
 write_phase "finalizing"
-if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build --force-recreate back-worker route-v2-gateway; then
-	dump_diagnostics "back-worker-gateway" "" back-worker route-v2-gateway
-	abort_deploy "back_worker_gateway_recreate_failed"
+if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build --force-recreate back-worker; then
+	dump_diagnostics "back-worker" "" back-worker
+	abort_deploy "back_worker_recreate_failed"
 	exit 1
 fi
-if ! runtime_services_hardened back-worker route-v2-gateway; then
-	dump_diagnostics "back-worker-gateway" "" back-worker route-v2-gateway
-	abort_deploy "back_worker_gateway_hardening_failed"
+if ! runtime_services_hardened back-worker; then
+	dump_diagnostics "back-worker" "" back-worker
+	abort_deploy "back_worker_hardening_failed"
 	exit 1
 fi
 
