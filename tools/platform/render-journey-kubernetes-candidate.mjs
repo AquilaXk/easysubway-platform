@@ -245,7 +245,6 @@ function deployment(input, token, deploymentName, configName, secretName) {
           terminationGracePeriodSeconds: 30,
           nodeSelector: {
             "kubernetes.io/arch": "arm64",
-            "node.kubernetes.io/instance-type": "VM.Standard.A1.Flex",
           },
           securityContext: {
             runAsNonRoot: true,
