@@ -347,8 +347,8 @@ function render(input) {
   const token = candidateToken(input);
   const deploymentName = `journey-candidate-${token}`;
   const serviceName = `journey-candidate-${token}`;
-  const configName = `journey-config-${digestHex(input.releaseTuple.backendConfigDigest).slice(0, 16)}`;
-  const secretName = `journey-secret-${digestHex(input.secretIdentity).slice(0, 16)}`;
+  const configName = `journey-config-${token}`;
+  const secretName = `journey-secret-${token}`;
   const releaseIdentity = {
     tupleSha256: input.tupleSha256,
     backendImageDigest: input.releaseTuple.backendImageDigest,

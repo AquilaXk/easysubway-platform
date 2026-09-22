@@ -129,6 +129,8 @@ test("renderer produces deterministic source-free candidate objects and an inact
     JSON.parse(rendered.configPlan.overrides["journey-profile-resource-policy.json"]).resourcePolicyId,
     "RAPTOR_RESOURCE_POLICY_V1",
   );
+  assert.equal(rendered.configPlan.name, `journey-config-${rendered.releaseIdentity.candidateToken}`);
+  assert.equal(rendered.secretPlan.name, `journey-secret-${rendered.releaseIdentity.candidateToken}`);
   assert.equal(rendered.secretPlan.immutable, true);
   assert.equal(rendered.secretPlan.requiredKeyProjection, "EXACT_VALIDATED_BACKEND_ENV_ALLOWLIST");
   assert.equal(rendered.secretPlan.serializedValueCount, 0);
