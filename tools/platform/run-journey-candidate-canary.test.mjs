@@ -62,10 +62,10 @@ test("multi-probe canary executes all 5 regional probes and returns aggregated e
   const fixture = await createFixture();
   const probes = [
     { regionId: "capital", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2V", originStationId: "station-6a5e08288b46", destinationStationId: "station-gangnam", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "busan", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2W", originStationId: "station-1fc7a7c971c8", destinationStationId: "station-3752d457e1c0", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "daegu", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2X", originStationId: "station-44dc03b65cae", destinationStationId: "station-5b51eac5a29c", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "daejeon", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Y", originStationId: "station-ee3cc9d04ee7", destinationStationId: "station-b35cc28f2c19", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "gwangju", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Z", originStationId: "station-45d732c94df2", destinationStationId: "station-956d3c1b71cf", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "busan", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2W", originStationId: "station-sangnoksu", destinationStationId: "station-sadang", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "daegu", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2X", originStationId: "station-sadang", destinationStationId: "station-sangnoksu", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "daejeon", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Y", originStationId: "station-gangnam", destinationStationId: "station-6a5e08288b46", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "gwangju", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Z", originStationId: "station-6a5e08288b46", destinationStationId: "station-sadang", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
   ];
   const calls = [];
   const responses = probes.map((p) => canaryResponse(fixture.tuple, { requestId: p.requestId, queryId: p.requestId }));
@@ -100,10 +100,10 @@ test("multi-probe canary fails closed if any regional probe fails", async () => 
   const fixture = await createFixture();
   const probes = [
     { regionId: "capital", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2V", originStationId: "station-6a5e08288b46", destinationStationId: "station-gangnam", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "busan", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2W", originStationId: "station-1fc7a7c971c8", destinationStationId: "station-3752d457e1c0", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "daegu", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2X", originStationId: "station-44dc03b65cae", destinationStationId: "station-5b51eac5a29c", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "daejeon", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Y", originStationId: "station-ee3cc9d04ee7", destinationStationId: "station-b35cc28f2c19", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
-    { regionId: "gwangju", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Z", originStationId: "station-45d732c94df2", destinationStationId: "station-956d3c1b71cf", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "busan", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2W", originStationId: "station-sangnoksu", destinationStationId: "station-sadang", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "daegu", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2X", originStationId: "station-sadang", destinationStationId: "station-sangnoksu", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "daejeon", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Y", originStationId: "station-gangnam", destinationStationId: "station-6a5e08288b46", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
+    { regionId: "gwangju", requestId: "01K2H7Q5B7E3T19N8J4M6P0R2Z", originStationId: "station-6a5e08288b46", destinationStationId: "station-sadang", mobilityProfile: "STANDARD", constraintMode: "NONE", maxTransfers: 3, alternativeCount: 3 },
   ];
   let callIndex = 0;
   await assert.rejects(
