@@ -157,6 +157,7 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.equal(pod.automountServiceAccountToken, false);
   assert.equal(pod.enableServiceLinks, false);
   assert.equal(pod.terminationGracePeriodSeconds, 30);
+  assert.deepEqual(pod.nodeSelector, { "kubernetes.io/arch": "arm64", "node.kubernetes.io/instance-type": "VM.Standard.A1.Flex" });
   assert.deepEqual(pod.securityContext, { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: "RuntimeDefault" } });
   assert.equal(container.image, `ghcr.io/aquilaxk/easysubway-backend@${input.releaseTuple.backendImageDigest}`);
   assert.equal(container.securityContext.readOnlyRootFilesystem, true);
