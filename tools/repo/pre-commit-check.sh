@@ -72,7 +72,7 @@ echo "🔍 [PRE-COMMIT] Tracked documentation resource(s) modified: ${MODIFIED_T
 # 4. Check for documentation fragment drift
 if ! node "${FRAGMENT_TOOL}" --worktree --check > /dev/null 2>&1; then
   echo "⚠️  [PRE-COMMIT] documentation-fragment.json drift detected for tracked files!"
-  
+
   if [[ "${AUTO_FIX}" == "--fix" || "${EASYSUBWAY_AUTO_REFRESH_FRAGMENT:-true}" == "true" ]]; then
     echo "🔄 [PRE-COMMIT] Auto-synchronizing documentation-fragment.json..."
     node "${FRAGMENT_TOOL}" --worktree
