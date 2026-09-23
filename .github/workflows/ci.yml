@@ -21,6 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Lint workflows
         shell: bash
@@ -37,9 +38,20 @@ jobs:
         with:
           node-version: 24
 
+      - name: Check documentation fragment preflight sync
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ -n "${BASE_REF}" ]]; then
+            node tools/ci/check-documentation-fragment-sync.mjs --base "origin/${BASE_REF}"
+          else
+            node tools/ci/check-documentation-fragment-sync.mjs --check-all
+          fi
+
       - name: Test platform contracts
         run: |
           node --test tools/ci/automerge-queue.test.mjs
+          node --test tools/ci/check-documentation-fragment-sync.test.mjs
           node --test tools/ci/public-sensitivity-owner-receipt-caller.test.mjs
           node --test tools/platform/no-mutable-contract-source.test.mjs
           node --test tools/platform/prepare-deployment-env.test.mjs
