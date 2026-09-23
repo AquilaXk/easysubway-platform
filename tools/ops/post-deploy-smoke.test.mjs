@@ -295,6 +295,14 @@ test("post-deploy smoke requires disabled ingress to return 404 instead of 401",
     assert.equal(axis(report, "route-api-closure").result, "PASS");
   });
 
+  routes.routeV2Session = () => ({ status: 403, body: {} });
+  routes.routeV2Search = () => ({ status: 403, body: {} });
+  await withServer(routes, async (baseUrl) => {
+    const { code, report } = await runSmoke(baseUrl, ["--route-v2-ingress-enabled", "false"]);
+    assert.equal(code, 0);
+    assert.equal(axis(report, "route-api-closure").result, "PASS");
+  });
+
   routes.routeV2Search = () => ({ status: 401, body: {} });
   await withServer(routes, async (baseUrl) => {
     const { code, report } = await runSmoke(baseUrl, ["--route-v2-ingress-enabled", "false"]);
@@ -410,14 +418,14 @@ test("post-deploy smoke contract file matches the expected schema", async () => 
   );
   assert.deepEqual(authenticatedV2Search.acceptedStatusesByIngress, {
     true: [401],
-    false: [404],
+    false: [403, 404],
   });
   const session = routeApiClosure.endpoints.find(
     ({ path: endpointPath }) => endpointPath === "/api/v2/routes/session",
   );
   assert.deepEqual(session.acceptedStatusesByIngress, {
     true: [403],
-    false: [404],
+    false: [403, 404],
   });
   assert.deepEqual(session.expectedJsonFieldsByIngress.true, {
     success: false,

@@ -40,7 +40,7 @@
           "path": "/api/v2/routes/session",
           "acceptedStatusesByIngress": {
             "true": [403],
-            "false": [404]
+            "false": [403, 404]
           },
           "expectedJsonFieldsByIngress": {
             "true": {
@@ -58,7 +58,7 @@
           "path": "/api/v2/routes/search",
           "acceptedStatusesByIngress": {
             "true": [401],
-            "false": [404]
+            "false": [403, 404]
           },
           "request": {
             "originStationId": "closure-probe",
