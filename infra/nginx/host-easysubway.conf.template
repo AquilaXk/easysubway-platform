@@ -35,15 +35,6 @@ server {
     ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/easysubway-api.aquilaxk.site/privkey.pem;
 
-    location = /api/v2/routes/session {
-        __ROUTE_V2_ACTION__
-        include /etc/nginx/snippets/easysubway-route-v2-proxy.conf;
-    }
-
-    location = /api/v2/routes/search {
-        __ROUTE_V2_ACTION__
-        include /etc/nginx/snippets/easysubway-route-v2-proxy.conf;
-    }
 
     # actuator 메트릭·엔드포인트는 공개 노출하지 않는다(#2376). 배포·관측 readiness/liveness probe
     # 경로만 예외로 공개 유지하고(공개 probe 계약 무회귀), 나머지 /actuator/* 는 차단한다.

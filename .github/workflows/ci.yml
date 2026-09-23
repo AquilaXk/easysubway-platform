@@ -76,12 +76,10 @@ jobs:
         env:
           EASYSUBWAY_BACKEND_ENV_FILE: /dev/null
           EASYSUBWAY_BACKEND_IMAGE: ghcr.io/aquilaxk/easysubway-backend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-          EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET: ci-only
         run: docker compose -f infra/docker-compose.yml config --quiet
 
       - name: Check shell syntax
         run: |
-          bash -n infra/nginx/route-v2-entrypoint.sh
           bash -n tools/deploy/deploy-backend.sh
           bash -n tools/deploy/prepare-deployment-env.sh
           bash -n tools/platform/bootstrap-single-node-k3s.sh
