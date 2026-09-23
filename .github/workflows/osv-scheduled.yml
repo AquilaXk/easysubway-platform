@@ -1,0 +1,24 @@
+name: Scheduled Dependency Vulnerability Scan
+
+on:
+  schedule:
+    # Monday 21:47 UTC (Tuesday 06:47 KST)
+    - cron: "47 21 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  osv-scan:
+    name: Scheduled OSV Scan
+    permissions:
+      actions: read
+      security-events: write
+      contents: read
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@3a7550f43ba5b58905a821ce3a0ed24c4858b3f4
+    with:
+      export-results: false
+      upload-sarif: true
+      fail-on-vuln: true
+      scan-args: |-
+        --directory=.
