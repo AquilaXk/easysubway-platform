@@ -1,0 +1,14 @@
+{
+  "name": "@easysubway/platform",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tools/platform/*.test.mjs tools/ci/*.test.mjs tools/ops/*.test.mjs",
+    "test:platform": "node --test tools/platform/*.test.mjs",
+    "test:ci": "node --test tools/ci/*.test.mjs",
+    "test:ops": "node --test tools/ops/*.test.mjs",
+    "check:fragment": "node tools/ci/check-documentation-fragment-sync.mjs --base origin/main",
+    "refresh:fragment": "node tools/repo/refresh-documentation-fragment.mjs --worktree"
+  }
+}
