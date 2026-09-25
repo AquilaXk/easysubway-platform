@@ -181,7 +181,7 @@ services:
       - observability
 
   docker-runtime-probe:
-    image: ghcr.io/google/cadvisor:v0.60.5
+    image: ghcr.io/google/cadvisor:v0.60.6
     container_name: easysubway-docker-runtime-probe
     restart: unless-stopped
     profiles:
@@ -197,7 +197,7 @@ services:
       - /dev/disk:/dev/disk:ro
 
   alertmanager:
-    image: prom/alertmanager:v0.34.0
+    image: prom/alertmanager:v0.34.1
     container_name: easysubway-alertmanager
     profiles:
       - observability
@@ -254,7 +254,7 @@ services:
       - loki-data:/loki
 
   loki:
-    image: grafana/loki:3.7.7
+    image: grafana/loki:3.7.8
     container_name: easysubway-loki
     profiles:
       - observability
@@ -277,7 +277,7 @@ services:
       start_period: 20s
 
   grafana:
-    image: grafana/grafana:13.2.0
+    image: grafana/grafana:13.2.2
     container_name: easysubway-grafana
     profiles:
       - observability
