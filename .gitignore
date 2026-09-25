@@ -3,6 +3,7 @@
 # Documentation policy
 *.md
 !/README.md
+!/README.ko.md
 !/.github/pull_request_template.md
 !/.github/PULL_REQUEST_TEMPLATE/*.md
 
