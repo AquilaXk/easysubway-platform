@@ -181,6 +181,44 @@ test("missing weak legacy or equal report secrets fail before output publication
   }
 });
 
+test("postgres and object-storage bind configuration enforces 127.0.0.1 and projects into compose.env", () => {
+  const allowlist = readFileSync(composeAllowlist, "utf8").split("\n").filter(Boolean);
+  assert.equal(allowlist.includes("EASYSUBWAY_POSTGRES_BIND"), true);
+  assert.equal(allowlist.includes("EASYSUBWAY_OBJECT_STORAGE_BIND"), true);
+
+  const fixture = makeFixture({
+    EASYSUBWAY_POSTGRES_BIND: "127.0.0.1",
+    EASYSUBWAY_OBJECT_STORAGE_BIND: "127.0.0.1",
+  });
+  try {
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const composeEnv = readFileSync(join(fixture.outputDirectory, "compose.env"), "utf8");
+    assert.match(composeEnv, /^EASYSUBWAY_POSTGRES_BIND=127\.0\.0\.1$/m);
+    assert.match(composeEnv, /^EASYSUBWAY_OBJECT_STORAGE_BIND=127\.0\.0\.1$/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("non-127.0.0.1 postgres and object-storage binds fail closed before publication", () => {
+  for (const [key, invalidVal] of [
+    ["EASYSUBWAY_POSTGRES_BIND", "0.0.0.0"],
+    ["EASYSUBWAY_POSTGRES_BIND", "192.168.1.100"],
+    ["EASYSUBWAY_OBJECT_STORAGE_BIND", "0.0.0.0"],
+    ["EASYSUBWAY_OBJECT_STORAGE_BIND", "10.0.0.1"],
+  ]) {
+    const fixture = makeFixture({ [key]: invalidVal });
+    try {
+      const result = run(fixture);
+      assert.equal(result.status, 1, `Expected failure for ${key}=${invalidVal}`);
+      assert.match(result.stderr, /must be 127\.0\.0\.1/);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
 function makeFixture(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "platform-report-env-"));
   const sourceEnv = join(directory, "source.env");
