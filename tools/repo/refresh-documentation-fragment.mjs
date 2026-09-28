@@ -8,6 +8,7 @@ const SHA_REGEX = /^[0-9a-f]{40}$/;
 export function parseArgs(argv = process.argv.slice(2)) {
   const options = {
     check: false,
+    strictCommitSha: false,
     worktree: false,
     quiet: false,
     headSha: null,
@@ -20,6 +21,8 @@ export function parseArgs(argv = process.argv.slice(2)) {
     const arg = argv[i];
     if (arg === "--check") {
       options.check = true;
+    } else if (arg === "--strict-commit-sha") {
+      options.strictCommitSha = true;
     } else if (arg === "--worktree") {
       options.worktree = true;
     } else if (arg === "--quiet") {
@@ -48,6 +51,7 @@ export function refreshDocumentationFragment({
   headSha = null,
   observedAt = null,
   check = false,
+  strictCommitSha = false,
   worktree = false,
   exec = execFileSync,
 } = {}) {
@@ -131,7 +135,7 @@ export function refreshDocumentationFragment({
     }
 
     const currentBlobSha = record.canonicalIdentity
-      ? record.canonicalIdentity.split(":")[3]
+      ? record.canonicalIdentity.split(":").pop()
       : null;
 
     const targetIdentity = `git:${effectiveHeadSha}:${relativePath}:${blobSha}`;
@@ -176,6 +180,8 @@ export function refreshDocumentationFragment({
     }
   }
 
+  const contentDriftCount = drift.filter((d) => d.blobChanged).length;
+  const hasContentDrift = contentDriftCount > 0;
   const sourceShaChanged = originalSourceSha !== effectiveHeadSha;
   const hasDrift = drift.length > 0 || sourceShaChanged;
 
@@ -199,6 +205,8 @@ export function refreshDocumentationFragment({
     totalResources: fragment.resources.length,
     trackedResources: trackedCount,
     driftCount: drift.length,
+    contentDriftCount,
+    hasContentDrift,
     drift,
     uncommittedWarnings,
     updated: !check && hasDrift,
@@ -214,7 +222,8 @@ Reads Git HEAD commit SHA and blob SHAs for all tracked resources,
 updating canonicalIdentity, lastVerifiedIdentity, and sourceSha in place.
 
 Options:
-  --check               Dry-run check mode: exit 0 if up-to-date, exit 1 if drift detected
+  --check               Dry-run check mode: exit 0 if content is in sync, exit 1 if drift detected
+  --strict-commit-sha   Enforce strict Git commit SHA equality in check mode (fails on any new commit)
   --worktree            Hash files from working tree directly via git hash-object
   --head <sha>          Specify explicit commit SHA to bind as sourceSha (default: Git HEAD)
   --observed-at <iso>   Specify verification timestamp in ISO format
@@ -244,11 +253,15 @@ export function runCli(argv = process.argv.slice(2)) {
     const result = refreshDocumentationFragment(options);
 
     if (options.check) {
-      if (result.driftCount > 0 || result.sourceShaChanged) {
+      const isFailed = options.strictCommitSha
+        ? (result.driftCount > 0 || result.sourceShaChanged)
+        : result.hasContentDrift;
+
+      if (isFailed) {
         console.error(
           `❌ [DRIFT DETECTED] ${result.repository} documentation-fragment.json is out of sync with Git HEAD (${result.headSha.slice(0, 8)}):`,
         );
-        if (result.sourceShaChanged) {
+        if (options.strictCommitSha && result.sourceShaChanged) {
           console.error(
             `   - sourceSha: recorded=${result.previousSourceSha?.slice(0, 8)}, current HEAD=${result.headSha.slice(0, 8)}`,
           );
@@ -258,7 +271,7 @@ export function runCli(argv = process.argv.slice(2)) {
             console.error(
               `   - ${item.path}: blob changed ${item.currentBlobSha?.slice(0, 8)} -> ${item.targetBlobSha?.slice(0, 8)}`,
             );
-          } else {
+          } else if (options.strictCommitSha) {
             console.error(
               `   - ${item.path}: commit SHA binding out of sync`,
             );
@@ -270,9 +283,15 @@ export function runCli(argv = process.argv.slice(2)) {
         return 1;
       }
       if (!options.quiet) {
-        console.log(
-          `✅ [IN SYNC] ${result.repository} documentation-fragment.json is up-to-date with Git HEAD (${result.headSha.slice(0, 8)}).`,
-        );
+        if (!options.strictCommitSha && result.sourceShaChanged) {
+          console.log(
+            `✅ [IN SYNC] ${result.repository} documentation content is in sync with Git HEAD (${result.headSha.slice(0, 8)}) [content-addressed].`,
+          );
+        } else {
+          console.log(
+            `✅ [IN SYNC] ${result.repository} documentation-fragment.json is up-to-date with Git HEAD (${result.headSha.slice(0, 8)}).`,
+          );
+        }
       }
       return 0;
     }
