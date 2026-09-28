@@ -212,6 +212,18 @@ if [[ "$(value EASYSUBWAY_BACKEND_BIND)" != "127.0.0.1" ]]; then
 	exit 1
 fi
 
+postgres_bind="$(value EASYSUBWAY_POSTGRES_BIND)"
+if [[ -n "${postgres_bind}" && "${postgres_bind}" != "127.0.0.1" ]]; then
+	printf 'postgres bind must be 127.0.0.1\n' >&2
+	exit 1
+fi
+
+object_storage_bind="$(value EASYSUBWAY_OBJECT_STORAGE_BIND)"
+if [[ -n "${object_storage_bind}" && "${object_storage_bind}" != "127.0.0.1" ]]; then
+	printf 'object storage bind must be 127.0.0.1\n' >&2
+	exit 1
+fi
+
 ads_asset_origin="$(value EASYSUBWAY_ADS_ASSET_ORIGIN)"
 ads_asset_authority="${ads_asset_origin#https://}"
 ads_asset_authority="${ads_asset_authority%/}"

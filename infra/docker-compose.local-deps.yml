@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${EASYSUBWAY_POSTGRES_USER:-easysubway}
       POSTGRES_PASSWORD: ${EASYSUBWAY_POSTGRES_PASSWORD:-easysubway_local}
     ports:
-      - "${EASYSUBWAY_POSTGRES_PORT:-5432}:5432"
+      - "${EASYSUBWAY_POSTGRES_BIND:-127.0.0.1}:${EASYSUBWAY_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -25,8 +25,8 @@ services:
       MINIO_ROOT_USER: ${EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY:-easysubway_local}
       MINIO_ROOT_PASSWORD: ${EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY:-easysubway_local_secret}
     ports:
-      - "${EASYSUBWAY_OBJECT_STORAGE_PORT:-9000}:9000"
-      - "${EASYSUBWAY_OBJECT_STORAGE_CONSOLE_PORT:-9001}:9001"
+      - "${EASYSUBWAY_OBJECT_STORAGE_BIND:-127.0.0.1}:${EASYSUBWAY_OBJECT_STORAGE_PORT:-9000}:9000"
+      - "${EASYSUBWAY_OBJECT_STORAGE_BIND:-127.0.0.1}:${EASYSUBWAY_OBJECT_STORAGE_CONSOLE_PORT:-9001}:9001"
     volumes:
       - object-storage-data:/data
     healthcheck:
