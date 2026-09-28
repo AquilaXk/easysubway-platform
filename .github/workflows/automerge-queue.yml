@@ -477,7 +477,9 @@ jobs:
                   (.state == "COMMENTED" and
                     (is_coderabbit or
                       ((.body // "" | startswith("**Actionable comments posted: ")) and
-                      (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:")))))))
+                      ((.body // "" | contains("<!-- Review source: Aquila fallback; canonical visible structure:")) or
+                       (.body // "" | contains("<!-- Review source: Aquila Universal Review; engine: aquila-review -->")) or
+                       (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:"))))))))
             ' \
               <(printf '%s\n' "${reviews}") \
               <(printf '%s\n' "${comments}") \
