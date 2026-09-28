@@ -462,7 +462,3 @@ test("runCli in --check-all --worktree mode formats actual worktree label instea
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
-
-
-
