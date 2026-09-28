@@ -2,7 +2,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { refreshDocumentationFragment } from "../repo/refresh-documentation-fragment.mjs";
 
 const SHA_REGEX = /^[0-9a-f]{40}$/;
 
@@ -13,6 +12,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
     fragmentPath: "contracts/documentation/documentation-fragment.json",
     repoRoot: null,
     checkAll: false,
+    worktree: false,
     quiet: false,
   };
 
@@ -28,6 +28,8 @@ export function parseArgs(argv = process.argv.slice(2)) {
       options.repoRoot = argv[++i];
     } else if (arg === "--check-all") {
       options.checkAll = true;
+    } else if (arg === "--worktree") {
+      options.worktree = true;
     } else if (arg === "--quiet") {
       options.quiet = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -46,6 +48,7 @@ export function checkDocumentationFragmentSync({
   fragmentPath = "contracts/documentation/documentation-fragment.json",
   repoRoot = null,
   checkAll = false,
+  worktree = false,
   exec = execFileSync,
 } = {}) {
   const root = repoRoot
@@ -86,22 +89,80 @@ export function checkDocumentationFragmentSync({
 
   // If checkAll or no baseRef, perform complete check
   if (checkAll || !baseRef) {
-    const fullCheck = refreshDocumentationFragment({
-      repoRoot: root,
-      fragmentPath: resolvedFragmentPath,
-      headSha: SHA_REGEX.test(headRef) ? headRef : null,
-      check: true,
-      exec,
-    });
+    const mismatches = [];
+    for (const [relPath, record] of trackedResourcesMap.entries()) {
+      let currentBlobSha;
+      if (worktree) {
+        const targetFile = join(root, relPath);
+        if (!existsSync(targetFile)) {
+          mismatches.push({
+            path: relPath,
+            error: `Tracked resource file missing on disk: ${relPath}`,
+          });
+          continue;
+        }
+        try {
+          currentBlobSha = exec("git", ["-C", root, "hash-object", relPath], {
+            encoding: "utf8",
+            stdio: ["pipe", "pipe", "pipe"],
+          }).trim();
+        } catch (err) {
+          mismatches.push({
+            path: relPath,
+            error: `Failed to hash working tree file: ${err.message}`,
+          });
+          continue;
+        }
+      } else {
+        try {
+          currentBlobSha = exec(
+            "git",
+            ["-C", root, "rev-parse", `${headRef}:${relPath}`],
+            { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+          ).trim();
+        } catch {
+          mismatches.push({
+            path: relPath,
+            error: `Resource does not exist in HEAD ref (${headRef})`,
+          });
+          continue;
+        }
+      }
+
+      const recordedBlobSha = record.canonicalIdentity
+        ? record.canonicalIdentity.split(":").pop()
+        : null;
+
+      if (!recordedBlobSha) {
+        mismatches.push({
+          path: relPath,
+          error: "canonicalIdentity is missing or does not contain blob SHA",
+        });
+        continue;
+      }
+
+      if (recordedBlobSha !== currentBlobSha) {
+        mismatches.push({
+          path: relPath,
+          recordedBlobSha,
+          currentBlobSha,
+          headBlobSha: currentBlobSha,
+        });
+      }
+    }
+
+    const passed = mismatches.length === 0;
 
     return {
       mode: "FULL_CHECK",
       repository: fragment.repository,
-      passed: fullCheck.driftCount === 0 && !fullCheck.sourceShaChanged,
+      passed,
+      totalTrackedCount: trackedResourcesMap.size,
+      worktree: Boolean(worktree),
       changedTrackedFiles: [],
       fragmentUpdated: false,
-      mismatches: fullCheck.drift,
-      details: fullCheck,
+      mismatches,
+      reason: passed ? "IN_SYNC" : "BLOB_SHA_MISMATCH",
     };
   }
 
@@ -132,14 +193,69 @@ export function checkDocumentationFragmentSync({
 
   // Case 1: No tracked documentation resources modified in PR
   if (changedTrackedFiles.length === 0) {
+    const fragmentUpdated = changedFiles.includes(fragmentRelPath);
+    if (!fragmentUpdated) {
+      return {
+        mode: "PR_GATE",
+        repository: fragment.repository,
+        passed: true,
+        changedTrackedFiles: [],
+        fragmentUpdated: false,
+        mismatches: [],
+        reason: "NO_TRACKED_FILES_TOUCHED",
+      };
+    }
+
+    // Fragment itself was updated without modifying tracked files.
+    // Verify that all tracked resources in the updated fragment match HEAD blob SHAs.
+    const mismatches = [];
+    for (const [relPath, record] of trackedResourcesMap.entries()) {
+      let headBlobSha;
+      try {
+        headBlobSha = exec(
+          "git",
+          ["-C", root, "rev-parse", `${headRef}:${relPath}`],
+          { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+        ).trim();
+      } catch {
+        mismatches.push({
+          path: relPath,
+          error: `Resource does not exist in HEAD ref (${headRef})`,
+        });
+        continue;
+      }
+
+      const recordedBlobSha = record.canonicalIdentity
+        ? record.canonicalIdentity.split(":").pop()
+        : null;
+
+      if (!recordedBlobSha) {
+        mismatches.push({
+          path: relPath,
+          error: "canonicalIdentity is missing or does not contain blob SHA",
+        });
+        continue;
+      }
+
+      if (recordedBlobSha !== headBlobSha) {
+        mismatches.push({
+          path: relPath,
+          recordedBlobSha,
+          currentBlobSha: headBlobSha,
+          headBlobSha,
+        });
+      }
+    }
+
+    const passed = mismatches.length === 0;
     return {
       mode: "PR_GATE",
       repository: fragment.repository,
-      passed: true,
+      passed,
       changedTrackedFiles: [],
-      fragmentUpdated: changedFiles.includes(fragmentRelPath),
-      mismatches: [],
-      reason: "NO_TRACKED_FILES_TOUCHED",
+      fragmentUpdated: true,
+      mismatches,
+      reason: passed ? "IN_SYNC" : "BLOB_SHA_MISMATCH",
     };
   }
 
@@ -177,7 +293,7 @@ export function checkDocumentationFragmentSync({
     }
 
     const recordedBlobSha = record.canonicalIdentity
-      ? record.canonicalIdentity.split(":")[3]
+      ? record.canonicalIdentity.split(":").pop()
       : null;
 
     if (recordedBlobSha !== headBlobSha) {
@@ -209,11 +325,13 @@ Usage: node tools/ci/check-documentation-fragment-sync.mjs [options]
 Preflight CI gate to verify documentation fragment synchronization.
 In PR mode, if any of the repository's 11 tracked documentation resources are modified,
 verifies that documentation-fragment.json was also updated and matches PR HEAD blob SHAs.
+In full check mode (--check-all), verifies that all tracked documentation resources match their recorded blob SHAs.
 
 Options:
   --base <ref>          Base Git reference to compare against (e.g. origin/main, pull_request.base.sha)
   --head <ref>          Head Git reference (default: HEAD)
   --check-all           Perform full repository synchronization check regardless of PR diff
+  --worktree            Hash files from working tree directly via git hash-object
   --fragment <path>     Path to documentation-fragment.json (default: contracts/documentation/documentation-fragment.json)
   --repo-root <path>    Repository root path
   --quiet               Suppress output
@@ -281,9 +399,13 @@ export function runCli(argv = process.argv.slice(2)) {
             `\n   documentation-fragment.json was updated, but the recorded blob SHA does not match PR HEAD for:`,
           );
           for (const m of result.mismatches) {
-            console.error(
-              `   • ${m.path}: recorded=${m.recordedBlobSha?.slice(0, 8)}, actual PR HEAD=${m.headBlobSha?.slice(0, 8)}`,
-            );
+            if (m.error) {
+              console.error(`   • ${m.path}: ${m.error}`);
+            } else {
+              console.error(
+                `   • ${m.path}: recorded=${m.recordedBlobSha?.slice(0, 8)}, actual PR HEAD=${m.headBlobSha?.slice(0, 8)}`,
+              );
+            }
           }
           console.error(`\n👉 Quick fix:`);
           console.error(`   1. Run: node tools/repo/refresh-documentation-fragment.mjs`);
@@ -297,14 +419,34 @@ export function runCli(argv = process.argv.slice(2)) {
     // Full check mode
     if (result.passed) {
       if (!options.quiet) {
-        console.log(`✅ [Full Check PASSED] All documentation resources in sync.`);
+        console.log(
+          `✅ [Full Check PASSED] All ${result.totalTrackedCount ?? ""} documentation resources in sync.`,
+        );
       }
       return 0;
     }
 
     if (!options.quiet) {
-      console.error(`❌ [Full Check FAILED] Documentation fragment drift detected.`);
+      console.error(
+        `❌ [Full Check FAILED] Documentation fragment drift detected in ${result.repository}:`,
+      );
+      const actualLabel = (result.worktree || options.worktree)
+        ? "actual worktree"
+        : "actual HEAD";
+      for (const m of result.mismatches) {
+        if (m.error) {
+          console.error(`   • ${m.path}: ${m.error}`);
+        } else {
+          console.error(
+            `   • ${m.path}: recorded=${m.recordedBlobSha?.slice(0, 8)}, ${actualLabel}=${(m.headBlobSha || m.currentBlobSha)?.slice(0, 8)}`,
+          );
+        }
+      }
+      console.error(`\n👉 Quick fix:`);
+      console.error(`   1. Run: node tools/repo/refresh-documentation-fragment.mjs`);
+      console.error(`   2. Git commit contracts/documentation/documentation-fragment.json and push.`);
     }
+
     return 1;
   } catch (error) {
     if (!options.quiet) {
