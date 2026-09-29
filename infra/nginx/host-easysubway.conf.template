@@ -3,11 +3,35 @@ limit_req_zone $binary_remote_addr zone=easysubway_upload:10m rate=2r/s;
 limit_req_zone $binary_remote_addr zone=easysubway_api:10m rate=30r/s;
 limit_conn_zone $binary_remote_addr zone=easysubway_conn:10m;
 
+map $status $easysubway_edge_loggable {
+    default 0;
+    429 1;
+    "~^5" 1;
+}
+
+map $uri $easysubway_edge_location {
+    default "api";
+    "~^/api/v3/journeys/" "journey";
+    "~^/api/v1/report-uploads" "upload";
+    "~^/api/v1/reports" "upload";
+    "~^/actuator" "actuator";
+    "~^/\.well-known/" "acme";
+}
+
+log_format easysubway_edge_json escape=json
+    '{"time":"$time_iso8601",'
+    '"remote_addr":"$remote_addr",'
+    '"status":"$status",'
+    '"method":"$request_method",'
+    '"path":"$uri",'
+    '"location":"$easysubway_edge_location",'
+    '"request_time":"$request_time"}';
+
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name easysubway-api.aquilaxk.site easysubway.aquilaxk.site;
-    access_log off;
+    access_log /var/log/nginx/easysubway-edge.log easysubway_edge_json if=$easysubway_edge_loggable;
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/html;
@@ -23,7 +47,7 @@ server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
     server_name _;
-    access_log off;
+    access_log /var/log/nginx/easysubway-edge.log easysubway_edge_json if=$easysubway_edge_loggable;
 
     ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/easysubway-api.aquilaxk.site/privkey.pem;
@@ -35,7 +59,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name easysubway-api.aquilaxk.site easysubway.aquilaxk.site;
-    access_log off;
+    access_log /var/log/nginx/easysubway-edge.log easysubway_edge_json if=$easysubway_edge_loggable;
 
     ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/easysubway-api.aquilaxk.site/privkey.pem;

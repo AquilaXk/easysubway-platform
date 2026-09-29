@@ -30,6 +30,19 @@ loki.source.docker "linux" {
   forward_to = [loki.process.logs.receiver]
 }
 
+local.file_match "edge_nginx" {
+  path_targets = [{
+    __path__ = "/var/log/nginx/easysubway-edge.log",
+    job      = "edge-nginx",
+  }]
+  sync_period = "5s"
+}
+
+loki.source.file "edge_nginx" {
+  targets    = local.file_match.edge_nginx.targets
+  forward_to = [loki.write.default.receiver]
+}
+
 loki.process "logs" {
   // Parse JSON fields for filtering; only `level` becomes a stream label.
   // correlationId is intentionally NOT labeled (body/structured search only).
