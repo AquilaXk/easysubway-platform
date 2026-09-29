@@ -625,6 +625,109 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     ]),
     0,
   );
+
+  // Claude Code 공식 리뷰(claude-code-review.yml, #200)는 CodeRabbit처럼 immutable 봇 신원
+  // (login·id·Bot type·NONE association)의 COMMENTED Review만 본문 마커 없이 discovery로 인정한다.
+  const claude = {
+    author_association: 'NONE',
+    user: { login: 'claude[bot]', id: 209825114, type: 'Bot' },
+  };
+  assert.equal(
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', claude)]),
+    0,
+    'inline comment wrapper(빈 본문) claude[bot] Review도 봇 신원으로 인정한다',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '🔴 0 · 🟡 0 · 🟣 0\n변경 범위를 검토했고 finding이 없습니다.', claude),
+    ]),
+    0,
+    '요약 본문이 있는 claude[bot] Review를 인정한다',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', { ...claude, commit_id: 'previous-head' }),
+    ], exactMarker),
+    0,
+    'exact-head marker가 있으면 PR commit-set 안의 이전 head claude[bot] discovery를 승계한다',
+  );
+  assert.notEqual(
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', claude)], []),
+    0,
+    'claude[bot] discovery도 exact-head marker 없이는 통과하지 못한다',
+  );
+  assert.notEqual(
+    runReviewFilter(
+      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', { ...claude, commit_id: 'removed-head' })],
+      exactMarker,
+      [{ sha: 'head' }],
+    ),
+    0,
+    'PR commit-set에 없는 commit의 claude[bot] Review는 재사용하지 않는다',
+  );
+  // login, immutable id, Bot type, NONE association 중 하나라도 다르면 인정하지 않는다.
+  for (const [spoofed, reason] of [
+    [{ ...claude, user: { ...claude.user, id: 999 } }, 'login만 같고 id가 다르면 거부한다'],
+    [{ ...claude, user: { ...claude.user, type: 'User' } }, 'type이 Bot이 아니면 거부한다'],
+    [{ ...claude, user: { ...claude.user, login: 'claude' } }, 'id가 같아도 login이 다르면 거부한다'],
+    [{ ...claude, user: { login: 'claude-bot[bot]', id: 55, type: 'Bot' } }, '유사한 봇 login은 거부한다'],
+    [{ ...claude, author_association: 'CONTRIBUTOR' }, 'author_association이 NONE이 아니면 거부한다'],
+    [{ ...claude, author_association: 'OWNER' }, '신뢰된 association이어도 마커 없는 COMMENTED는 discovery가 아니다'],
+  ]) {
+    assert.notEqual(
+      runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', spoofed)]),
+      0,
+      reason,
+    );
+  }
+  // 봇 신원은 COMMENTED Review로만 discovery가 된다. 봇 APPROVED는 discovery가 아니다.
+  assert.notEqual(
+    runReviewFilter([review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', claude)]),
+    0,
+    'claude[bot] APPROVED는 discovery가 아니다',
+  );
+  // claude[bot] 자신의 CHANGES_REQUESTED와 다른 리뷰어의 활성 change request는 그대로 막는다.
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', claude),
+      review(2, 'CHANGES_REQUESTED', '2026-08-01T00:01:00Z', '', claude),
+    ]),
+    0,
+    'claude[bot]의 활성 change request는 차단한다',
+  );
+  assert.notEqual(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', claude),
+      review(2, 'CHANGES_REQUESTED', '2026-08-01T00:01:00Z', '', {
+        commit_id: 'previous-head',
+        user: { login: 'reviewer-one' },
+      }),
+    ]),
+    0,
+    'claude[bot] discovery가 있어도 다른 리뷰어의 이전 head change request는 막는다',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', claude),
+      review(2, 'CHANGES_REQUESTED', '2026-08-01T00:01:00Z', '', {
+        commit_id: 'previous-head',
+        user: { login: 'reviewer-one' },
+      }),
+      review(3, 'APPROVED', '2026-08-01T00:02:00Z', '', {
+        user: { login: 'reviewer-one' },
+      }),
+    ]),
+    0,
+    '같은 리뷰어의 이후 APPROVED는 자기 change request를 해제한다',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', '', claude),
+      review(2, 'COMMENTED', '2026-08-01T00:01:00Z'),
+    ]),
+    0,
+    '후속 마커 없는 사람 COMMENTED가 claude[bot] discovery를 지우지 않는다',
+  );
 });
 
 test('required context 판정은 대기와 실패를 구분하고 뒤 페이지 status까지 본다', async () => {
