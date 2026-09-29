@@ -7,7 +7,9 @@ name: Automerge Queue
 # 인증은 github.token 하나뿐이다. GITHUB_TOKEN이 만든 이벤트는 새 workflow run을
 # 만들지 않고 예외는 workflow_dispatch와 repository_dispatch뿐이다. 이 저장소에서 그
 # 제약에 걸리는 체인은 required context가 없는 same-repository PR의 CI 복구뿐이다.
-# PR branch의 base 갱신은 소유 세션만 수행하고 coordinator는 절대 대신하지 않는다.
+# PR branch의 base 갱신은 원칙적으로 소유 세션이 한다. 예외는 AUTOMERGE_PAT가 있을 때 게이트를
+# 모두 통과한 BEHIND 후보 하나이며(QA 결정 2026-09-29), coordinator가 PAT로 base 병합을 요청해
+# CI가 붙게 한다. DIRTY와 PAT 없는 BEHIND는 지금처럼 소유 세션에 돌려보낸다.
 # ci.yml의 main push 실행도 되살리지 않는다. 형제 저장소 실측(2026-08-02): backend·mobile
 # coordinator 어느 쪽도 main CI를 dispatch하지 않고, 코디네이터가 병합한 SHA에는 main push
 # CI 실행이 0건이다(mobile aacec74·d794582, backend 26b0b68. 세 PR 모두 mergedBy가
@@ -80,14 +82,52 @@ jobs:
           # frozen discovery를 current head까지 승계하는 권한은 automerge 라벨을 붙인
           # pull_request_target 이벤트에서만 남긴다. 이후 push/rebase는 SHA 불일치로
           # fail closed되고, closure 뒤 라벨을 다시 붙여 새 marker를 발행해야 한다.
+          # marker는 PR당 canonical 1개로 수렴한다(PATCH-or-POST). 이전 방식이 쌓아 둔 여러
+          # 개는 가장 오래된 하나를 새 head로, 나머지는 canonical이 아닌 superseded 본문으로
+          # 바꿔 정리한다(삭제하지 않는다). comment는 3페이지와 overflow 확인 1회까지만 읽고,
+          # 읽기·형식 실패나 초과는 marker를 건드리지 않고 이 실행을 실패시킨다.
           if [[ "${EVENT_NAME}" == "pull_request_target" && "${EVENT_LABEL}" == "automerge" ]]; then
             if [[ ! "${EVENT_PR}" =~ ^[0-9]+$ ]] ||
               [[ ! "${EVENT_HEAD}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "automerge label event의 PR 또는 head SHA가 유효하지 않다." >&2
               exit 1
             fi
-            gh api --method POST "repos/${repo}/issues/${EVENT_PR}/comments" \
-              -f body="<!-- Automerge frozen discovery authorization: ${EVENT_HEAD} -->"
+            label_marker="<!-- Automerge frozen discovery authorization: ${EVENT_HEAD} -->"
+            label_comments='[]'
+            for label_page in 1 2 3 4; do
+              label_body="$(gh api "repos/${repo}/issues/${EVENT_PR}/comments?per_page=100&page=${label_page}")"
+              jq -e 'type == "array" and all(.[]; type == "object")' <<<"${label_body}" >/dev/null
+              if [[ "${label_page}" -eq 4 ]]; then
+                jq -e 'length == 0' <<<"${label_body}" >/dev/null
+                break
+              fi
+              label_comments="$(jq -c --argjson page_body "${label_body}" '. + $page_body' <<<"${label_comments}")"
+              if [[ "$(jq 'length' <<<"${label_body}")" -lt 100 ]]; then
+                break
+              fi
+            done
+            label_marker_ids="$(jq -c '
+              [.[] | select(
+                (.user | type == "object") and
+                .user.login == "github-actions[bot]" and
+                .user.id == 41898282 and
+                .user.type == "Bot" and
+                (.body | type == "string") and
+                (.body | test("^<!-- Automerge frozen discovery authorization: [0-9a-f]{40} -->$"))
+              ) | .id] | sort
+            ' <<<"${label_comments}")"
+            jq -e 'all(.[]; type == "number")' <<<"${label_marker_ids}" >/dev/null
+            if [[ "$(jq 'length' <<<"${label_marker_ids}")" -eq 0 ]]; then
+              gh api --method POST "repos/${repo}/issues/${EVENT_PR}/comments" \
+                -f body="${label_marker}"
+            else
+              gh api --method PATCH "repos/${repo}/issues/comments/$(jq -r '.[0]' <<<"${label_marker_ids}")" \
+                -f body="${label_marker}"
+              while IFS= read -r superseded_id; do
+                gh api --method PATCH "repos/${repo}/issues/comments/${superseded_id}" \
+                  -f body="<!-- Automerge frozen discovery authorization superseded -->"
+              done < <(jq -r '.[1:][]' <<<"${label_marker_ids}")
+            fi
           fi
 
           # required context는 main ruleset이 정본이다. 하드코딩 폴백을 두면 ruleset
@@ -141,6 +181,10 @@ jobs:
           #    하나가 예산 모델을 통째로 넘긴다. 상한을 넘는 후보는 판정을 포기하고 건너뛴다.
           #    required context별 jq는 로컬 계산이라 요청을 쓰지 않는다. 후보 평가 밖의 고정
           #    비용은 label marker 발행, PR-visible fail-closed 처리와 API 응답 변동을 덮는 보수적 여유 16회다.
+          #    authorization marker 재발행·복구는 exact marker가 없는 후보에서만 REST를 더 쓴다
+          #    (재발행 최대 3회: commit·compare·PATCH, 복구 최대 3회: events 2·POST 1, PR commit
+          #    set은 위에서 이미 읽는다). head가 바뀐 뒤 한 번 성립하면 끝나는 드문 경로라 후보당
+          #    청구에 넣지 않고, 후보마다의 잔량 재확인(budget-recheck)이 예약선을 지킨다.
           #
           #    이 예산을 "실행 빈도"로 나누지 않는다. 빈도는 강제되지 않는다 — concurrency
           #    그룹은 cancel-in-progress: false라 대기 중인 실행만 접을 뿐 실행이 시작되는
@@ -272,6 +316,186 @@ jobs:
             return 2
           }
           # paginated-read-end
+          # authorization-marker-sync-begin
+          # exact-head marker는 라벨 이벤트가 게시한다. 코디네이터는 두 경우에만 marker를 맞춘다.
+          #  - 재발행: 아래 BEHIND 분기가 P에서 base 갱신을 요청했다는 canonical 기록이 정확히
+          #    하나 있고, 기존 canonical marker의 head가 그 P이며, 현재 head가 P를 첫 부모로,
+          #    main의 조상을 둘째 부모로 둔 두 부모 병합 커밋일 때 marker를 그 head로 PATCH한다.
+          #    그 밖의 head 변화(세션 push, 세션이 만든 병합 커밋)는 재발행하지 않는다. 기록은
+          #    재발행 뒤에도 그대로 두고 다음 갱신 요청이 새 P로 PATCH한다. canonical marker가
+          #    여러 개면(라벨 재부착 전 누적) 어느 것도 고치지 않는다.
+          #  - 복구: canonical marker가 아예 없고(라벨 run이 concurrency 대기 중 취소된 경우)
+          #    리뷰 게이트와 같은 정의의 discovery(is_current_pr_commit, 현재 head APPROVED 또는
+          #    정규 본문 COMMENTED)가 있으며, 현재 head가 최신 automerge labeled 이벤트 시점에
+          #    이미 PR head였을 때만 그 head로 POST한다. 판정은 head 커밋의 committer date <= 최신
+          #    automerge labeled 시각이고, 그 시각 이후 head_ref_force_pushed 이벤트가 없는지로
+          #    한다. 일반 push는 push 시각을 남기지 않으므로 committer date를 쓴다. committer
+          #    date는 작성자가 조작할 수 있어 소유 계정 신뢰를 전제로 한 실수 방지이지 위조 방어가
+          #    아니다. 이벤트는 1페이지(가득 차면 overflow 확인 1회)까지만 읽는다.
+          # Review와 marker를 건너뛰는 Dependabot Compose 예외 경로는 동기화 대상이 아니다.
+          # 조회·형식·변경 실패와 애매한 상태는 marker를 건드리지 않고 아래 리뷰 게이트가 거절하게
+          # 둔다. 변경은 github.token(github-actions[bot])으로만 한다. 게이트는 그 봇의 marker만
+          # 인정한다. 성공하면 GitHub이 돌려준 comment로 comments(페이지 배열)를 갱신한다(PATCH는
+          # 같은 id를 교체, POST는 새 페이지로 추가).
+          marker_prefix="<!-- Automerge frozen discovery authorization: "
+          base_update_prefix="<!-- Automerge base update requested: "
+          # comments에서 github-actions[bot]가 남긴 `<prefix><40hex> -->` comment의 id·head 목록.
+          canonical_bot_comment_heads() {
+            jq -c --arg prefix "$1" '
+              [flatten[] | select(
+                type == "object" and
+                (.user | type == "object") and
+                .user.login == "github-actions[bot]" and
+                .user.id == 41898282 and
+                .user.type == "Bot" and
+                (.body | type == "string") and
+                (.body | test("^" + $prefix + "[0-9a-f]{40} -->$"))
+              ) | {id, head: (.body | capture(": (?<sha>[0-9a-f]{40}) -->$").sha)}]
+            ' <<<"${comments}"
+          }
+          # 코디네이터가 요청해 수락된 base 갱신을 PR당 canonical 기록 하나로 남긴다.
+          record_base_update() {
+            local target="$1" requested_head="$2" records="$3" record_body record_count
+            record_body="${base_update_prefix}${requested_head} -->"
+            record_count="$(jq 'length' <<<"${records}")"
+            if [[ "${record_count}" -gt 1 ]] || ! jq -e 'all(.[]; .id | type == "number")' <<<"${records}" >/dev/null; then
+              echo "::warning::PR #${target}: base update record is not a single canonical comment; the next head will need a new label authorization."
+              return 0
+            fi
+            if [[ "${record_count}" -eq 1 ]]; then
+              if ! gh api --method PATCH "repos/${repo}/issues/comments/$(jq -r '.[0].id' <<<"${records}")" -f body="${record_body}" >/dev/null; then
+                echo "::warning::PR #${target}: base update record could not be written; the next head will need a new label authorization."
+              fi
+            elif ! gh api --method POST "repos/${repo}/issues/${target}/comments" -f body="${record_body}" >/dev/null; then
+              echo "::warning::PR #${target}: base update record could not be written; the next head will need a new label authorization."
+            fi
+          }
+          # 입력: pr, head, comments, reviews, commits(read_pages 페이지 배열). 출력: 갱신된 comments.
+          sync_authorization_marker() {
+            local marker_body markers marker_count marker_id marker_head records head_commit second_parent ancestry
+            local response events overflow head_date
+            marker_body="${marker_prefix}${head} -->"
+            markers="$(canonical_bot_comment_heads "${marker_prefix}")"
+            marker_count="$(jq 'length' <<<"${markers}")"
+            if [[ "${marker_count}" -eq 1 ]] && [[ "$(jq -r '.[0].head' <<<"${markers}")" == "${head}" ]]; then
+              return 0
+            fi
+            if [[ "${marker_count}" -gt 1 ]] || ! jq -e 'all(.[]; .id | type == "number")' <<<"${markers}" >/dev/null; then
+              echo "::warning::PR #${pr}: authorization marker is not a single canonical comment; leaving it unchanged until the label is re-applied."
+              return 0
+            fi
+            if [[ "${marker_count}" -eq 1 ]]; then
+              marker_id="$(jq -r '.[0].id' <<<"${markers}")"
+              marker_head="$(jq -r '.[0].head' <<<"${markers}")"
+              records="$(canonical_bot_comment_heads "${base_update_prefix}")"
+              if ! jq -e --arg head "${marker_head}" 'length == 1 and (.[0].id | type == "number") and .[0].head == $head' <<<"${records}" >/dev/null; then
+                echo "PR #${pr}: no single coordinator base update record for authorized head ${marker_head}; authorization is not reissued."
+                return 0
+              fi
+              if ! head_commit="$(gh api "repos/${repo}/commits/${head}")" ||
+                ! jq -e --arg first "${marker_head}" '
+                  (.parents | type == "array") and
+                  (.parents | length == 2) and
+                  all(.parents[]; (.sha | type == "string") and (.sha | test("^[0-9a-f]{40}$"))) and
+                  .parents[0].sha == $first
+                ' <<<"${head_commit}" >/dev/null; then
+                echo "PR #${pr}: head ${head} is not proven to be a base-update merge on authorized head ${marker_head}; authorization is not reissued."
+                return 0
+              fi
+              second_parent="$(jq -r '.parents[1].sha' <<<"${head_commit}")"
+              if ! ancestry="$(gh api "repos/${repo}/compare/${second_parent}...main" --jq '.status')" ||
+                [[ "${ancestry}" != ahead && "${ancestry}" != identical ]]; then
+                echo "PR #${pr}: merge parent ${second_parent} is not proven to be on main; authorization is not reissued."
+                return 0
+              fi
+              if ! response="$(gh api --method PATCH "repos/${repo}/issues/comments/${marker_id}" -f body="${marker_body}")"; then
+                echo "::warning::PR #${pr}: authorization marker could not be reissued for ${head}."
+                return 0
+              fi
+            else
+              # 게이트의 신뢰 author와 discovery 절을 그대로 복제한다(commit set 포함).
+              if ! jq -s -e --arg head "${head}" '
+                .[0] as $reviews |
+                .[1] as $commits |
+                def is_coderabbit:
+                  .author_association == "NONE" and
+                  .user.login == "coderabbitai[bot]" and
+                  .user.id == 136622811 and
+                  .user.type == "Bot";
+                def is_current_pr_commit($review):
+                  $commits | flatten | any(.sha == ($review.commit_id // ""));
+                [($reviews | flatten[]) |
+                  select(
+                    .author_association == "OWNER" or
+                    .author_association == "MEMBER" or
+                    .author_association == "COLLABORATOR" or
+                    is_coderabbit
+                  )] as $trusted |
+                any($trusted[];
+                  is_current_pr_commit(.) and
+                    ((.state == "APPROVED" and .commit_id == $head) or
+                    (.state == "COMMENTED" and
+                      (is_coderabbit or
+                        ((.body // "" | startswith("**Actionable comments posted: ")) and
+                        ((.body // "" | contains("<!-- Review source: Aquila fallback; canonical visible structure:")) or
+                         (.body // "" | contains("<!-- Review source: Aquila Universal Review; engine: aquila-review -->")) or
+                         (.body // "" | contains("<!-- Review source: Codex CLI fallback; canonical visible structure:"))))))))
+              ' \
+                <(printf '%s\n' "${reviews}") \
+                <(printf '%s\n' "${commits}") >/dev/null; then
+                echo "PR #${pr}: no authorization marker and no gate-recognized discovery review in the PR commit set; authorization is not recovered."
+                return 0
+              fi
+              if ! events="$(gh api "repos/${repo}/issues/${pr}/events?per_page=100&page=1")" ||
+                ! jq -e 'type == "array" and all(.[]; type == "object")' <<<"${events}" >/dev/null; then
+                echo "PR #${pr}: label events could not be read; authorization is not recovered."
+                return 0
+              fi
+              if [[ "$(jq 'length' <<<"${events}")" -ge 100 ]] &&
+                { ! overflow="$(gh api "repos/${repo}/issues/${pr}/events?per_page=100&page=2")" ||
+                  ! jq -e 'type == "array" and length == 0' <<<"${overflow}" >/dev/null; }; then
+                echo "PR #${pr}: label events exceed the bounded read; authorization is not recovered."
+                return 0
+              fi
+              head_date="$(jq -r --arg head "${head}" '
+                [flatten[] | select(.sha? == $head) | .commit.committer.date] | unique |
+                if length == 1 and (.[0] | type == "string") then .[0] else "" end
+              ' <<<"${commits}")"
+              if ! jq -e --arg head_date "${head_date}" '
+                ([.[] | select(.event == "labeled" and .label.name? == "automerge") | .created_at | fromdateiso8601] | max) as $labeled_at |
+                ($labeled_at | type == "number") and
+                ($head_date | fromdateiso8601) <= $labeled_at and
+                all(.[] | select(.event == "head_ref_force_pushed"); (.created_at | fromdateiso8601) < $labeled_at)
+              ' <<<"${events}" >/dev/null 2>&1; then
+                echo "PR #${pr}: head ${head} is not proven to predate the latest automerge label; authorization is not recovered."
+                return 0
+              fi
+              if ! response="$(gh api --method POST "repos/${repo}/issues/${pr}/comments" -f body="${marker_body}")"; then
+                echo "::warning::PR #${pr}: authorization marker could not be recovered for ${head}."
+                return 0
+              fi
+            fi
+            if ! jq -e --arg body "${marker_body}" '
+              type == "object" and
+              (.id | type == "number") and
+              (.user | type == "object") and
+              .user.login == "github-actions[bot]" and
+              .user.id == 41898282 and
+              .user.type == "Bot" and
+              .body == $body
+            ' <<<"${response}" >/dev/null; then
+              echo "::warning::PR #${pr}: authorization marker response did not prove the current head; it is not used."
+              return 0
+            fi
+            comments="$(jq -c --argjson response "$(jq -c '{id, body, user}' <<<"${response}")" '
+              if any(flatten[]; .id? == $response.id)
+              then map(if type == "array" then map(if .id? == $response.id then $response else . end) else . end)
+              else . + [[$response]]
+              end
+            ' <<<"${comments}")"
+            echo "PR #${pr}: authorization marker now covers ${head}."
+          }
+          # authorization-marker-sync-end
           while IFS= read -r pr; do
             # budget-recheck-begin
             # per_candidate은 --paginate 추가 페이지까지 덮으라고 잡은 여유값이지 실측이
@@ -304,10 +528,11 @@ jobs:
             merge_state="$(jq -r '.mergeStateStatus' <<<"${info}")"
 
             # merge-state-preflight-begin
-            # coordinator가 base를 갱신하면 head가 바뀌어 current-head Review가 즉시 stale해진다.
-            # branch 소유 세션만 최신 main에서 rebase할 수 있고, coordinator는 라벨을 내려
-            # 무한 재판정 대신 한 번의 명시적 handoff로 끝낸다.
-            if [[ "${merge_state}" == "BEHIND" || "${merge_state}" == "DIRTY" ]]; then
+            # DIRTY는 소유 세션만 풀 수 있고, PAT 없는 BEHIND도 GITHUB_TOKEN 병합 커밋에 CI가
+            # 붙지 않아 coordinator가 대신할 수 없다. 이 둘은 라벨을 내려 무한 재판정 대신 한 번의
+            # 명시적 handoff로 끝낸다. PAT가 있는 BEHIND는 여기서 내려보내지 않고 게이트를 모두
+            # 통과한 뒤 아래 병합 분기에서 base 갱신 후보가 된다.
+            if [[ "${merge_state}" == "DIRTY" || ( "${merge_state}" == "BEHIND" && "${HAS_AUTOMERGE_PAT}" != true ) ]]; then
               current_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq .headRefOid)" || {
                 echo "::warning::PR #${pr} current head를 다시 읽지 못해 automerge label을 유지합니다."
                 continue
@@ -439,6 +664,8 @@ jobs:
                 echo "PR #${pr}: comment history exceeds the page budget; skipping."
                 continue
               }
+              sync_authorization_marker
+              base_update_records="$(canonical_bot_comment_heads "${base_update_prefix}")"
             # review-state-filter-begin
             # frozen discovery는 라벨 이벤트에서 GitHub Actions가 기록한 exact-head marker가
             # 있을 때만 승계한다. 임의 author·다른 SHA·후속 push는 게이트를 통과하지 못한다.
@@ -642,6 +869,26 @@ jobs:
                   failed_status=$?
                   fail_closed_pr "병합 호출" "${failed_status}" || exit "${failed_status}"
                   exit "${failed_status}"
+                fi
+                ;;
+              BEHIND)
+                # preflight가 PAT 없는 BEHIND를 이미 handoff했으므로 여기에는 PAT가 있을 때만
+                # 닿는다. 게이트를 통과한 현재 head를 고정해 base만 갱신하고, 수락된 요청을
+                # 기록한 뒤 실행을 끝낸다. 새 head의 CI 완료가 다음 실행을 부르고, 그 실행이
+                # 기록으로 marker를 재발행한 뒤 같은 게이트를 다시 통과해야 병합한다.
+                if [[ "${HAS_AUTOMERGE_PAT}" != true ]]; then
+                  echo "::warning::PR #${pr} is behind main without AUTOMERGE_PAT; its owning session must rebase and push."
+                  continue
+                fi
+                if GH_TOKEN="${MERGE_GH_TOKEN}" gh api --method PUT "repos/${repo}/pulls/${pr}/update-branch" \
+                  -f expected_head_sha="${head}" >/dev/null; then
+                  record_base_update "${pr}" "${head}" "${base_update_records}"
+                  echo "PR #${pr}: behind main; requested a base merge on gated head ${head}. The next run re-evaluates the new head."
+                  exit 0
+                else
+                  update_status=$?
+                  echo "::warning::PR #${pr} is behind main and its base merge request failed (status ${update_status}); skipping without merging."
+                  continue
                 fi
                 ;;
               BLOCKED | UNKNOWN)
