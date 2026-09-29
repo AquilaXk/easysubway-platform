@@ -308,9 +308,13 @@ test("PR이 통제하는 에이전트 설정은 action 전에 지우고 기본 �
   assert.ok(restoreAt < names.indexOf("Run Claude Code review"), "action보다 앞에 와야 한다");
   const restore = stepBlock("Restore agent configuration from default branch");
   assert.match(restore, /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/);
-  for (const path of [".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"]) {
-    assert.ok(restore.includes(path), `${path}를 다뤄야 한다`);
-  }
+  // 고정 action(v1.0.236)이 pull_request에서만 base로 되돌리는 SENSITIVE_PATHS 전체를 모든 트리거에서 다룬다.
+  const agentConfig = restore.match(/agent_config=\(([^)]*)\)/);
+  assert.ok(agentConfig, "agent_config 배열이 있어야 한다");
+  assert.deepEqual(
+    agentConfig[1].trim().split(/\s+/).sort(),
+    [".claude", ".claude.json", ".gitmodules", ".husky", ".mcp.json", ".ripgreprc", "CLAUDE.local.md", "CLAUDE.md"],
+  );
 
   // 실제 git 저장소에서 step을 돌려 PR head의 설정이 기본 브랜치 것으로 바뀌는지 본다.
   const root = mkdtempSync(join(tmpdir(), "claude-review-config-"));
