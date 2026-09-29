@@ -85,6 +85,7 @@ jobs:
           node --test tools/platform/single-node-k3s-foundation.test.mjs
           node --test tools/ops/post-deploy-smoke.test.mjs
           node --test tools/ops/trigger-journey-deploy.test.mjs
+          node --test tools/platform/nginx-host-rate-limit.test.mjs
 
       - name: Validate Compose configurations
         env:
@@ -102,11 +103,16 @@ jobs:
         run: |
           docker run --rm -v "${GITHUB_WORKSPACE}/infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:alpine nginx -t
 
+      - name: Smoke test Nginx rate limiting
+        run: |
+          bash tools/platform/nginx-rate-limit-smoke.sh
+
       - name: Check shell syntax
         run: |
           bash -n tools/deploy/deploy-backend.sh
           bash -n tools/deploy/prepare-deployment-env.sh
           bash -n tools/platform/bootstrap-single-node-k3s.sh
+          bash -n tools/platform/nginx-rate-limit-smoke.sh
           bash -n tools/ops/data-source-raw-archive.sh
           bash -n tools/ops/facility-report-photo-backup.sh
           bash -n tools/ops/postgres-backup.sh

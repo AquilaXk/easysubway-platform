@@ -842,8 +842,9 @@ install_route_v2_host_ingress() {
 	local target_backend_port="$1"
 	local site_target="/etc/nginx/sites-available/easysubway"
 	local default_snippet_target="/etc/nginx/snippets/easysubway-default-proxy.conf"
-	local candidate site_backup default_snippet_backup
-	local site_existed=0 default_snippet_existed=0
+	local real_ip_snippet_target="/etc/nginx/snippets/easysubway-real-ip.conf"
+	local candidate site_backup default_snippet_backup real_ip_snippet_backup
+	local site_existed=0 default_snippet_existed=0 real_ip_snippet_existed=0
 	local install_failed=0 restore_failed=0
 	if ! candidate="$(mktemp)"; then
 		return 1
@@ -856,27 +857,41 @@ install_route_v2_host_ingress() {
 		rm -f "${candidate}" "${site_backup}"
 		return 1
 	fi
+	if ! real_ip_snippet_backup="$(mktemp)"; then
+		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
+		return 1
+	fi
 	if ! sed \
 		-e "s/__BACKEND_PORT__/${target_backend_port}/g" \
 		infra/nginx/host-easysubway.conf.template > "${candidate}"; then
-		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
+		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}" "${real_ip_snippet_backup}"
 		return 1
 	fi
 	if sudo test -f "${site_target}"; then
 		if ! sudo cp "${site_target}" "${site_backup}"; then
-			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
+			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}" "${real_ip_snippet_backup}"
 			return 1
 		fi
 		site_existed=1
 	fi
 	if sudo test -f "${default_snippet_target}"; then
 		if ! sudo cp "${default_snippet_target}" "${default_snippet_backup}"; then
-			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
+			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}" "${real_ip_snippet_backup}"
 			return 1
 		fi
 		default_snippet_existed=1
 	fi
-	if ! sudo install -m 0644 infra/nginx/host-default-proxy.conf "${default_snippet_target}"; then
+	if sudo test -f "${real_ip_snippet_target}"; then
+		if ! sudo cp "${real_ip_snippet_target}" "${real_ip_snippet_backup}"; then
+			rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}" "${real_ip_snippet_backup}"
+			return 1
+		fi
+		real_ip_snippet_existed=1
+	fi
+	if ! sudo install -m 0644 infra/nginx/host-real-ip.conf "${real_ip_snippet_target}"; then
+		install_failed=1
+	fi
+	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 infra/nginx/host-default-proxy.conf "${default_snippet_target}"; then
 		install_failed=1
 	fi
 	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 "${candidate}" "${site_target}"; then
@@ -899,19 +914,24 @@ install_route_v2_host_ingress() {
 		else
 			if ! sudo rm -f "${default_snippet_target}"; then restore_failed=1; fi
 		fi
+		if [[ "${real_ip_snippet_existed}" -eq 1 ]]; then
+			if ! sudo install -m 0644 "${real_ip_snippet_backup}" "${real_ip_snippet_target}"; then restore_failed=1; fi
+		else
+			if ! sudo rm -f "${real_ip_snippet_target}"; then restore_failed=1; fi
+		fi
 		if [[ "${restore_failed}" -eq 0 ]] && ! sudo nginx -t >/dev/null 2>&1; then
 			restore_failed=1
 		fi
 		if [[ "${restore_failed}" -eq 0 ]] && ! sudo systemctl reload nginx; then
 			restore_failed=1
 		fi
-		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
+		rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}" "${real_ip_snippet_backup}"
 		if [[ "${restore_failed}" -ne 0 ]]; then
 			printf 'failed to restore host ingress\n' >&2
 		fi
 		return 1
 	fi
-	rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}"
+	rm -f "${candidate}" "${site_backup}" "${default_snippet_backup}" "${real_ip_snippet_backup}"
 }
 
 # --- Stage 1: bring up a standby container on an alternate port running the
