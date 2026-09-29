@@ -1,3 +1,8 @@
+limit_req_zone $binary_remote_addr zone=easysubway_journey:10m rate=5r/s;
+limit_req_zone $binary_remote_addr zone=easysubway_upload:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=easysubway_api:10m rate=30r/s;
+limit_conn_zone $binary_remote_addr zone=easysubway_conn:10m;
+
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -35,6 +40,16 @@ server {
     ssl_certificate /etc/letsencrypt/live/easysubway-api.aquilaxk.site/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/easysubway-api.aquilaxk.site/privkey.pem;
 
+    include /etc/nginx/snippets/easysubway-real-ip.conf;
+    limit_req_status 429;
+    limit_conn_status 429;
+    error_page 429 = @easysubway_rate_limited;
+
+    location @easysubway_rate_limited {
+        add_header Retry-After 1 always;
+        default_type application/json;
+        return 429 '{"code":"RATE_LIMITED"}';
+    }
 
     # actuator 메트릭·엔드포인트는 공개 노출하지 않는다(#2376). 배포·관측 readiness/liveness probe
     # 경로만 예외로 공개 유지하고(공개 probe 계약 무회귀), 나머지 /actuator/* 는 차단한다.
@@ -57,7 +72,30 @@ server {
         return 404;
     }
 
+    location ^~ /api/v3/journeys/ {
+        limit_req zone=easysubway_journey burst=20 nodelay;
+        limit_conn easysubway_conn 50;
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        include /etc/nginx/snippets/easysubway-default-proxy.conf;
+    }
+
+    location ^~ /api/v1/report-uploads {
+        limit_req zone=easysubway_upload burst=10 nodelay;
+        limit_conn easysubway_conn 50;
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        include /etc/nginx/snippets/easysubway-default-proxy.conf;
+    }
+
+    location ^~ /api/v1/reports {
+        limit_req zone=easysubway_upload burst=10 nodelay;
+        limit_conn easysubway_conn 50;
+        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        include /etc/nginx/snippets/easysubway-default-proxy.conf;
+    }
+
     location / {
+        limit_req zone=easysubway_api burst=60 nodelay;
+        limit_conn easysubway_conn 50;
         proxy_pass http://127.0.0.1:__BACKEND_PORT__;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
