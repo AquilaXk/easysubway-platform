@@ -160,3 +160,158 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   assert.match(template, /\/actuator\/health\/readiness/);
   assert.match(template, /proxy_pass\s+http:\/\/127\.0\.0\.1:__BACKEND_PORT__;/);
 });
+
+function extractServerBlocks(text) {
+  const servers = [];
+  const serverRegex = /\bserver\s*\{/g;
+  let match;
+  while ((match = serverRegex.exec(text)) !== null) {
+    const startIndex = match.index;
+    let depth = 0;
+    let endIndex = startIndex;
+    for (let i = startIndex; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          endIndex = i + 1;
+          break;
+        }
+      }
+    }
+    servers.push(text.substring(startIndex, endIndex));
+  }
+  return servers;
+}
+
+test("(1) 세 가상 호스트 모두 조건부 access_log가 있고 무조건 access_log는 없다", () => {
+  const template = readFileSync(templatePath, "utf8");
+  const serverBlocks = extractServerBlocks(template);
+  assert.equal(serverBlocks.length, 3, "세 가상 호스트(포트 80, 443 기본, 443 메인)가 있어야 한다");
+
+  for (let i = 0; i < serverBlocks.length; i++) {
+    const block = serverBlocks[i];
+    assert.match(
+      block,
+      /access_log\s+\/var\/log\/nginx\/easysubway-edge\.log\s+easysubway_edge_json\s+if=\$easysubway_edge_loggable;/,
+      `가상 호스트 #${i + 1}에 조건부 access_log가 있어야 한다`
+    );
+    const withoutConditionalLog = block.replace(/access_log\s+[^;]*if=\$easysubway_edge_loggable;/g, "");
+    assert.doesNotMatch(
+      withoutConditionalLog,
+      /\baccess_log\b/,
+      `가상 호스트 #${i + 1}에 무조건 access_log(또는 access_log off)가 없어야 한다`
+    );
+  }
+});
+
+test("(2) map이 429와 500·503은 1, 200·404는 0이다", () => {
+  const template = readFileSync(templatePath, "utf8");
+  const mapRegex = /map\s+\$status\s+\$easysubway_edge_loggable\s*\{([^}]+)\}/;
+  const match = mapRegex.exec(template);
+  assert.ok(match, "map $status $easysubway_edge_loggable 정의가 있어야 한다");
+
+  const mapBody = match[1];
+  const entries = mapBody
+    .split(";")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  let defaultValue = "0";
+  const rules = [];
+
+  for (const entry of entries) {
+    const parts = entry.split(/\s+/);
+    if (parts[0] === "default") {
+      defaultValue = parts[1];
+    } else if (parts.length >= 2) {
+      rules.push({ pattern: parts[0].replace(/^["']|["']$/g, ""), value: parts[1] });
+    }
+  }
+
+  function resolveStatus(status) {
+    const statusStr = String(status);
+    for (const rule of rules) {
+      if (rule.pattern.startsWith("~")) {
+        const regexStr = rule.pattern.substring(1);
+        const re = new RegExp(regexStr);
+        if (re.test(statusStr)) return rule.value;
+      } else if (rule.pattern === statusStr) {
+        return rule.value;
+      }
+    }
+    return defaultValue;
+  }
+
+  assert.equal(resolveStatus(429), "1", "429는 1이어야 한다");
+  assert.equal(resolveStatus(500), "1", "500은 1이어야 한다");
+  assert.equal(resolveStatus(503), "1", "503은 1이어야 한다");
+  assert.equal(resolveStatus(200), "0", "200은 0이어야 한다");
+  assert.equal(resolveStatus(404), "0", "404는 0이어야 한다");
+});
+
+test("(3) 로그 형식에 $args·$request_uri·$http_ 변수가 없다", () => {
+  const template = readFileSync(templatePath, "utf8");
+  const logFormatRegex = /log_format\s+easysubway_edge_json\s+(?:escape=json\s+)?([\s\S]*?);/;
+  const match = logFormatRegex.exec(template);
+  assert.ok(match, "log_format easysubway_edge_json 정의가 있어야 한다");
+
+  const formatStr = match[1];
+  assert.doesNotMatch(formatStr, /\$args\b/, "쿼리 파라미터 $args는 제외되어야 한다");
+  assert.doesNotMatch(formatStr, /\$request_uri\b/, "쿼리를 포함하는 $request_uri는 제외되어야 한다");
+  assert.doesNotMatch(formatStr, /\$http_/, "헤더 정보를 담는 $http_*는 제외되어야 한다");
+
+  assert.match(formatStr, /\$remote_addr\b/, "$remote_addr가 포함되어야 한다");
+  assert.match(formatStr, /\$status\b/, "$status가 포함되어야 한다");
+  assert.match(formatStr, /\$request_method\b/, "$request_method가 포함되어야 한다");
+  assert.match(formatStr, /\$uri\b/, "$uri(쿼리 제외 경로)가 포함되어야 한다");
+  assert.match(formatStr, /\$request_time\b/, "$request_time이 포함되어야 한다");
+  assert.match(formatStr, /\$(?:time_iso8601|time_local)\b/, "시각 변수가 포함되어야 한다");
+  assert.match(formatStr, /\$easysubway_edge_location|\$easysubway_zone/, "location/zone 식별자 변수가 포함되어야 한다");
+});
+
+test("(4) real-ip 목록이 IPv4 15개와 IPv6 7개의 고정 기대 목록과 정확히 같다", () => {
+  const realIp = existsSync(realIpPath) ? readFileSync(realIpPath, "utf8") : "";
+  const ipMatches = [...realIp.matchAll(/set_real_ip_from\s+([^;]+);/g)].map((m) => m[1].trim());
+
+  const expectedIpv4 = [
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+  ];
+
+  const expectedIpv6 = [
+    "2400:cb00::/32",
+    "2606:4700::/32",
+    "2803:f800::/32",
+    "2405:b500::/32",
+    "2405:8100::/32",
+    "2a06:98c0::/29",
+    "2c0f:f248::/32",
+  ];
+
+  const actualIpv4 = ipMatches.filter((ip) => ip.includes("."));
+  const actualIpv6 = ipMatches.filter((ip) => ip.includes(":"));
+
+  assert.deepEqual(actualIpv4, expectedIpv4, "Cloudflare IPv4 15개 대역이 기대값과 일치해야 한다");
+  assert.deepEqual(actualIpv6, expectedIpv6, "Cloudflare IPv6 7개 대역이 기대값과 일치해야 한다");
+  assert.equal(ipMatches.length, 22, "전체 real_ip_from 항목은 정확히 22개(15+7)여야 한다");
+});
+
+test("(5) real_ip_header CF-Connecting-IP가 유지된다", () => {
+  const realIp = existsSync(realIpPath) ? readFileSync(realIpPath, "utf8") : "";
+  assert.match(realIp, /real_ip_header\s+CF-Connecting-IP;/, "real_ip_header CF-Connecting-IP가 유지되어야 한다");
+  assert.match(realIp, /real_ip_recursive\s+on;/, "real_ip_recursive on이 유지되어야 한다");
+});
