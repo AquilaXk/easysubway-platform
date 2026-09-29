@@ -965,6 +965,8 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
     /# merge-state-preflight-begin\n([\s\S]*?)\n\s+# merge-state-preflight-end/,
   )?.[1];
   assert.ok(preflight, 'merge state preflight must stay testable');
+  const ownerHandoff = workflow.match(/# owner-handoff-begin\n([\s\S]*?)\n\s+# owner-handoff-end/)?.[1];
+  assert.ok(ownerHandoff, 'owner handoff must stay testable');
 
   const markerPrefix = '<!-- easysubway-automerge-rebase-required:';
   const runPreflight = (
@@ -1009,6 +1011,7 @@ test('BEHIND·DIRTY는 branch를 바꾸지 않고 PR-visible handoff로 큐에�
       'GITHUB_RUN_ID=1234',
       `HAS_AUTOMERGE_PAT=${hasPat}`,
       `merge_state=${JSON.stringify(mergeState)}`,
+      dedent(ownerHandoff),
       'for _ in 1; do',
       dedent(preflight, 12),
       `  printf 'PASSED_PREFLIGHT\\n' >> "$GH_LOG"`,
@@ -1748,6 +1751,28 @@ test('exact Dependabot Compose image-only PR만 Review와 marker 없이 통과�
     },
   ]);
   assert.equal(eligible.mergedPr, 41, 'exact dependency-only candidate must bypass only Review and marker');
+  // Dependabot Compose PR이 BEHIND면 PAT가 있어도 base를 갱신하지 않고 이전처럼 소유 세션에
+  // handoff한다(Review가 없어 게이트를 통과할 수 없는 후보를 라벨이 붙은 채 방치하지 않는다).
+  const dependabotBehind = runQueue([
+    {
+      number: 41,
+      mergeStateStatus: 'BEHIND',
+      reviewed: false,
+      authorized: false,
+      dependabotCompose: true,
+      dependencyPatch: `-    image: ghcr.io/a/image:1.0.0@sha256:${'b'.repeat(64)}\n+    image: ${tagAndDigest}`,
+    },
+    { number: 42, mergeStateStatus: 'CLEAN' },
+  ], { hasPat: true });
+  assert.equal(dependabotBehind.status, 0, dependabotBehind.stderr);
+  assert.equal(dependabotBehind.updatedBranch, false, 'a Dependabot Compose BEHIND PR must not be updated by the coordinator');
+  assert.equal(dependabotBehind.labelRemoved, true, 'a Dependabot Compose BEHIND PR must be handed off');
+  assert.equal(dependabotBehind.commented, true, 'the handoff must leave the rebase notice');
+  assert.equal(dependabotBehind.mergedPr, 42, 'the handoff must not starve later candidates');
+  // 일반 PR의 BEHIND는 같은 조건에서 base 갱신 후보가 된다.
+  const ordinaryBehind = runQueue([{ number: 41, mergeStateStatus: 'BEHIND' }], { hasPat: true });
+  assert.equal(ordinaryBehind.updatedBranch, true);
+  assert.equal(ordinaryBehind.labelRemoved, false);
   // Review를 건너뛰는 예외 경로는 marker 동기화 대상도 아니다. marker가 없어도 복구하지 않는다.
   assert.doesNotMatch(eligible.calls, /--method (PATCH|POST)|\/events/, 'the Dependabot exception must not sync authorization markers');
 
