@@ -29,6 +29,13 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const ENVIRONMENT = /^[A-Za-z0-9._-]{1,255}$/;
 const NAMESPACE = "easysubway-journey";
+const PUBLIC_EGRESS_EXCEPT_CIDRS = Object.freeze([
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+]);
 const JOURNEY_PROFILE_RESOURCE_POLICY = Object.freeze({
   schemaVersion: 1,
   artifactKind: "journey-profile-resource-policy",
@@ -325,7 +332,15 @@ function networkPolicy(input) {
       egress: [
         { to: [{ ipBlock: { cidr: `${input.nodeInternalIp}/32` } }], ports: [{ protocol: "TCP", port: 15432 }, { protocol: "TCP", port: 9000 }] },
         { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] },
-        { to: [{ ipBlock: { cidr: "0.0.0.0/0" } }], ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 80 }] },
+        {
+          to: [{
+            ipBlock: {
+              cidr: "0.0.0.0/0",
+              except: [...PUBLIC_EGRESS_EXCEPT_CIDRS],
+            },
+          }],
+          ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 80 }],
+        },
       ],
     },
   };
