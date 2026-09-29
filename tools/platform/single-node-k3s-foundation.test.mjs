@@ -9,6 +9,45 @@ import test from "node:test";
 const root = new URL("../..", import.meta.url);
 const renderer = new URL("tools/platform/render-journey-kubernetes-candidate.mjs", root);
 const digest = (character) => `sha256:${character.repeat(64)}`;
+ 
+function ipToInt(ip) {
+  return ip.split(".").reduce((acc, octet) => ((acc << 8) | Number(octet)) >>> 0, 0);
+}
+
+function matchesCidr(ip, cidr) {
+  const [prefix, bitsStr] = cidr.split("/");
+  const bits = Number(bitsStr);
+  const ipInt = ipToInt(ip);
+  const prefixInt = ipToInt(prefix);
+  if (bits === 0) return true;
+  const mask = ((~0) << (32 - bits)) >>> 0;
+  return (ipInt & mask) === (prefixInt & mask);
+}
+
+function ipBlockAllows(ipBlock, ip) {
+  if (!matchesCidr(ip, ipBlock.cidr)) return false;
+  if (ipBlock.except) {
+    for (const exc of ipBlock.except) {
+      if (matchesCidr(ip, exc)) return false;
+    }
+  }
+  return true;
+}
+
+function egressAllows(networkPolicy, ip, port, protocol = "TCP") {
+  for (const rule of networkPolicy.spec.egress) {
+    const portMatch = rule.ports?.some((p) => p.port === port && (!p.protocol || p.protocol === protocol));
+    if (!portMatch) continue;
+    const toMatch = rule.to?.some((target) => {
+      if (target.ipBlock) {
+        return ipBlockAllows(target.ipBlock, ip);
+      }
+      return false;
+    });
+    if (toMatch) return true;
+  }
+  return false;
+}
 
 test("K3s runtime contract pins one practical single-node serving boundary", () => {
   const contract = readJson("contracts/release/platform-k3s-runtime-contract.json");
@@ -194,10 +233,25 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.equal(objectSlice.ports[0].port, 9000);
 
   const networkPolicy = objects.find(({ kind }) => kind === "NetworkPolicy");
-  assert.ok(networkPolicy.spec.egress.some((rule) =>
+  const publicEgressRule = networkPolicy.spec.egress.find((rule) =>
     rule.to?.some((target) => target.ipBlock?.cidr === "0.0.0.0/0") &&
     rule.ports?.some((port) => port.port === 443),
-  ));
+  );
+  assert.ok(publicEgressRule);
+  const publicTarget = publicEgressRule.to.find((t) => t.ipBlock?.cidr === "0.0.0.0/0");
+  assert.deepEqual(publicTarget.ipBlock.except, [
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+  ]);
+  assert.equal(egressAllows(networkPolicy, "169.254.169.254", 80), false);
+  assert.equal(egressAllows(networkPolicy, "169.254.169.254", 443), false);
+  assert.equal(egressAllows(networkPolicy, input.nodeInternalIp, 15432), true);
+  assert.equal(egressAllows(networkPolicy, input.nodeInternalIp, 9000), true);
+  assert.equal(egressAllows(networkPolicy, "203.0.113.10", 80), true);
+  assert.equal(egressAllows(networkPolicy, "203.0.113.10", 443), true);
 
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.type, "NodePort");
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.ports[0].nodePort, 32080);
