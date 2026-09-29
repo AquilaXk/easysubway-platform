@@ -1,0 +1,155 @@
+name: Claude Code Review
+
+# Claude Code 공식 /code-review(번들 skill)를 PR discovery 리뷰로 실행한다 (#200).
+# change set당 discovery 1회 규약에 따라 PR opened·ready_for_review와 수동 재실행에서만 돈다(push마다 돌지 않는다).
+# 결과는 claude[bot] 신원의 단일 COMMENT Review(finding은 그 Review의 inline thread)로 게시되고,
+# automerge-queue.yml review gate가 고정된 봇 신원으로 이를 discovery로 인정한다.
+# fork PR(시크릿 없음)과 봇이 연 PR(action이 봇 actor를 거부)은 job if로 건너뛴다. skip은 게이트 통과가 아니다.
+# 시크릿 누락·action 실패·Review 미게시는 job 실패다.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 리뷰할 PR 번호 (수동 재실행)
+        required: true
+        type: number
+
+concurrency:
+  group: claude-code-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Claude Code Review
+    if: >-
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.type != 'Bot') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - name: Resolve pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+          state=$(jq -r '.state' <<<"${pr}")
+          draft=$(jq -r '.draft' <<<"${pr}")
+          head_repo=$(jq -r '.head.repo.full_name // ""' <<<"${pr}")
+          head_sha=$(jq -r '.head.sha' <<<"${pr}")
+          if [ "${state}" != "open" ]; then
+            echo "::error::PR #${PR_NUMBER}은 open 상태가 아니다(state=${state})."; exit 1
+          fi
+          if [ "${draft}" != "false" ]; then
+            echo "::error::PR #${PR_NUMBER}은 Draft다. ready_for_review 뒤에 리뷰한다."; exit 1
+          fi
+          if [ "${head_repo}" != "${REPO}" ]; then
+            echo "::error::PR #${PR_NUMBER}은 fork(${head_repo}) PR이다. 시크릿이 필요한 Claude 리뷰를 실행하지 않는다."; exit 1
+          fi
+          {
+            echo "number=${PR_NUMBER}"
+            echo "head_sha=${head_sha}"
+            echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout pull request head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 1
+
+      - name: Run Claude Code review
+        uses: anthropics/claude-code-action@8ce9314fa9a404564fa7e954cd84f25bcba2b829 # v1.0.236
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: /code-review high ${{ steps.pr.outputs.number }}
+          claude_args: |
+            --allowedTools "Bash(gh pr view *),Bash(gh pr diff *),Edit(/claude-code-review.json),Bash(gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews --method POST --input claude-code-review.json)"
+            --append-system-prompt 'EasySubway platform PR discovery 리뷰 규칙 (Issue #200).
+            리뷰 대상: ${{ github.repository }} PR ${{ steps.pr.outputs.number }}, head commit ${{ steps.pr.outputs.head_sha }}.
+            작성자(사람, 에이전트, 자동화)나 변경 크기와 관계없이 이 PR을 반드시 리뷰하고 아래 게시 절차까지 마친다. 사소하거나 자동 생성된 PR이라는 이유로 건너뛰지 않는다.
+
+            1. 언어: finding과 요약은 한국어로 쓴다. 식별자, 파일 경로, 명령어, 고정 토큰(API, CI, OAuth 등)은 영문 그대로 둔다.
+            2. 심각도: 모든 finding 본문은 다음 중 하나로 시작한다. 🔴 Important(병합 전에 고칠 버그), 🟡 Nit(사소하지만 고칠 가치가 있음), 🟣 Pre-existing(이 PR이 만들지 않은 기존 버그).
+            3. 저장소 우선순위: checkout에 CLAUDE.md가 없으므로 아래를 프로젝트 규칙으로 삼고 모든 리뷰 subagent에 그대로 전달한다.
+               - Fallback 금지: 배포, 헬스 체크, 스모크, 복구 실패를 성공으로 처리하거나 실패, 누락, 만료 값을 stale 값, 추정치, placeholder, best-effort 성공으로 덮는 코드
+               - 비특권 실행, NetworkPolicy, 이미지 digest 고정 약화: root 또는 privileged 실행 허용, capability 추가, NetworkPolicy 완화나 제거, digest 고정을 tag나 latest 참조로 되돌림
+               - 공개 포트 바인딩 확대: 127.0.0.1 대신 0.0.0.0 바인딩, 외부로 새 포트 노출
+               - 배포와 복구 게이트 약화: warning-only 전환, continue-on-error, 검사 subset 또는 skip, 성공 fallback
+               - 버그 수정인데 수정 전에는 실패하는 테스트가 없음
+               - contracts/documentation/documentation-fragment.json의 resources에 등록된 파일을 바꾸고 같은 PR에서 그 파일을 갱신하지 않음
+               - 시크릿, API 키, 토큰, 내부 절대경로, 운영 호스트 정보(호스트명, IP, 접속 계정) 노출
+            4. 게시 절차(필수):
+               - 리뷰가 끝나면 모든 finding을 GitHub PR Review 하나에 담는다. Write 도구로 작업 디렉터리의 claude-code-review.json에 다음 형태의 JSON을 쓴다.
+                 {"commit_id": "${{ steps.pr.outputs.head_sha }}", "event": "COMMENT", "body": "한국어 요약", "comments": [{"path": "파일 경로", "line": 123, "side": "RIGHT", "body": "finding"}]}
+               - 그다음 정확히 이 명령 하나로 게시한다: gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews --method POST --input claude-code-review.json
+               - 🔴 Important와 🟡 Nit finding은 반드시 comments의 inline 항목으로 넣는다. line은 gh pr diff ${{ steps.pr.outputs.number }}에서 새 파일(RIGHT) 쪽에 보이는 줄이어야 한다. diff 밖에 있는 🟣 Pre-existing finding만 body 목록에 쓸 수 있다.
+               - body 첫 줄은 정확히 "🔴 <개수> · 🟡 <개수> · 🟣 <개수>" 형식의 심각도별 개수이고(검증 step이 이 줄과 inline 개수를 대조한다), 이어서 finding마다 한 줄 요약을 쓴다. finding이 없으면 comments는 빈 배열이고 body에 검토한 범위와 finding이 없다는 사실을 쓴다.
+               - 게시 명령이 실패하면 오류를 읽고 JSON을 고쳐 같은 명령을 다시 실행한다. 성공한 뒤에는 다시 실행하지 않는다. 끝내 게시하지 못하면 게시했다고 말하지 말고 실패로 보고한다.
+               - event는 항상 COMMENT다. APPROVE나 REQUEST_CHANGES를 쓰지 않고, 다른 댓글, 커밋, push, claude-code-review.json 밖의 파일 수정을 하지 않는다.'
+
+      - name: Verify Claude review object
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          STARTED_AT: ${{ steps.pr.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          reviews=$(gh api --paginate --slurp "repos/${REPO}/pulls/${PR_NUMBER}/reviews")
+          verdict=$(jq -r --arg since "${STARTED_AT}" --arg head "${HEAD_SHA}" '
+            [flatten[]
+              | select(.user != null)
+              | select(.author_association == "NONE" and
+                  .user.login == "claude[bot]" and
+                  .user.id == 209825114 and
+                  .user.type == "Bot")
+              | select(.submitted_at >= $since)] as $run_reviews
+            | ($run_reviews | length) == 1 and
+              ($run_reviews[0] | .state == "COMMENTED" and .commit_id == $head and (.body // "") != "")
+          ' <<<"${reviews}")
+          if [ "${verdict}" != "true" ]; then
+            echo "::error::이번 실행에서 head ${HEAD_SHA}에 대한 claude[bot] COMMENT Review가 정확히 하나 게시되지 않았다. automerge review gate가 인정할 discovery Review가 없다."
+            exit 1
+          fi
+          review=$(jq -c --arg since "${STARTED_AT}" '
+            [flatten[]
+              | select(.user != null)
+              | select(.author_association == "NONE" and
+                  .user.login == "claude[bot]" and
+                  .user.id == 209825114 and
+                  .user.type == "Bot")
+              | select(.submitted_at >= $since)][0]
+          ' <<<"${reviews}")
+          review_id=$(jq -r '.id' <<<"${review}")
+          inline_count=$(gh api --paginate --slurp "repos/${REPO}/pulls/${PR_NUMBER}/reviews/${review_id}/comments" | jq '[flatten[]] | length')
+          # 병합 차단은 미해결 inline thread에 의존한다. 🔴·🟡 finding이 본문에만 있으면 thread gate를 우회하므로 실패시킨다.
+          coverage=$(jq -r --argjson inline "${inline_count}" '
+            (((.body // "") | split("\n")[0]) // "") as $first
+            | ([$first | capture("^🔴 (?<red>[0-9]+) · 🟡 (?<nit>[0-9]+) · 🟣 (?<pre>[0-9]+)$")] | first) as $counts
+            | $counts != null and $inline >= (($counts.red | tonumber) + ($counts.nit | tonumber))
+          ' <<<"${review}")
+          if [ "${coverage}" != "true" ]; then
+            echo "::error::claude[bot] Review 본문의 🔴·🟡 개수보다 inline 코멘트(${inline_count}건)가 적거나 개수 줄이 없다. blocking finding이 thread 없이 병합될 수 있다."
+            exit 1
+          fi
+          echo "PR #${PR_NUMBER}: claude[bot] COMMENT Review 1건 확인 (head ${HEAD_SHA}, inline ${inline_count}건)."

@@ -51,6 +51,7 @@ jobs:
       - name: Test platform contracts
         run: |
           node --test tools/ci/automerge-queue.test.mjs
+          node --test tools/ci/claude-code-review-workflow.test.mjs
           node --test tools/ci/check-documentation-fragment-sync.test.mjs
           node --test tools/ci/public-sensitivity-owner-receipt-caller.test.mjs
           node --test tools/platform/no-mutable-contract-source.test.mjs

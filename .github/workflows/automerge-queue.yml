@@ -435,6 +435,8 @@ jobs:
             # review-state-filter-begin
             # frozen discovery는 라벨 이벤트에서 GitHub Actions가 기록한 exact-head marker가
             # 있을 때만 승계한다. 임의 author·다른 SHA·후속 push는 게이트를 통과하지 못한다.
+            # Claude Code 공식 리뷰(claude-code-review.yml, #200)는 CodeRabbit처럼 immutable 봇
+            # 신원의 COMMENTED Review만 discovery로 인정한다. 봇 APPROVED는 discovery가 아니다.
             if ! jq -s -e --arg head "${head}" '
               .[0] as $reviews |
               .[1] as $comments |
@@ -443,6 +445,11 @@ jobs:
                 .author_association == "NONE" and
                 .user.login == "coderabbitai[bot]" and
                 .user.id == 136622811 and
+                .user.type == "Bot";
+              def is_claude:
+                .author_association == "NONE" and
+                .user.login == "claude[bot]" and
+                .user.id == 209825114 and
                 .user.type == "Bot";
               def is_exact_head_marker:
                 .user.login == "github-actions[bot]" and
@@ -456,7 +463,8 @@ jobs:
                   .author_association == "OWNER" or
                   .author_association == "MEMBER" or
                   .author_association == "COLLABORATOR" or
-                  is_coderabbit
+                  is_coderabbit or
+                  is_claude
                 )] as $trusted |
               ($trusted |
               sort_by(.submitted_at, .id) |
@@ -473,9 +481,9 @@ jobs:
               ($states | length > 0 and all(.[]; . == "APPROVED" or . == "COMMENTED")) and
               any($trusted[];
                 is_current_pr_commit(.) and
-                  ((.state == "APPROVED" and .commit_id == $head) or
+                  ((.state == "APPROVED" and .commit_id == $head and (is_claude | not)) or
                   (.state == "COMMENTED" and
-                    (is_coderabbit or
+                    (is_coderabbit or is_claude or
                       ((.body // "" | startswith("**Actionable comments posted: ")) and
                       ((.body // "" | contains("<!-- Review source: Aquila fallback; canonical visible structure:")) or
                        (.body // "" | contains("<!-- Review source: Aquila Universal Review; engine: aquila-review -->")) or
