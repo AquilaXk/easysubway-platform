@@ -247,9 +247,10 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          # PR head가 바꾼 에이전트 설정·지시(.claude/, CLAUDE.md, CLAUDE.local.md, .mcp.json)는 리뷰 대상이지
-          # 리뷰어 설정이 아니다. 모든 트리거에서 지우고 기본 브랜치에 있는 것만 되살린다.
-          agent_config=(.claude CLAUDE.md CLAUDE.local.md .mcp.json)
+          # PR head가 바꾼 에이전트 설정·지시는 리뷰 대상이지 리뷰어 설정이 아니다. 고정 action(v1.0.236)의
+          # restore-config SENSITIVE_PATHS와 같은 8개 경로를 모든 트리거에서 지우고 기본 브랜치에 있는 것만 되살린다
+          # (action은 pull_request 이벤트에서만 복원하므로 workflow_dispatch 경로를 여기서 막는다).
+          agent_config=(.claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky)
           rm -rf -- "${agent_config[@]}"
           git fetch --no-tags --depth=1 origin "${DEFAULT_BRANCH}"
           for path in "${agent_config[@]}"; do
