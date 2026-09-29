@@ -55,6 +55,9 @@ jobs:
       statuses: read
     env:
       GH_TOKEN: ${{ github.token }}
+      # 병합 호출만 PAT로 수행한다(GITHUB_TOKEN 병합은 후속 workflow run을 만들지 않는다).
+      MERGE_GH_TOKEN: ${{ secrets.AUTOMERGE_PAT != '' && secrets.AUTOMERGE_PAT || github.token }}
+      HAS_AUTOMERGE_PAT: ${{ secrets.AUTOMERGE_PAT != '' }}
       EVENT_NAME: ${{ github.event_name }}
       EVENT_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}
       EVENT_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
@@ -65,6 +68,10 @@ jobs:
         run: |
           # shellcheck disable=SC2016
           set -euo pipefail
+
+          if [ "${HAS_AUTOMERGE_PAT}" != "true" ]; then
+            echo "::warning::AUTOMERGE_PAT secret이 없어 GITHUB_TOKEN으로 병합한다. 병합이 후속 workflow run을 만들지 못해 큐 체인이 멈출 수 있다."
+          fi
 
           repo="${GITHUB_REPOSITORY}"
           owner="${repo%%/*}"
@@ -627,7 +634,7 @@ jobs:
                 # 미해결 thread·required context를 모두 통과한 뒤에만 닿으므로 `--auto`가
                 # 대신 기다려 줄 대상이 남아 있지 않다. --match-head-commit이 판정 시점
                 # 이후의 head 변경을 서버에서 거른다.
-                if gh pr merge --squash "${pr}" --repo "${repo}" \
+                if GH_TOKEN="${MERGE_GH_TOKEN}" gh pr merge --squash "${pr}" --repo "${repo}" \
                   --match-head-commit "${head}"; then
                   echo "PR #${pr}: merged (${merge_state})."
                   exit 0
