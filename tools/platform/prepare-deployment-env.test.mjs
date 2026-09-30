@@ -219,6 +219,40 @@ test("non-127.0.0.1 postgres and object-storage binds fail closed before publica
   }
 });
 
+test("EASYSUBWAY_SEOUL_METRO_ELEVATOR_SERVICE_KEY is required and projected into backend.env", () => {
+  const elevatorKey = "EASYSUBWAY_SEOUL_METRO_ELEVATOR_SERVICE_KEY";
+  const elevatorValue = "synthetic-elevator-key";
+
+  const allowlist = readFileSync(backendAllowlist, "utf8").split("\n").filter(Boolean);
+  assert.equal(allowlist.includes(elevatorKey), true);
+
+  for (const missingValue of [undefined, ""]) {
+    const fixture = makeFixture({ [elevatorKey]: missingValue });
+    try {
+      const result = run(fixture);
+      assert.equal(result.status, 1, `Expected failure when ${elevatorKey} is missing or empty`);
+      assert.match(result.stderr, new RegExp(elevatorKey));
+      assert.equal(result.stderr.includes(elevatorValue), false);
+      assert.deepEqual(
+        existsSync(fixture.outputDirectory) ? readdirSync(fixture.outputDirectory) : [],
+        [],
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+
+  const fixture = makeFixture({ [elevatorKey]: elevatorValue });
+  try {
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const backendEnv = readFileSync(join(fixture.outputDirectory, "backend.env"), "utf8");
+    assert.match(backendEnv, new RegExp(`^${elevatorKey}=${elevatorValue}$`, "m"));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 function makeFixture(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "platform-report-env-"));
   const sourceEnv = join(directory, "source.env");
@@ -236,6 +270,7 @@ function makeFixture(overrides = {}) {
     ["EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY", "synthetic-secret-key"],
     ["EASYSUBWAY_ADS_ASSET_ORIGIN", "https://assets.aquilaxk.site"],
     ["EASYSUBWAY_TAGO_TRAIN_SERVICE_KEY", "synthetic-tago-key"],
+    ["EASYSUBWAY_SEOUL_METRO_ELEVATOR_SERVICE_KEY", "synthetic-elevator-key"],
     ["EASYSUBWAY_ADS_EVENT_DAILY_CAP", "1"],
     ["EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET", "a".repeat(43)],
     ["EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256", "b".repeat(43)],
