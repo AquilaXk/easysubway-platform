@@ -270,6 +270,7 @@ function makeFixture(overrides = {}) {
     ["EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY", "synthetic-secret-key"],
     ["EASYSUBWAY_ADS_ASSET_ORIGIN", "https://assets.aquilaxk.site"],
     ["EASYSUBWAY_TAGO_TRAIN_SERVICE_KEY", "synthetic-tago-key"],
+    ["EASYSUBWAY_SEOUL_METRO_ELEVATOR_SERVICE_KEY", "synthetic-elevator-key"],
     ["EASYSUBWAY_ADS_EVENT_DAILY_CAP", "1"],
     ["EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET", "a".repeat(43)],
     ["EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256", "b".repeat(43)],

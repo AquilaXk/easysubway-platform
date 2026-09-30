@@ -179,6 +179,7 @@ require_nonempty EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY
 require_nonempty EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY
 require_nonempty EASYSUBWAY_ADS_ASSET_ORIGIN
 require_nonempty EASYSUBWAY_TAGO_TRAIN_SERVICE_KEY
+require_nonempty EASYSUBWAY_SEOUL_METRO_ELEVATOR_SERVICE_KEY
 if grep -qx 'EASYSUBWAY_ADS_EVENT_DAILY_CAP=' "${env_values_file}"; then
 	require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
 fi
