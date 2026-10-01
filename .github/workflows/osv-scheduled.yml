@@ -15,7 +15,7 @@ jobs:
       actions: read
       security-events: write
       contents: read
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@3a7550f43ba5b58905a821ce3a0ed24c4858b3f4
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8ac9e5ce44cc7178e0e04229a91bdcc003166e57
     with:
       export-results: false
       upload-sarif: true
