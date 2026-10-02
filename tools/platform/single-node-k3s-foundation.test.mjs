@@ -219,6 +219,13 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.ok(
     pod.volumes.some(({ name, configMap }) => name === "policy" && configMap?.name === rendered.configPlan.name),
   );
+  // backend는 서버 경로 번들 4개 SQLite를 /tmp에 모두 풀어 둔 채 컴파일한다(압축해제 상한 192MiB, backend #458).
+  // Memory 매체라 pod memory limit(4Gi)에 포함되지만 상한+JVM을 더해도 limit 안이다.
+  assert.ok(container.volumeMounts.some(({ name, mountPath }) => name === "tmp" && mountPath === "/tmp"));
+  assert.deepEqual(pod.volumes.find(({ name }) => name === "tmp"), {
+    name: "tmp",
+    emptyDir: { medium: "Memory", sizeLimit: "256Mi" },
+  });
   for (const probe of [container.startupProbe, container.readinessProbe, container.livenessProbe]) {
     assert.equal(probe.httpGet.port, 8080);
   }

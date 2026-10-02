@@ -285,7 +285,7 @@ function deployment(input, token, deploymentName, configName, secretName) {
             ],
           }],
           volumes: [
-            { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: "128Mi" } },
+            { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: "256Mi" } },
             { name: "logs", emptyDir: { sizeLimit: "256Mi" } },
             {
               name: "policy",
