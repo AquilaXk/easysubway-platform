@@ -1089,10 +1089,11 @@ test("verifyRuntime accepts a missing active Service that activation will create
 });
 
 test("verifyRuntime fails closed when the compose network subnet drifts from the NetworkPolicy contract", async () => {
-  for (const subnetConfig of [
-    [{ Subnet: "172.19.0.0/16" }],
-    [],
-    [{ Subnet: OBSERVABILITY_CONTRACT.composeNetwork.subnet }, { Subnet: "172.30.0.0/16" }],
+  const expected = OBSERVABILITY_CONTRACT.composeNetwork.subnet;
+  for (const [subnetConfig, observed] of [
+    [[{ Subnet: "172.19.0.0/16" }], "172.19.0.0/16"],
+    [[], "none"],
+    [[{ Subnet: expected }, { Subnet: "172.30.0.0/16" }], `${expected},172.30.0.0/16`],
   ]) {
     const commands = [];
     const effects = await runtimeObservabilityEffects(
@@ -1103,7 +1104,11 @@ test("verifyRuntime fails closed when the compose network subnet drifts from the
         commands,
       },
     );
-    await assert.rejects(effects.verifyRuntime(), /compose network subnet does not match the observability contract/);
+    await assert.rejects(effects.verifyRuntime(), (error) => {
+      assert.equal(error.message,
+        `compose network subnet does not match the observability contract: expected ${expected}, observed ${observed}`);
+      return true;
+    });
     assertNoK3sMutation(commands);
   }
 });
@@ -1118,7 +1123,12 @@ test("verifyRuntime fails closed when the live active Service ClusterIP drifts f
       commands,
     },
   );
-  await assert.rejects(effects.verifyRuntime(), /active Service ClusterIP does not match the observability contract/);
+  await assert.rejects(effects.verifyRuntime(), (error) => {
+    assert.equal(error.message,
+      "active Service ClusterIP does not match the observability contract: " +
+      `expected ${OBSERVABILITY_CONTRACT.activeService.clusterIP}, observed 10.43.0.99`);
+    return true;
+  });
   assertNoK3sMutation(commands);
 });
 

@@ -371,15 +371,22 @@ export function createK3sJourneyActivationEffects({
       ])).stdout));
       if (!Array.isArray(networkConfig) || networkConfig.length !== 1 ||
         networkConfig[0]?.Subnet !== observability.composeNetwork.subnet) {
-        throw new Error("compose network subnet does not match the observability contract");
+        const observed = Array.isArray(networkConfig) && networkConfig.length > 0
+          ? networkConfig.map((entry) => String(entry?.Subnet)).join(",")
+          : "none";
+        throw new Error("compose network subnet does not match the observability contract: " +
+          `expected ${observability.composeNetwork.subnet}, observed ${observed}`);
       }
       const activeServiceBytes = Buffer.from((await kubectl([
         "get", "service", observability.activeService.name, "--namespace", NAMESPACE,
         "--ignore-not-found", "-o", "json",
       ])).stdout);
-      if (activeServiceBytes.toString("utf8").trim() !== "" &&
-        parseJson(activeServiceBytes)?.spec?.clusterIP !== observability.activeService.clusterIP) {
-        throw new Error("active Service ClusterIP does not match the observability contract");
+      if (activeServiceBytes.toString("utf8").trim() !== "") {
+        const observedClusterIp = parseJson(activeServiceBytes)?.spec?.clusterIP;
+        if (observedClusterIp !== observability.activeService.clusterIP) {
+          throw new Error("active Service ClusterIP does not match the observability contract: " +
+            `expected ${observability.activeService.clusterIP}, observed ${String(observedClusterIp)}`);
+        }
       }
       return {
         nodeInternalIp: internalAddresses[0].address,
