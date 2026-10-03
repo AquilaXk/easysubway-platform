@@ -14,17 +14,34 @@ import {
 const root = new URL("../..", import.meta.url);
 const read = (relative) => readFileSync(new URL(relative, root), "utf8");
 
-function composeServiceBlocks(content) {
-  const blocks = new Map();
-  let inServices = false;
+function topLevelBlocks(content) {
+  const blocks = [];
   let current;
   for (const line of content.split("\n")) {
     if (/^\S/.test(line)) {
-      inServices = line.startsWith("services:");
-      current = undefined;
-      continue;
+      current = { header: line, lines: [] };
+      blocks.push(current);
+    } else if (current) {
+      current.lines.push(line);
     }
-    if (!inServices) continue;
+  }
+  return blocks;
+}
+
+function composeAnchors(content) {
+  const anchors = new Map();
+  for (const block of topLevelBlocks(content)) {
+    const anchor = block.header.match(/&([A-Za-z0-9_.-]+)\s*$/);
+    if (anchor) anchors.set(anchor[1], block.lines);
+  }
+  return anchors;
+}
+
+function composeServiceBlocks(content) {
+  const blocks = new Map();
+  const services = topLevelBlocks(content).find((block) => /^services:\s*$/.test(block.header));
+  let current;
+  for (const line of services?.lines ?? []) {
     const service = line.match(/^ {2}([A-Za-z0-9_.-]+):\s*$/);
     if (service) {
       current = service[1];
@@ -36,22 +53,58 @@ function composeServiceBlocks(content) {
   return blocks;
 }
 
+// 레포 경로의 마지막 구성요소가 easysubway-backend로 시작하면 backend 이미지다.
+function isBackendImageReference(image) {
+  const repository = image.split("@")[0].replace(/:[^/]*$/, "");
+  return repository.split("/").pop().startsWith("easysubway-backend");
+}
+
+const DB_SETTING_KEY = /^\s*(?:-\s*)?(?:EASYSUBWAY_DATASOURCE_|SPRING_DATASOURCE_)[A-Z0-9_]*\s*[:=]/;
+
+function serviceAttachesProductionDb(lines, anchors) {
+  let section;
+  for (const line of lines) {
+    const key = line.match(/^ {4}([A-Za-z0-9_]+):\s*(.*)$/);
+    if (key) {
+      section = key[1];
+      const value = key[2].trim().replace(/^["']|["']$/g, "");
+      if (section === "image" &&
+        (value.startsWith("${EASYSUBWAY_BACKEND_IMAGE") || isBackendImageReference(value))) {
+        return true;
+      }
+      if (section === "env_file" && /EASYSUBWAY_BACKEND_ENV_FILE|backend\.env/.test(value)) return true;
+      continue;
+    }
+    if (section === "env_file" && /EASYSUBWAY_BACKEND_ENV_FILE|backend\.env/.test(line)) return true;
+    if (section === "environment") {
+      if (DB_SETTING_KEY.test(line)) return true;
+      const merge = line.match(/^\s+<<:\s*\*([A-Za-z0-9_.-]+)\s*$/);
+      if (merge && (anchors.get(merge[1]) ?? []).some((entry) => DB_SETTING_KEY.test(entry))) return true;
+    }
+  }
+  return false;
+}
+
 function productionDbBackendServices(content) {
+  const anchors = composeAnchors(content);
   return [...composeServiceBlocks(content)]
-    .filter(([, lines]) => lines.some((line) =>
-      /^\s+EASYSUBWAY_DATASOURCE_URL:/.test(line) ||
-      /^\s+image:\s*\$\{EASYSUBWAY_BACKEND_IMAGE\b/.test(line)))
+    .filter(([, lines]) => serviceAttachesProductionDb(lines, anchors))
     .map(([name]) => name)
     .sort();
 }
 
+const COMPOSE_FILES = Object.freeze([
+  "infra/docker-compose.yml",
+  "infra/docker-compose.journey-candidate.yml",
+]);
+
+function productionDbBackendServicesAcross(contents) {
+  return [...new Set(contents.flatMap((content) => productionDbBackendServices(content)))].sort();
+}
+
 test("compose backend services attached to the production DB are exactly the K3s drain set", () => {
   assert.deepEqual(
-    [...PRODUCTION_DB_COMPOSE_BACKEND_SERVICES].sort(),
-    ["backend", "backend-standby"],
-  );
-  assert.deepEqual(
-    productionDbBackendServices(read("infra/docker-compose.yml")),
+    productionDbBackendServicesAcross(COMPOSE_FILES.map(read)),
     [...PRODUCTION_DB_COMPOSE_BACKEND_SERVICES].sort(),
   );
 });
@@ -70,6 +123,51 @@ test("compose parser detects a production DB service outside the drain set", () 
     "  data:",
   ].join("\n");
   assert.deepEqual(productionDbBackendServices(fixture), ["back-worker", "backend"]);
+});
+
+test("compose parser detects literal backend images and backend env_file consumers under any name", () => {
+  const fixture = [
+    "services:",
+    "  postgres:",
+    "    image: imresamu/postgis:18-3.6",
+    "    environment:",
+    "      POSTGRES_PASSWORD: ${EASYSUBWAY_POSTGRES_PASSWORD:-easysubway_local}",
+    "  legacy-worker:",
+    `    image: ghcr.io/aquilaxk/easysubway-backend@sha256:${"a".repeat(64)}`,
+    "    env_file:",
+    "      - ${EASYSUBWAY_BACKEND_ENV_FILE:-../.env.example}",
+    "  renamed-worker:",
+    "    image: easysubway-backend-legacy:84f4fb94",
+    "  env-only-job:",
+    "    image: busybox:1.38.0",
+    "    env_file:",
+    "      - ${EASYSUBWAY_BACKEND_ENV_FILE:-../.env.example}",
+    "  spring-job:",
+    "    image: busybox:1.38.0",
+    "    environment:",
+    "      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/easysubway",
+    "  prometheus:",
+    "    image: prom/prometheus:v3.5.4",
+  ].join("\n");
+  assert.deepEqual(productionDbBackendServices(fixture), [
+    "env-only-job", "legacy-worker", "renamed-worker", "spring-job",
+  ]);
+});
+
+test("compose parser resolves overlay anchors that carry production DB settings", () => {
+  const fixture = [
+    "x-shared: &shared",
+    "  EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/easysubway",
+    "",
+    "services:",
+    "  overlay-worker:",
+    "    environment:",
+    "      <<: *shared",
+    "  unrelated:",
+    "    environment:",
+    "      OTHER: value",
+  ].join("\n");
+  assert.deepEqual(productionDbBackendServices(fixture), ["overlay-worker"]);
 });
 
 test("legacy compose deploy never (re)starts a backend outside the drain set", () => {
