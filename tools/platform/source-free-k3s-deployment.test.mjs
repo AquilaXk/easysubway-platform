@@ -1190,6 +1190,17 @@ function existingConfigMapRunner(rendered, existingData, commands) {
   };
 }
 
+async function verifiedConfigMapEffects(activationRequest, rendered, existingData, commands) {
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: existingConfigMapRunner(rendered, existingData, commands),
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await effects.verifyInputs();
+  return effects;
+}
+
 test("applyCandidate fails closed before any create or apply when an immutable ConfigMap name holds different data", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-configmap-collision-"));
   const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
@@ -1202,13 +1213,7 @@ test("applyCandidate fails closed before any create or apply when an immutable C
     EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: "37125930222",
   };
   const commands = [];
-  const effects = createK3sJourneyActivationEffects({
-    request: activationRequest,
-    commandRunner: existingConfigMapRunner(rendered, existingData, commands),
-    serviceToken: "token".repeat(7),
-    fetchImpl: async () => { throw new Error("not invoked"); },
-  });
-  await effects.verifyInputs();
+  const effects = await verifiedConfigMapEffects(activationRequest, rendered, existingData, commands);
   await assert.rejects(effects.applyCandidate(), (error) => {
     assert.equal(error.message,
       `immutable ConfigMap ${rendered.configPlan.name} already exists with different data: ` +
@@ -1228,13 +1233,8 @@ test("applyCandidate proceeds when the same-named ConfigMap holds identical data
     const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
     const rendered = mockCandidateRenderPlan({ activationRequest, configOverrides: { SAFE_CONFIG: "true" } });
     const commands = [];
-    const effects = createK3sJourneyActivationEffects({
-      request: activationRequest,
-      commandRunner: existingConfigMapRunner(rendered, sameData ? { ...rendered.configPlan.overrides } : undefined, commands),
-      serviceToken: "token".repeat(7),
-      fetchImpl: async () => { throw new Error("not invoked"); },
-    });
-    await effects.verifyInputs();
+    const existingData = sameData ? { ...rendered.configPlan.overrides } : undefined;
+    const effects = await verifiedConfigMapEffects(activationRequest, rendered, existingData, commands);
     await effects.applyCandidate();
     assert.ok(commands.some((command) => command.includes("apply")));
   }

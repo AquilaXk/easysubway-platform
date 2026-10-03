@@ -422,7 +422,7 @@ export function createK3sJourneyActivationEffects({
         const existingData = parseJson(existingConfigMapBytes)?.data ?? {};
         const differing = [...new Set([...Object.keys(existingData), ...Object.keys(configMap.data)])]
           .filter((key) => existingData[key] !== configMap.data[key])
-          .sort();
+          .sort((left, right) => left.localeCompare(right));
         if (differing.length > 0) {
           throw new Error(
             `immutable ConfigMap ${configMap.metadata.name} already exists with different data: ${differing.join(",")}`,

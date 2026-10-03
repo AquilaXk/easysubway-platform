@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+
+import { k3sCandidateInputFixture } from "./k3s-candidate-input-fixture.mjs";
 
 // Issue #228: candidate token(=ConfigMap·Secret·Deployment·candidate Service 이름)은 렌더된 candidate 내용이
 // 달라지면 반드시 달라져야 한다. 같은 이름에 다른 내용을 apply하면 immutable ConfigMap이 거부되거나
@@ -15,30 +16,7 @@ const observabilityContract = new URL("contracts/release/platform-k3s-observabil
 const digest = (character) => `sha256:${character.repeat(64)}`;
 
 function input(overrides = {}) {
-  const releaseTuple = {
-    schemaVersion: "JOURNEY_RELEASE_TUPLE_V1",
-    artifactKind: "journey-release-tuple",
-    backendImageDigest: digest("a"),
-    backendConfigDigest: digest("b"),
-    journeyContractDigest: digest("c"),
-    serverRouteBundleDigest: digest("d"),
-    deploymentRevision: "e".repeat(40),
-    environmentIdentity: "production",
-  };
-  const identity = Object.values(releaseTuple).slice(2);
-  return {
-    schemaVersion: "PLATFORM_K3S_CANDIDATE_INPUT_V1",
-    artifactKind: "platform-k3s-candidate-input",
-    releaseTuple,
-    tupleSha256: `sha256:${createHash("sha256").update(`${identity.join("\n")}\n`, "utf8").digest("hex")}`,
-    candidateGeneration: 1,
-    trafficGeneration: 37125930222,
-    nodeInternalIp: "10.0.0.12",
-    postgresPort: 15432,
-    objectStoragePort: 9000,
-    secretIdentity: digest("9"),
-    ...overrides,
-  };
+  return k3sCandidateInputFixture({ candidateGeneration: 1, trafficGeneration: 37125930222, ...overrides });
 }
 
 // 렌더러 사본을 저장소와 같은 상대 배치(tools/platform, contracts/release)로 만들어, 입력은 같고 렌더러
