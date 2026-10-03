@@ -152,8 +152,10 @@ async function reserveOperationDirectory(directory) {
 async function executeK3sActivation(input, effects, state) {
   const verifiedInputs = await effects.verifyInputs({ input });
   const runtime = await effects.verifyRuntime({ input });
-  state.candidateApplied = true;
-  const candidate = await effects.applyCandidate({ input, runtime });
+  // Issue #228: cleanup 책임은 이 run이 candidate 객체를 실제로 만들기 시작한 뒤에만 생긴다.
+  const candidate = await effects.applyCandidate({
+    input, runtime, markCandidateCreated: () => { state.candidateApplied = true; },
+  });
   state.portForward = await effects.openCandidatePortForward({ input, candidate });
   const baseUrl = state.portForward.baseUrl;
   const canary = await effects.runCandidateCanary({ input, candidate, baseUrl });
@@ -278,6 +280,8 @@ export function createK3sJourneyActivationEffects({
   }
   let rendered;
   let backendEnvironment;
+  // Issue #228: 이 run이 만든(또는 만들기 시작한) candidate 객체만 기록한다. cleanup은 이 목록만 지운다.
+  const createdObjects = new Set();
 
   const kubectl = (args, options = {}) => commandRunner(
     "sudo",
@@ -393,7 +397,7 @@ export function createK3sJourneyActivationEffects({
         evidenceDigest: evidence([nodes.items[0].metadata?.uid, internalAddresses[0].address]),
       };
     },
-    async applyCandidate() {
+    async applyCandidate({ markCandidateCreated = () => {} } = {}) {
       if (!backendEnvironment) throw new Error("inputs were not verified");
       const renderResult = await commandRunner(
         process.execPath,
@@ -412,6 +416,24 @@ export function createK3sJourneyActivationEffects({
         immutable: true,
         data: rendered.configPlan.overrides,
       };
+      // Issue #228: immutable ConfigMap은 같은 이름에 다른 data를 둘 수 없다. 어떤 create·apply보다 먼저
+      // 기존 객체와 대조하고, 다르면 지우거나 덮어쓰지 않고 실패한다.
+      const existingConfigMapBytes = Buffer.from((await kubectl([
+        "get", "configmap", configMap.metadata.name, "--namespace", NAMESPACE,
+        "--ignore-not-found", "-o", "json",
+      ])).stdout);
+      const configMapExisted = existingConfigMapBytes.toString("utf8").trim() !== "";
+      if (configMapExisted) {
+        const existingData = parseJson(existingConfigMapBytes)?.data ?? {};
+        const differing = [...new Set([...Object.keys(existingData), ...Object.keys(configMap.data)])]
+          .filter((key) => existingData[key] !== configMap.data[key])
+          .sort((left, right) => left.localeCompare(right));
+        if (differing.length > 0) {
+          throw new Error(
+            `immutable ConfigMap ${configMap.metadata.name} already exists with different data: ${differing.join(",")}`,
+          );
+        }
+      }
       const candidateEnv = {
         ...Object.fromEntries(
           Object.entries(backendEnvironment).filter(([key]) => !OVERRIDE_KEYS.has(key)),
@@ -490,6 +512,20 @@ export function createK3sJourneyActivationEffects({
         ]);
         await kubectl(["create", "-f", "-"], { input: jsonBytes(secret) });
       }
+      createdObjects.add(`secret/${rendered.secretPlan.name}`);
+      markCandidateCreated();
+      // apply 전에 없던 candidate 객체만 이 run 소유로 기록한다(apply가 중간에 실패해도 정리 대상이 정확하다).
+      const ownedCandidates = [
+        ["deployment", rendered.activationPlan.candidateDeploymentName],
+        ["service", rendered.activationPlan.candidateServiceName],
+      ];
+      for (const [kind, name] of ownedCandidates) {
+        const existing = (await kubectl([
+          "get", kind, name, "--namespace", NAMESPACE, "--ignore-not-found", "-o", "name",
+        ])).stdout;
+        if (Buffer.from(existing ?? "").toString("utf8").trim() === "") createdObjects.add(`${kind}/${name}`);
+      }
+      if (!configMapExisted) createdObjects.add(`configmap/${configMap.metadata.name}`);
       const objects = [
         configMap,
         ...rendered.candidateObjects.filter((object) => object.kind !== "Namespace"),
@@ -810,12 +846,15 @@ export function createK3sJourneyActivationEffects({
     },
     async cleanupCandidate() {
       if (!rendered) return;
-      await kubectl([
-        "delete",
+      const owned = [
         `deployment/${rendered.activationPlan.candidateDeploymentName}`,
         `service/${rendered.activationPlan.candidateServiceName}`,
         `configmap/${rendered.configPlan.name}`,
         `secret/${rendered.secretPlan.name}`,
+      ].filter((object) => createdObjects.has(object));
+      if (owned.length === 0) return;
+      await kubectl([
+        "delete", ...owned,
         "--namespace", NAMESPACE, "--ignore-not-found=true", "--wait=true",
       ]);
     },

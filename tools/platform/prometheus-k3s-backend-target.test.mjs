@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+import { k3sCandidateInputFixture } from "./k3s-candidate-input-fixture.mjs";
 import { PRODUCTION_DB_COMPOSE_BACKEND_SERVICES } from "./run-k3s-journey-activation.mjs";
 
 // Issue #221: K3s 활성화는 compose backend를 drain하고 트래픽을 journey-active Service로 옮긴다.
@@ -66,29 +66,7 @@ function targetHost(target) {
 }
 
 function validInput() {
-  const releaseTuple = {
-    schemaVersion: "JOURNEY_RELEASE_TUPLE_V1",
-    artifactKind: "journey-release-tuple",
-    backendImageDigest: digest("a"),
-    backendConfigDigest: digest("b"),
-    journeyContractDigest: digest("c"),
-    serverRouteBundleDigest: digest("d"),
-    deploymentRevision: "e".repeat(40),
-    environmentIdentity: "production",
-  };
-  const identity = Object.values(releaseTuple).slice(2);
-  return {
-    schemaVersion: "PLATFORM_K3S_CANDIDATE_INPUT_V1",
-    artifactKind: "platform-k3s-candidate-input",
-    releaseTuple,
-    tupleSha256: `sha256:${createHash("sha256").update(`${identity.join("\n")}\n`, "utf8").digest("hex")}`,
-    candidateGeneration: 7,
-    trafficGeneration: 12,
-    nodeInternalIp: "10.0.0.12",
-    postgresPort: 15432,
-    objectStoragePort: 9000,
-    secretIdentity: digest("9"),
-  };
+  return k3sCandidateInputFixture();
 }
 
 function render() {
