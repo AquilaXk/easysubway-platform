@@ -183,10 +183,14 @@ function effects(events, failAt) {
   return {
     verifyInputs: step("inputs.verify", proof("0")),
     verifyRuntime: step("runtime.verify", proof("1", { nodeInternalIp: "10.0.0.17" })),
-    applyCandidate: step("candidate.apply", proof("2", {
-      deploymentName: "journey-candidate-23",
-      candidateServiceName: "journey-candidate-23",
-    })),
+    // 실제 effect처럼 candidate 객체 생성을 시작한 뒤 실패할 수 있으므로, step 전에 생성 시작을 알린다.
+    applyCandidate: async (args) => {
+      args.markCandidateCreated();
+      return step("candidate.apply", proof("2", {
+        deploymentName: "journey-candidate-23",
+        candidateServiceName: "journey-candidate-23",
+      }))();
+    },
     openCandidatePortForward: async () => {
       events.push("candidate.port-forward.open");
       if (fails("candidate.port-forward.open")) throw new Error("candidate.port-forward.open");
@@ -643,6 +647,18 @@ test("partial candidate apply is cleanup-owned and cleanup failure stops termina
   await assert.rejects(runK3sJourneyActivation(request(cleanupRoot), effects([], ["candidate.observe", "candidate.cleanup"])),
     (error) => error.code === "K3S_RECEIPT_FAILED");
   await missing(path.join(cleanupRoot, "operation", "k3s-activation-failure.json"));
+});
+test("candidate apply failing before any object creation does not run candidate cleanup", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-apply-before-create-"));
+  const events = [];
+  const fake = effects(events, []);
+  fake.applyCandidate = async () => {
+    events.push("candidate.apply");
+    throw new Error("injected pre-create failure");
+  };
+  await assert.rejects(runK3sJourneyActivation(request(root), fake, { failureNow: () => "2026-08-14T04:01:00.000Z" }),
+    (error) => error.code === "K3S_PRECOMMIT_FAILED");
+  assert.equal(events.includes("candidate.cleanup"), false);
 });
 test("post-switch failure records typed failure and never rolls traffic back", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-postswitch-"));
@@ -1238,6 +1254,86 @@ test("applyCandidate proceeds when the same-named ConfigMap holds identical data
     await effects.applyCandidate();
     assert.ok(commands.some((command) => command.includes("apply")));
   }
+});
+
+// Issue #228 리뷰 F1: 충돌 pre-check 실패는 orchestrator 실패 경로(recordActivationFailure → cleanupCandidate)를
+// 거쳐도 같은 이름의 기존 객체를 지우지 않아야 한다. cleanup은 이 run이 실제로 만든 객체만 지운다.
+test("orchestrated activation leaves same-named objects untouched when the ConfigMap collision pre-check fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-collision-orchestrated-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+  const rendered = mockCandidateRenderPlan({
+    activationRequest,
+    configOverrides: { EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: "37129430478" },
+  });
+  const commands = [];
+  const runtimeRunner = runtimeObservabilityRunner({
+    subnetConfig: [{ Subnet: OBSERVABILITY_CONTRACT.composeNetwork.subnet }],
+    activeService: activeServiceWithClusterIp(OBSERVABILITY_CONTRACT.activeService.clusterIP),
+    commands: [],
+  });
+  const collisionRunner = existingConfigMapRunner(rendered, {
+    ...rendered.configPlan.overrides,
+    EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: "37125930222",
+  }, []);
+  const commandRunner = async (command, args, options) => {
+    commands.push([command, ...args]);
+    if (command === process.execPath || (args.includes("get") && args.includes("configmap"))) {
+      return collisionRunner(command, args, options);
+    }
+    return runtimeRunner(command, args, options);
+  };
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner,
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await assert.rejects(
+    runK3sJourneyActivation(activationRequest, effects, { failureNow: () => "2026-10-03T14:24:33.000Z" }),
+    (error) => error instanceof K3sJourneyActivationError && error.code === "K3S_PRECOMMIT_FAILED",
+  );
+  for (const command of commands) {
+    for (const verb of ["delete", "create", "apply", "patch", "replace"]) {
+      assert.equal(command.includes(verb), false, `unexpected mutation ${command.join(" ")}`);
+    }
+  }
+  const failure = JSON.parse(await readFile(
+    path.join(activationRequest.operationDirectory, "k3s-activation-failure.json"), "utf8",
+  ));
+  assert.equal(failure.phase, "FAILED_PRECOMMIT");
+});
+
+test("cleanupCandidate deletes only objects this run created, never pre-existing same-named objects", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-cleanup-owned-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+  const rendered = mockCandidateRenderPlan({ activationRequest, configOverrides: { SAFE_CONFIG: "true" } });
+  const commands = [];
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args) => {
+      commands.push([command, ...args]);
+      if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
+      // 같은 data의 ConfigMap과 Deployment는 이미 있고, candidate Service는 없다.
+      if (args.includes("get") && args.includes("configmap")) {
+        return { stdout: JSON.stringify({ kind: "ConfigMap", data: { ...rendered.configPlan.overrides } }) };
+      }
+      if (args.includes("get") && args.includes("deployment")) return { stdout: `deployment.apps/${rendered.activationPlan.candidateDeploymentName}\n` };
+      if (args.includes("get") && args.includes("service")) return { stdout: "" };
+      if (args.includes("apply")) throw new Error("injected apply failure");
+      return { stdout: Buffer.alloc(0) };
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await effects.verifyInputs();
+  await assert.rejects(effects.applyCandidate(), /injected apply failure/);
+  commands.length = 0;
+  await effects.cleanupCandidate();
+  const deletes = commands.filter((command) => command.includes("delete"));
+  assert.deepEqual(deletes.map((command) => command.filter((arg) => /^(secret|service|configmap|deployment)\//.test(arg))), [[
+    `service/${rendered.activationPlan.candidateServiceName}`,
+    `secret/${rendered.secretPlan.name}`,
+  ]]);
 });
 
 test("activation failure receipt counts old workloads stopped before the drain failed", async () => {
