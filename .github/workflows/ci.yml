@@ -78,6 +78,7 @@ jobs:
           node --test tools/platform/prepare-source-free-fixed-host-deployment.test.mjs
           node --test tools/platform/source-free-k3s-deployment.test.mjs
           node --test tools/platform/production-db-backend-image-contract.test.mjs
+          node --test tools/platform/prometheus-k3s-backend-target.test.mjs
           node --test tools/platform/inject-datapack-callback-secrets.test.mjs
           node --test tools/platform/inject-journey-runtime-settings.test.mjs
           node --test tools/ci/source-free-journey-deploy-workflow.test.mjs

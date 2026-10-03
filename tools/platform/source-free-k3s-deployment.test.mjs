@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,6 +17,10 @@ import {
 } from "./run-k3s-journey-activation.mjs";
 import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
 const digest = (value) => `sha256:${value.repeat(64)}`;
+const OBSERVABILITY_CONTRACT = JSON.parse(readFileSync(new URL(
+  "../../contracts/release/platform-k3s-observability-contract.json", import.meta.url,
+), "utf8"));
+
 const HOST_SCAN_FORMAT = '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}';
 const sha256 = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 function schemaAccepts(value, schema, root = schema) {
@@ -365,11 +370,27 @@ function mockCandidateRenderPlan({
       },
     },
     secretPlan: { name: secretName },
-    candidateObjects: [],
+    candidateObjects: [{
+      apiVersion: "networking.k8s.io/v1",
+      kind: "NetworkPolicy",
+      metadata: { name: "journey-backend-boundary", namespace: "easysubway-journey" },
+      spec: {
+        ingress: [{
+          from: [
+            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+            { ipBlock: { cidr: "10.0.0.17/32" } },
+            { ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } },
+          ],
+          ports: [{ protocol: "TCP", port: 8080 }],
+        }],
+      },
+    }],
     activationPlan: {
       requiredCasField: "metadata.resourceVersion",
       applyDuringCandidatePreparation: false,
-      activeServiceTemplate: { spec: { ports: [{ nodePort: 32080 }] } },
+      activeServiceTemplate: {
+        spec: { clusterIP: OBSERVABILITY_CONTRACT.activeService.clusterIP, ports: [{ nodePort: 32080 }] },
+      },
       candidateDeploymentName,
       candidateServiceName,
     },
@@ -979,6 +1000,174 @@ test("verifyRuntime tolerates the project's Compose drain set that activation wi
     fetchImpl: async () => { throw new Error("not invoked"); },
   });
   await assert.rejects(effects.verifyRuntime(), /reached runtime bootstrap verification/);
+});
+
+// Issue #221: verifyRuntime(PRECOMMIT, 읽기 전용)이 compose 네트워크 서브넷과 기존 journey-active ClusterIP를
+// 관측 계약과 대조한다. 다르면 어떤 K3s 변경도 하기 전에 실패해야 한다(fail-closed).
+function runtimeObservabilityRunner({ subnetConfig, activeService, commands }) {
+  return async (command, args) => {
+    commands.push([command, ...args]);
+    if (command === "docker" && args[0] === "ps") return { stdout: "", stderr: "" };
+    if (command === "docker" && args[0] === "network") {
+      return { stdout: `${JSON.stringify(subnetConfig)}\n`, stderr: "" };
+    }
+    if (command === "sudo" && args.some((arg) => arg.endsWith("bootstrap-single-node-k3s.sh"))) {
+      return { stdout: "", stderr: "" };
+    }
+    if (command === "sudo" && args.includes("nodes")) {
+      return {
+        stdout: JSON.stringify({ items: [{
+          metadata: { uid: "node-uid" },
+          status: { addresses: [{ type: "InternalIP", address: "10.0.0.17" }] },
+        }] }),
+        stderr: "",
+      };
+    }
+    if (command === "sudo" && args.includes("namespace")) return { stdout: "namespace/easysubway-journey\n", stderr: "" };
+    if (command === "sudo" && args.includes("service") && args.includes("journey-active")) {
+      return { stdout: activeService === undefined ? "" : JSON.stringify(activeService), stderr: "" };
+    }
+    throw new Error(`unexpected command ${command} ${args.join(" ")}`);
+  };
+}
+
+async function runtimeObservabilityEffects(root, options) {
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+  return createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: runtimeObservabilityRunner(options),
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+}
+
+function activeServiceWithClusterIp(clusterIP) {
+  return {
+    apiVersion: "v1", kind: "Service",
+    metadata: { name: "journey-active", namespace: "easysubway-journey", resourceVersion: "17" },
+    spec: { type: "NodePort", clusterIP, ports: [{ name: "http", port: 8080, targetPort: 8080, nodePort: 32080 }] },
+  };
+}
+
+function assertNoK3sMutation(commands) {
+  for (const command of commands) {
+    for (const verb of ["apply", "create", "replace", "delete", "patch", "stop"]) {
+      assert.equal(command.includes(verb), false, `unexpected mutation ${command.join(" ")}`);
+    }
+  }
+}
+
+test("verifyRuntime binds the compose subnet and existing active ClusterIP to the observability contract", async () => {
+  const commands = [];
+  const effects = await runtimeObservabilityEffects(
+    await mkdtemp(path.join(tmpdir(), "k3s-runtime-observability-")),
+    {
+      subnetConfig: [{ Subnet: OBSERVABILITY_CONTRACT.composeNetwork.subnet, Gateway: "172.18.0.1" }],
+      activeService: activeServiceWithClusterIp(OBSERVABILITY_CONTRACT.activeService.clusterIP),
+      commands,
+    },
+  );
+  const runtime = await effects.verifyRuntime();
+  assert.equal(runtime.nodeInternalIp, "10.0.0.17");
+  assert.ok(commands.some((command) => command.join(" ") ===
+    `docker network inspect ${OBSERVABILITY_CONTRACT.composeNetwork.name} --format {{json .IPAM.Config}}`));
+  assertNoK3sMutation(commands);
+});
+
+test("verifyRuntime accepts a missing active Service that activation will create with the pinned ClusterIP", async () => {
+  const commands = [];
+  const effects = await runtimeObservabilityEffects(
+    await mkdtemp(path.join(tmpdir(), "k3s-runtime-observability-absent-")),
+    {
+      subnetConfig: [{ Subnet: OBSERVABILITY_CONTRACT.composeNetwork.subnet }],
+      activeService: undefined,
+      commands,
+    },
+  );
+  await effects.verifyRuntime();
+  assertNoK3sMutation(commands);
+});
+
+test("verifyRuntime fails closed when the compose network subnet drifts from the NetworkPolicy contract", async () => {
+  const expected = OBSERVABILITY_CONTRACT.composeNetwork.subnet;
+  for (const [subnetConfig, observed] of [
+    [[{ Subnet: "172.19.0.0/16" }], "172.19.0.0/16"],
+    [[], "none"],
+    [[{ Subnet: expected }, { Subnet: "172.30.0.0/16" }], `${expected},172.30.0.0/16`],
+  ]) {
+    const commands = [];
+    const effects = await runtimeObservabilityEffects(
+      await mkdtemp(path.join(tmpdir(), "k3s-runtime-subnet-drift-")),
+      {
+        subnetConfig,
+        activeService: activeServiceWithClusterIp(OBSERVABILITY_CONTRACT.activeService.clusterIP),
+        commands,
+      },
+    );
+    await assert.rejects(effects.verifyRuntime(), (error) => {
+      assert.equal(error.message,
+        `compose network subnet does not match the observability contract: expected ${expected}, observed ${observed}`);
+      return true;
+    });
+    assertNoK3sMutation(commands);
+  }
+});
+
+test("verifyRuntime fails closed when the live active Service ClusterIP drifts from the Prometheus target", async () => {
+  const commands = [];
+  const effects = await runtimeObservabilityEffects(
+    await mkdtemp(path.join(tmpdir(), "k3s-runtime-clusterip-drift-")),
+    {
+      subnetConfig: [{ Subnet: OBSERVABILITY_CONTRACT.composeNetwork.subnet }],
+      activeService: activeServiceWithClusterIp("10.43.0.99"),
+      commands,
+    },
+  );
+  await assert.rejects(effects.verifyRuntime(), (error) => {
+    assert.equal(error.message,
+      "active Service ClusterIP does not match the observability contract: " +
+      `expected ${OBSERVABILITY_CONTRACT.activeService.clusterIP}, observed 10.43.0.99`);
+    return true;
+  });
+  assertNoK3sMutation(commands);
+});
+
+test("applyCandidate rejects a render whose NetworkPolicy or active ClusterIP drifts from the contract before apply", async () => {
+  for (const mutate of [
+    (plan) => { plan.activationPlan.activeServiceTemplate.spec.clusterIP = "10.43.0.99"; },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[2].ipBlock.cidr = "172.19.0.0/16"; },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].ports.push({ protocol: "TCP", port: 9090 }); },
+    // F1: 넓어지는 변이(전체 허용 출처, except가 붙은 subnet, 다른 포트를 여는 별도 규칙, 다른 /32)를 거부한다.
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ ipBlock: { cidr: "0.0.0.0/0" } }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[2].ipBlock.except = ["172.18.0.6/32"]; },
+    (plan) => {
+      plan.candidateObjects[0].spec.ingress.push({
+        from: [{ ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } }],
+        ports: [{ protocol: "TCP", port: 9090 }],
+      });
+    },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ ipBlock: { cidr: "10.0.0.99/32" } }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ namespaceSelector: {} }); },
+  ]) {
+    const root = await mkdtemp(path.join(tmpdir(), "k3s-render-observability-drift-"));
+    const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+    const rendered = mockCandidateRenderPlan({ activationRequest });
+    mutate(rendered);
+    const commands = [];
+    const effects = createK3sJourneyActivationEffects({
+      request: activationRequest,
+      commandRunner: async (command, args) => {
+        commands.push([command, ...args]);
+        if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
+        return { stdout: Buffer.alloc(0) };
+      },
+      serviceToken: "token".repeat(7),
+      fetchImpl: async () => { throw new Error("not invoked"); },
+    });
+    await effects.verifyInputs();
+    await assert.rejects(effects.applyCandidate(), /K3s candidate render is invalid/);
+    assert.deepEqual(commands.map(([command]) => command), [process.execPath]);
+  }
 });
 
 test("activation failure receipt counts old workloads stopped before the drain failed", async () => {

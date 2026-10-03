@@ -82,7 +82,7 @@ tests:
   - interval: 1m
     name: backend app metrics scrape down fires dead-mans switch
     input_series:
-      - series: 'up{job="backend_app_metrics", instance="backend:8080"}'
+      - series: 'up{job="backend_app_metrics", instance="10.43.11.187:8080"}'
         values: '0x10'
     alert_rule_test:
       - eval_time: 6m
@@ -93,20 +93,54 @@ tests:
               service: aquila-backend-app-metrics
             exp_annotations:
               summary: Backend app metrics scrape is down
-              description: Prometheus cannot scrape backend_app_metrics (backend:8080/actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
+              description: Prometheus cannot scrape backend_app_metrics (K3s journey-active Service /actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
               title_ko: "백엔드 앱 메트릭 수집 실패"
               impact_ko: "운행표 snapshot 잔여시간 게이지가 사라져 만료 24/6시간 전 경보가 조용히 멈춥니다."
-              action_ko: "backend 컨테이너 상태와 /actuator/prometheus 응답, docker network 내부 backend:8080 접근을 확인하세요."
+              action_ko: "K3s journey-active Service의 활성 pod 상태와 /actuator/prometheus 응답, compose 네트워크에서 Service ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
 
   # backend_app_metrics가 정상 scrape되면(up=1) dead-man's switch는 조용하다.
   - interval: 1m
     name: backend app metrics scrape up stays silent
     input_series:
-      - series: 'up{job="backend_app_metrics", instance="backend:8080"}'
+      - series: 'up{job="backend_app_metrics", instance="10.43.11.187:8080"}'
         values: '1x10'
     alert_rule_test:
       - eval_time: 6m
         alertname: AquilaBackendAppMetricsScrapeDown
+        exp_alerts: []
+
+  # Issue #221 F4: blackbox readiness probe가 활성 K3s Service에 5분 이상 실패하면(probe_success=0) 발화한다.
+  # 이 job의 up은 blackbox exporter 자체 상태라 probe 경로(NetworkPolicy 포함) 차단을 잡지 못한다.
+  - interval: 1m
+    name: backend readiness probe failure fires
+    input_series:
+      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+        values: '0x10'
+      - series: 'up{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AquilaBackendReadinessProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: aquila-backend-readiness
+            exp_annotations:
+              summary: Backend readiness probe is failing
+              description: The blackbox readiness probe to the active K3s journey-active Service has failed for 5m. The active backend is not ready or the compose-to-ClusterIP path (NetworkPolicy) is blocked.
+              title_ko: "백엔드 readiness 점검 실패"
+              impact_ko: "활성 K3s backend가 준비되지 않았거나 관측 경로가 막혀 backend 상태를 확인할 수 없습니다."
+              action_ko: "journey-active Service의 활성 pod 상태와 /actuator/health/readiness 응답, compose 네트워크에서 ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
+
+  # 짧은 실패(5분 미만)는 발화하지 않고, 정상 probe는 조용하다.
+  - interval: 1m
+    name: backend readiness probe success or short blip stays silent
+    input_series:
+      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+        values: '1 1 0 0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AquilaBackendReadinessProbeFailed
         exp_alerts: []
 
   # Hub Issue #2434: 높은 5xx + 충분한 트래픽(>1 req/min)이면 Critical multi-window burn-rate가 발화한다.

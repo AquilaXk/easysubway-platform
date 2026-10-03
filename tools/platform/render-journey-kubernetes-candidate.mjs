@@ -67,6 +67,10 @@ const JOURNEY_PROFILE_RESOURCE_POLICY_SHA256 = createHash("sha256")
   .update(JOURNEY_PROFILE_RESOURCE_POLICY_JSON, "utf8")
   .digest("hex");
 
+// Issue #221: compose Prometheus가 활성 backend를 수집하는 경로의 기대값은 관측 계약 한 곳에만 둔다.
+// 렌더러는 이 저장소 안의 고정 파일만 읽고 외부 조회는 하지 않는다.
+const OBSERVABILITY_CONTRACT_URL = new URL("../../contracts/release/platform-k3s-observability-contract.json", import.meta.url);
+
 class K3sRenderError extends Error {
   constructor(code, message) {
     super(message);
@@ -140,6 +144,31 @@ function privateIpv4(value) {
   return octets[0] === 10
     || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
     || (octets[0] === 192 && octets[1] === 168);
+}
+
+function ipv4Cidr(value) {
+  if (typeof value !== "string") return false;
+  const [address, bits, ...rest] = value.split("/");
+  return rest.length === 0 && isIPv4(address) && /^(?:[1-9]|[12]\d|3[0-2])$/.test(bits ?? "");
+}
+
+function readObservabilityContract() {
+  let contract;
+  try {
+    contract = JSON.parse(readFileSync(OBSERVABILITY_CONTRACT_URL, "utf8"));
+  } catch {
+    fail("E_K3S_RENDER_CONTRACT", "observability contract must contain valid JSON");
+  }
+  if (contract?.schemaVersion !== "PLATFORM_K3S_OBSERVABILITY_CONTRACT_V1" ||
+    contract?.artifactKind !== "platform-k3s-observability-contract" ||
+    !ipv4Cidr(contract?.composeNetwork?.subnet) ||
+    contract?.activeService?.name !== "journey-active" ||
+    contract?.activeService?.namespace !== NAMESPACE ||
+    !isIPv4(contract?.activeService?.clusterIP ?? "") ||
+    contract?.activeService?.port !== 8080) {
+    fail("E_K3S_RENDER_CONTRACT", "observability contract is invalid");
+  }
+  return contract;
 }
 
 function validateInput(input) {
@@ -319,7 +348,7 @@ function candidateService(token, name) {
   };
 }
 
-function networkPolicy(input) {
+function networkPolicy(input, observability) {
   return {
     apiVersion: "networking.k8s.io/v1",
     kind: "NetworkPolicy",
@@ -331,6 +360,8 @@ function networkPolicy(input) {
         from: [
           { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } } },
           { ipBlock: { cidr: `${input.nodeInternalIp}/32` } },
+          // compose Prometheus·blackbox probe가 활성 Service ClusterIP로 actuator를 수집한다(Issue #221).
+          { ipBlock: { cidr: observability.composeNetwork.subnet } },
         ],
         ports: [{ protocol: "TCP", port: 8080 }],
       }],
@@ -351,13 +382,14 @@ function networkPolicy(input) {
   };
 }
 
-function activeServiceTemplate(token) {
+function activeServiceTemplate(token, observability) {
   return {
     apiVersion: "v1",
     kind: "Service",
     metadata: { name: "journey-active", namespace: NAMESPACE, labels: { "app.kubernetes.io/part-of": "easysubway" } },
     spec: {
       type: "NodePort",
+      clusterIP: observability.activeService.clusterIP,
       externalTrafficPolicy: "Local",
       selector: labels(token),
       ports: [{ name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 }],
@@ -367,6 +399,7 @@ function activeServiceTemplate(token) {
 
 function render(input) {
   validateInput(input);
+  const observability = readObservabilityContract();
   const token = candidateToken(input);
   const deploymentName = `journey-candidate-${token}`;
   const serviceName = `journey-candidate-${token}`;
@@ -450,14 +483,14 @@ function render(input) {
       externalEndpointSlice("journey-object-storage", input.nodeInternalIp, input.objectStoragePort),
       deployment(input, token, deploymentName, configName, secretName),
       candidateService(token, serviceName),
-      networkPolicy(input),
+      networkPolicy(input, observability),
     ],
     activationPlan: {
       candidateDeploymentName: deploymentName,
       candidateServiceName: serviceName,
       candidateProbeBoundary: "TASK_OWNED_LOOPBACK_KUBECTL_PORT_FORWARD",
       activeServiceName: "journey-active",
-      activeServiceTemplate: activeServiceTemplate(token),
+      activeServiceTemplate: activeServiceTemplate(token, observability),
       selectorPatch: labels(token),
       requiredCasField: "metadata.resourceVersion",
       trafficGeneration: input.trafficGeneration,

@@ -77,7 +77,7 @@ server {
 
     # actuator 메트릭·엔드포인트는 공개 노출하지 않는다(#2376). 배포·관측 readiness/liveness probe
     # 경로만 예외로 공개 유지하고(공개 probe 계약 무회귀), 나머지 /actuator/* 는 차단한다.
-    # Prometheus는 docker network 내부에서 backend:8080/actuator/prometheus 를 직접 scrape한다.
+    # Prometheus는 compose 네트워크에서 활성 K3s journey-active Service ClusterIP로 /actuator/prometheus 를 직접 scrape한다.
     location = /actuator/health/readiness {
         proxy_pass http://127.0.0.1:__BACKEND_PORT__;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;

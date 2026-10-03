@@ -32,6 +32,9 @@ const RESOURCE_VERSION = /^[1-9]\d*$/;
 const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9]\d*$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 // Issue #219: Compose 서비스 중 운영 DB에 붙는 backend는 이 집합뿐이며, K3s 활성화가 모두 drain한다.
+const OBSERVABILITY_CONTRACT_PATH = path.join(
+  REPOSITORY_ROOT, "contracts/release/platform-k3s-observability-contract.json",
+);
 export const PRODUCTION_DB_COMPOSE_BACKEND_SERVICES = Object.freeze(["backend", "backend-standby"]);
 const UNRESOLVED_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{12,64}$/;
 const BACKEND_IMAGE_SOURCE = /^https:\/\/github\.com\/AquilaXk\/easysubway(?:-backend)?$/i;
@@ -360,6 +363,31 @@ export function createK3sJourneyActivationEffects({
         throw new Error("protected node InternalIP does not match K3s runtime");
       }
       await adminKubectl(["get", "namespace", NAMESPACE, "-o", "name"]);
+      // Issue #221: NetworkPolicy ipBlock과 Prometheus 대상(ClusterIP)이 실제 런타임과 같은지 PRECOMMIT에서
+      // 읽기 전용으로 확인한다. 다르면 어떤 K3s 변경도 하기 전에 실패한다.
+      const observability = await readObservabilityContract();
+      const networkConfig = parseJson(Buffer.from((await commandRunner("docker", [
+        "network", "inspect", observability.composeNetwork.name, "--format", "{{json .IPAM.Config}}",
+      ])).stdout));
+      if (!Array.isArray(networkConfig) || networkConfig.length !== 1 ||
+        networkConfig[0]?.Subnet !== observability.composeNetwork.subnet) {
+        const observed = Array.isArray(networkConfig) && networkConfig.length > 0
+          ? networkConfig.map((entry) => String(entry?.Subnet)).join(",")
+          : "none";
+        throw new Error("compose network subnet does not match the observability contract: " +
+          `expected ${observability.composeNetwork.subnet}, observed ${observed}`);
+      }
+      const activeServiceBytes = Buffer.from((await kubectl([
+        "get", "service", observability.activeService.name, "--namespace", NAMESPACE,
+        "--ignore-not-found", "-o", "json",
+      ])).stdout);
+      if (activeServiceBytes.toString("utf8").trim() !== "") {
+        const observedClusterIp = parseJson(activeServiceBytes)?.spec?.clusterIP;
+        if (observedClusterIp !== observability.activeService.clusterIP) {
+          throw new Error("active Service ClusterIP does not match the observability contract: " +
+            `expected ${observability.activeService.clusterIP}, observed ${String(observedClusterIp)}`);
+        }
+      }
       return {
         nodeInternalIp: internalAddresses[0].address,
         evidenceDigest: evidence([nodes.items[0].metadata?.uid, internalAddresses[0].address]),
@@ -375,7 +403,8 @@ export function createK3sJourneyActivationEffects({
         ],
       );
       rendered = parseJson(Buffer.from(renderResult.stdout));
-      validateRender(rendered, request);
+      const renderInput = parseJson(await readStableRegularFile(request.candidateInputPath));
+      validateRender(rendered, request, await readObservabilityContract(), renderInput.nodeInternalIp);
       const configMap = {
         apiVersion: "v1",
         kind: "ConfigMap",
@@ -939,8 +968,37 @@ function validateEffects(effects) {
   }
 }
 
-function validateRender(value, request) {
-  if (value?.schemaVersion !== "PLATFORM_K3S_CANDIDATE_RENDER_V1" ||
+async function readObservabilityContract() {
+  return parseJson(await readStableRegularFile(OBSERVABILITY_CONTRACT_PATH));
+}
+
+// 보안 경계(Issue #221 F1): backend ingress의 모든 규칙은 TCP 8080 하나만 연다. ipBlock 출처는 노드 /32와
+// 계약 compose subnet 둘뿐이고 except가 붙지 않아야 하며, 그 밖의 출처는 자기 namespace selector뿐이다.
+// 각 조건은 서로를 대신하지 않도록 독립적으로 검사한다.
+function renderMatchesObservability(value, observability, nodeInternalIp) {
+  const policy = value?.candidateObjects?.find((object) => object?.kind === "NetworkPolicy");
+  const ingress = policy?.spec?.ingress;
+  if (value?.activationPlan?.activeServiceTemplate?.spec?.clusterIP !== observability.activeService.clusterIP ||
+    !Array.isArray(ingress) || ingress.length === 0) return false;
+  const onlyPort8080 = ingress.every((rule) =>
+    JSON.stringify(rule?.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }]));
+  const sources = ingress.flatMap((rule) => (Array.isArray(rule?.from) ? rule.from : [undefined]));
+  const allowedCidrs = new Set([`${nodeInternalIp}/32`, observability.composeNetwork.subnet]);
+  const ipBlocksAllowed = sources.every((source) => source?.ipBlock === undefined ||
+    allowedCidrs.has(source.ipBlock.cidr));
+  const noExcept = sources.every((source) => source?.ipBlock?.except === undefined);
+  const ownNamespaceSelector = JSON.stringify({
+    namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } },
+  });
+  const otherSourcesAllowed = sources.every((source) =>
+    source?.ipBlock !== undefined || JSON.stringify(source) === ownNamespaceSelector);
+  const subnetAdmitted = sources.some((source) => source?.ipBlock?.cidr === observability.composeNetwork.subnet);
+  return onlyPort8080 && ipBlocksAllowed && noExcept && otherSourcesAllowed && subnetAdmitted;
+}
+
+function validateRender(value, request, observability, nodeInternalIp) {
+  if (!renderMatchesObservability(value, observability, nodeInternalIp) ||
+    value?.schemaVersion !== "PLATFORM_K3S_CANDIDATE_RENDER_V1" ||
     value?.artifactKind !== "platform-k3s-candidate-render" ||
     value?.releaseIdentity?.tupleSha256 !== request.releaseTuple.tupleSha256 ||
     value?.configPlan?.overrides?.EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION !==
