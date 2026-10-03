@@ -72,7 +72,7 @@ LOCK_FILE="${DEPLOY_ROOT}/deploy.lock"
 
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
-RUNTIME_SERVICES=(backend back-worker)
+RUNTIME_SERVICES=(backend)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana alloy)
 OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana alloy)
 
@@ -573,8 +573,7 @@ if ! compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" exec -T \
 fi
 
 backend_id="$(compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" ps -q backend || true)"
-back_worker_id="$(compose "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" ps -q back-worker || true)"
-if [[ -z "${current_sha}" && ( -n "${backend_id}" || -n "${back_worker_id}" ) ]]; then
+if [[ -z "${current_sha}" && -n "${backend_id}" ]]; then
 	write_result "blocked" "unmanaged_backend"
 	exit 1
 fi
@@ -587,13 +586,6 @@ if [[ -n "${current_sha}" ]]; then
 	if [[ -z "${backend_id}" || -z "${current_image_id}" || "${running_image_id}" != "${current_image_id}" ]]; then
 		write_result "blocked" "managed_image_drift"
 		exit 1
-	fi
-	if [[ -n "${back_worker_id}" ]]; then
-		running_worker_image_id="$(docker inspect --format '{{.Image}}' "${back_worker_id}" 2>/dev/null || true)"
-		if [[ "${running_worker_image_id}" != "${current_image_id}" ]]; then
-			write_result "blocked" "managed_image_drift"
-			exit 1
-		fi
 	fi
 fi
 
@@ -771,7 +763,7 @@ prune_stale_backend_images() {
 		set +e
 		# Image IDs of every currently-running container are always preserved,
 		# regardless of repo or age, so nothing is removed out from under a
-		# live container (canonical backend, back-worker, observability, …).
+		# live container (canonical backend, observability, …).
 		running_ids="$(docker ps -q | xargs -r docker inspect --format '{{.Image}}' 2>/dev/null | sort -u)"
 		# docker images lists newest-first; dedupe by full ID and keep the 10
 		# most-recently-created as rollback candidates (mirrors #1686).
@@ -1094,23 +1086,12 @@ if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/
 fi
 write_standby_state "idle"
 
-# --- Stage 6: recreate the remaining runtime services. Neither sits behind
-# host Nginx's default location (already switched back to canonical above),
-# so their recreation is not on the zero-downtime path: back-worker has no
-# external HTTP exposure at all. The canonical backend is
-# already promoted and serving at this point, so a failure here is reported
-# without touching it further.
+# --- Stage 6: start observability. The canonical backend is already promoted
+# and serving at this point, so a failure here is reported without touching it
+# further. There is no separate worker service: the legacy worker ran an
+# image different from the active backend against the production database, so
+# it was removed (platform Issue #219).
 write_phase "finalizing"
-if ! compose "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" up -d --no-deps --no-build --force-recreate back-worker; then
-	dump_diagnostics "back-worker" "" back-worker
-	abort_deploy "back_worker_recreate_failed"
-	exit 1
-fi
-if ! runtime_services_hardened back-worker; then
-	dump_diagnostics "back-worker" "" back-worker
-	abort_deploy "back_worker_hardening_failed"
-	exit 1
-fi
 
 if ! start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${recreate_alertmanager}" "${recreate_observability_config}"; then
 	abort_deploy "observability_start_failed"

@@ -16,6 +16,7 @@ import {
 } from "./run-k3s-journey-activation.mjs";
 import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
 const digest = (value) => `sha256:${value.repeat(64)}`;
+const HOST_SCAN_FORMAT = '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}';
 const sha256 = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 function schemaAccepts(value, schema, root = schema) {
   if (schema.$ref) {
@@ -827,8 +828,11 @@ test("drainOldWorkloads queries running Compose services with base compose and b
     request: activationRequest,
     commandRunner: async (command, args, options) => {
       commands.push({ command, args, options });
-      if (command === "docker" && args.includes("ps")) {
+      if (command === "docker" && args[0] === "compose" && args.includes("ps")) {
         return { stdout: "backend\n", stderr: "" };
+      }
+      if (command === "docker" && args[0] === "ps") {
+        return { stdout: "easysubway-postgres\timresamu/postgis:16-3.5\teasysubway\tpostgres\n", stderr: "" };
       }
       return { stdout: "", stderr: "" };
     },
@@ -842,7 +846,7 @@ test("drainOldWorkloads queries running Compose services with base compose and b
   assert.equal(drain.signal, "SIGTERM");
   assert.equal(drain.stopGracePeriodSeconds, 30);
   assert.equal(drain.oldWorkloadCount, 1);
-  const psCall = commands.find((entry) => entry.command === "docker" && entry.args.includes("ps"));
+  const psCall = commands.find((entry) => entry.command === "docker" && entry.args[0] === "compose" && entry.args.includes("ps"));
   assert.ok(psCall);
   assert.ok(!psCall.args.includes(activationRequest.candidateComposePath));
   assert.ok(!psCall.args.includes("--profile"));
@@ -856,6 +860,144 @@ test("drainOldWorkloads queries running Compose services with base compose and b
   assert.ok(stopCall);
   assert.ok(stopCall.args.includes("backend"));
   assert.equal(stopCall.options.timeoutMs, 35_000);
+  const hostScan = commands.find((entry) => entry.command === "docker" && entry.args[0] === "ps");
+  assert.ok(hostScan, "drain must scan every running docker container after stopping Compose backends");
+  assert.deepEqual(hostScan.args, [
+    "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
+    "--no-trunc", "--format", HOST_SCAN_FORMAT,
+  ]);
+  assert.ok(commands.indexOf(stopCall) < commands.indexOf(hostScan));
+});
+
+test("drainOldWorkloads fails when a docker backend process outside the K3s digest keeps running", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-drain-foreign-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args) => {
+      if (command === "docker" && args[0] === "ps") {
+        return {
+          stdout: "easysubway-back-worker\teasysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c\teasysubway\tback-worker\n" +
+            "easysubway-postgres\timresamu/postgis:16-3.5\teasysubway\tpostgres\n",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await assert.rejects(
+    effects.drainOldWorkloads({ candidate: { candidateToken: "c-1" }, preparedActiveService: {} }),
+    /backend process outside the active K3s digest is still running: easysubway-back-worker/,
+  );
+});
+
+test("drainOldWorkloads reports stopped Compose backends even when a foreign backend blocks completion", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-drain-foreign-count-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args) => {
+      if (command === "docker" && args[0] === "compose" && args.includes("ps")) {
+        return { stdout: "backend\n", stderr: "" };
+      }
+      if (command === "docker" && args[0] === "ps") {
+        return { stdout: "stray\teasysubway-backend:old\t\t\n", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await assert.rejects(
+    effects.drainOldWorkloads({
+      candidate: { candidateToken: "c-1" },
+      preparedActiveService: { previousSelector: { "easysubway.io/candidate-token": "c-0" } },
+    }),
+    (error) => error.oldWorkloadCount === 2 && /stray/.test(error.message),
+  );
+});
+
+test("verifyRuntime fails before any mutation when a foreign backend container runs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-runtime-foreign-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  const commands = [];
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args) => {
+      commands.push([command, ...args]);
+      if (command === "docker" && args[0] === "ps") {
+        return {
+          stdout: "easysubway-back-worker\teasysubway-backend:84f4fb94\teasysubway\tback-worker\n",
+          stderr: "",
+        };
+      }
+      throw new Error("runtime verification must not continue");
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await assert.rejects(
+    effects.verifyRuntime(),
+    /backend process outside the active K3s digest is running: easysubway-back-worker/,
+  );
+  assert.deepEqual(commands, [[
+    "docker", "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
+    "--no-trunc", "--format", HOST_SCAN_FORMAT,
+  ]]);
+});
+
+test("verifyRuntime tolerates the project's Compose drain set that activation will stop", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-runtime-drain-set-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args) => {
+      if (command === "docker" && args[0] === "ps") {
+        return {
+          stdout: `easysubway-backend\teasysubway-backend:84f4fb94\t${activationRequest.projectName}\tbackend\n` +
+            `easysubway-backend-standby\teasysubway-backend:84f4fb94\t${activationRequest.projectName}\tbackend-standby\n`,
+          stderr: "",
+        };
+      }
+      throw new Error("reached runtime bootstrap verification");
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await assert.rejects(effects.verifyRuntime(), /reached runtime bootstrap verification/);
+});
+
+test("activation failure receipt counts old workloads stopped before the drain failed", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-drain-count-"));
+  const events = [];
+  const fake = effects(events);
+  fake.drainOldWorkloads = async () => {
+    events.push("old-workload.drain");
+    throw Object.assign(new Error("foreign backend"), { oldWorkloadCount: 2 });
+  };
+  await assert.rejects(
+    runK3sJourneyActivation(request(root), fake, { failureNow: () => "2026-08-14T04:02:00.000Z" }),
+    (error) => error instanceof K3sJourneyActivationError && error.code === "K3S_POSTSWITCH_FAILED",
+  );
+  const failure = JSON.parse(await readFile(
+    path.join(root, "operation", "k3s-activation-failure.json"),
+    "utf8",
+  ));
+  assert.equal(failure.mutationCounts.oldWorkload, 2);
 });
 
 test("runPublicSmoke verifies active readiness over publicBaseUrl and binds canary evidence", async () => {
