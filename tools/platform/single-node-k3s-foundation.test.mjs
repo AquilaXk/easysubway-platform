@@ -158,15 +158,35 @@ test("renderer produces deterministic source-free candidate objects and an inact
   );
   assert.equal(
     rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_SHA256,
-    "4c5d0f1570f88264c666cee4e50039da41e3a4a38062f7114a603c3d2c6305dc",
+    "6fdecdfb0f7f00ff1987969b63045186e08bf43917757643ceda670394e6a4a2",
   );
   assert.equal(
     rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_PROFILE_MAX_REQUEST_BYTES,
     "65536",
   );
-  assert.equal(
-    JSON.parse(rendered.configPlan.overrides["journey-profile-resource-policy.json"]).resourcePolicyId,
-    "RAPTOR_RESOURCE_POLICY_V1",
+  const resourcePolicy = JSON.parse(rendered.configPlan.overrides["journey-profile-resource-policy.json"]);
+  assert.equal(resourcePolicy.resourcePolicyId, "RAPTOR_RESOURCE_POLICY_V1");
+  assert.equal(resourcePolicy.semanticVersion, "1.1.0");
+  // backend#461 실측(전국 서버 경로 번들 수도권 800질의, 운영 기본 힙 1 GiB)에서 역산한 프로필 탐색 한도.
+  assert.deepEqual(
+    {
+      maxTemporalWindowSeconds: resourcePolicy.maxTemporalWindowSeconds,
+      maxEstimatedWork: resourcePolicy.maxEstimatedWork,
+      maxLabelsPerState: resourcePolicy.maxLabelsPerState,
+      maxDestinationProfileLabels: resourcePolicy.maxDestinationProfileLabels,
+      maxProfileBreakpoints: resourcePolicy.maxProfileBreakpoints,
+      profileSearchDeadlineSeconds: resourcePolicy.profileSearchDeadlineSeconds,
+      lastConnectionDeadlineSeconds: resourcePolicy.lastConnectionDeadlineSeconds,
+    },
+    {
+      maxTemporalWindowSeconds: 3600,
+      maxEstimatedWork: 10000000,
+      maxLabelsPerState: 2048,
+      maxDestinationProfileLabels: 128,
+      maxProfileBreakpoints: 128,
+      profileSearchDeadlineSeconds: 5,
+      lastConnectionDeadlineSeconds: 8,
+    },
   );
   assert.equal(rendered.configPlan.name, `journey-config-${rendered.releaseIdentity.candidateToken}`);
   assert.equal(rendered.secretPlan.name, `journey-secret-${rendered.releaseIdentity.candidateToken}`);
