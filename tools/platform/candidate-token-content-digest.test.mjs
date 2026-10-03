@@ -78,6 +78,43 @@ test("same input rendered by a renderer with a different Deployment spec gets ne
   assertAllNamesDiffer(candidateNames(current), candidateNames(changed));
 });
 
+// 리뷰 F2: digest 입력(ConfigMap data, candidate Service)을 각각 따로 고정한다. trafficGeneration과 입력은
+// 그대로 두고 렌더러 소스에서 한 객체만 바꿔, 다른 변화가 섞이지 않게 한다.
+function withoutToken(rendered, kind) {
+  const token = rendered.releaseIdentity.candidateToken;
+  const pick = {
+    configMap: rendered.configPlan.overrides,
+    deployment: rendered.candidateObjects.find((object) => object.kind === "Deployment"),
+    candidateService: rendered.candidateObjects.find((object) =>
+      object.kind === "Service" && object.metadata.name.startsWith("journey-candidate-")),
+  }[kind];
+  return JSON.parse(JSON.stringify(pick).replaceAll(token, "TOKEN"));
+}
+
+function renderReplacing(target, replacement) {
+  return render(input(), {
+    transformSource: (source) => (source.split(target).length === 2 ? source.replace(target, replacement) : undefined),
+  });
+}
+
+test("a ConfigMap-only content change gets new candidate names", () => {
+  const current = render(input());
+  const changed = renderReplacing('EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false"', 'EASYSUBWAY_PUSH_DELIVERY_ENABLED: "true"');
+  assert.notDeepEqual(withoutToken(current, "configMap"), withoutToken(changed, "configMap"));
+  assert.deepEqual(withoutToken(current, "deployment"), withoutToken(changed, "deployment"));
+  assert.deepEqual(withoutToken(current, "candidateService"), withoutToken(changed, "candidateService"));
+  assertAllNamesDiffer(candidateNames(current), candidateNames(changed));
+});
+
+test("a candidate-Service-only content change gets new candidate names", () => {
+  const current = render(input());
+  const changed = renderReplacing('      type: "ClusterIP",\n', '      type: "ClusterIP",\n      sessionAffinity: "ClientIP",\n');
+  assert.notDeepEqual(withoutToken(current, "candidateService"), withoutToken(changed, "candidateService"));
+  assert.deepEqual(withoutToken(current, "configMap"), withoutToken(changed, "configMap"));
+  assert.deepEqual(withoutToken(current, "deployment"), withoutToken(changed, "deployment"));
+  assertAllNamesDiffer(candidateNames(current), candidateNames(changed));
+});
+
 test("same tuple with a different traffic generation (ConfigMap data) gets new candidate names", () => {
   const first = render(input({ trafficGeneration: 37125930222 }));
   const second = render(input({ trafficGeneration: 37129430478 }));
