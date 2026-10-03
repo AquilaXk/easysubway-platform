@@ -27,19 +27,6 @@ groups:
           impact_ko: "컨테이너 상태 관측 신호가 멈춰 Docker 기반 장애 탐지가 늦어질 수 있습니다."
           action_ko: "docker-runtime-probe 컨테이너 상태와 Docker socket 접근 권한을 확인하세요."
 
-      - alert: AquilaBackWorkerScrapeDown
-        expr: min(up{job="back_worker"}) < 1
-        for: 3m
-        labels:
-          severity: critical
-          service: aquila-back-worker
-        annotations:
-          summary: Back worker metrics scrape is down
-          description: Prometheus cannot scrape the backend worker target for 3m. Task queue and DLQ alerts may stop evaluating.
-          title_ko: "백그라운드 작업자 상태 점검 실패"
-          impact_ko: "작업 큐와 DLQ 관련 알림 평가가 늦거나 멈출 수 있습니다."
-          action_ko: "back-worker 컨테이너 상태와 /actuator/health/readiness 응답을 확인하세요."
-
       # dead-man's switch(Hub Issue #2376): backend_app_metrics scrape가 멈추면 아래 freshness 경보가 참조하는
       # easysubway_timetable_snapshot_remaining_seconds 시계열이 사라져 T-24h/T-6h 경보가 조용히 평가를
       # 멈춘다. 이 경보가 그 무음 상태 자체를 감시한다.

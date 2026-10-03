@@ -827,8 +827,11 @@ test("drainOldWorkloads queries running Compose services with base compose and b
     request: activationRequest,
     commandRunner: async (command, args, options) => {
       commands.push({ command, args, options });
-      if (command === "docker" && args.includes("ps")) {
+      if (command === "docker" && args[0] === "compose" && args.includes("ps")) {
         return { stdout: "backend\n", stderr: "" };
+      }
+      if (command === "docker" && args[0] === "ps") {
+        return { stdout: "easysubway-postgres\timresamu/postgis:16-3.5\n", stderr: "" };
       }
       return { stdout: "", stderr: "" };
     },
@@ -842,7 +845,7 @@ test("drainOldWorkloads queries running Compose services with base compose and b
   assert.equal(drain.signal, "SIGTERM");
   assert.equal(drain.stopGracePeriodSeconds, 30);
   assert.equal(drain.oldWorkloadCount, 1);
-  const psCall = commands.find((entry) => entry.command === "docker" && entry.args.includes("ps"));
+  const psCall = commands.find((entry) => entry.command === "docker" && entry.args[0] === "compose" && entry.args.includes("ps"));
   assert.ok(psCall);
   assert.ok(!psCall.args.includes(activationRequest.candidateComposePath));
   assert.ok(!psCall.args.includes("--profile"));
@@ -856,6 +859,39 @@ test("drainOldWorkloads queries running Compose services with base compose and b
   assert.ok(stopCall);
   assert.ok(stopCall.args.includes("backend"));
   assert.equal(stopCall.options.timeoutMs, 35_000);
+  const hostScan = commands.find((entry) => entry.command === "docker" && entry.args[0] === "ps");
+  assert.ok(hostScan, "drain must scan every running docker container after stopping Compose backends");
+  assert.deepEqual(hostScan.args, [
+    "ps", "--filter", "status=running", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+  ]);
+  assert.ok(commands.indexOf(stopCall) < commands.indexOf(hostScan));
+});
+
+test("drainOldWorkloads fails when a docker backend process outside the K3s digest keeps running", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-drain-foreign-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({
+    root,
+    backendEnvironment: "SAFE_FLAG=true\n",
+  });
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: async (command, args) => {
+      if (command === "docker" && args[0] === "ps") {
+        return {
+          stdout: "easysubway-back-worker\teasysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c\n" +
+            "easysubway-postgres\timresamu/postgis:16-3.5\n",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    },
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await assert.rejects(
+    effects.drainOldWorkloads({ candidate: { candidateToken: "c-1" }, preparedActiveService: {} }),
+    /backend process outside the active K3s digest is still running: easysubway-back-worker/,
+  );
 });
 
 test("runPublicSmoke verifies active readiness over publicBaseUrl and binds canary evidence", async () => {

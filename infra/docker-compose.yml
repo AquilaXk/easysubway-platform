@@ -42,11 +42,10 @@ services:
     image: busybox:1.38.0
     container_name: easysubway-backend-logs-init
     restart: "no"
-    command: ["sh", "-c", "mkdir -p /logs/backend /logs/standby /logs/worker && chown -R 10001:10001 /logs/backend /logs/standby /logs/worker"]
+    command: ["sh", "-c", "mkdir -p /logs/backend /logs/standby && chown -R 10001:10001 /logs/backend /logs/standby"]
     volumes:
       - backend-logs:/logs/backend
       - backend-standby-logs:/logs/standby
-      - back-worker-logs:/logs/worker
 
   backend:
     image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
@@ -136,42 +135,6 @@ services:
         condition: service_healthy
       object-storage:
         condition: service_healthy
-
-  back-worker:
-    image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
-    container_name: easysubway-back-worker
-    restart: unless-stopped
-    stop_grace_period: 30s
-    user: "10001:10001"
-    read_only: true
-    tmpfs:
-      - /tmp:rw,nosuid,nodev
-    volumes:
-      - back-worker-logs:/opt/easysubway/logs
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    env_file:
-      - ${EASYSUBWAY_BACKEND_ENV_FILE:-../.env.example}
-    environment:
-      SPRING_PROFILES_ACTIVE: prod
-      EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
-      EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
-      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "true"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      backend-logs-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      object-storage:
-        condition: service_healthy
-
 
   public-edge-probe:
     image: prom/blackbox-exporter:v0.28.0
@@ -344,4 +307,3 @@ volumes:
   alloy-data:
   backend-logs:
   backend-standby-logs:
-  back-worker-logs:

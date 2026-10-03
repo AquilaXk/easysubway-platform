@@ -31,6 +31,10 @@ const REVISION = /^[a-f0-9]{40}$/;
 const RESOURCE_VERSION = /^[1-9]\d*$/;
 const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9]\d*$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+// Issue #219: Compose 서비스 중 운영 DB에 붙는 backend는 이 집합뿐이며, K3s 활성화가 모두 drain한다.
+export const PRODUCTION_DB_COMPOSE_BACKEND_SERVICES = Object.freeze(["backend", "backend-standby"]);
+const BACKEND_IMAGE_REFERENCE = /(?:^|\/)easysubway-backend(?:[:@]|$)/;
+const UNRESOLVED_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{12,64}$/;
 const FALLBACK_ZERO = Object.freeze({
   legacyGraphSuccessCount: 0,
   localRouteInvocationCount: 0,
@@ -693,12 +697,22 @@ export function createK3sJourneyActivationEffects({
       };
       const running = parseRunningComposeServices((await commandRunner("docker", [
         ...composePrefix, "ps", "--services", "--status", "running",
-        "backend", "backend-standby",
+        ...PRODUCTION_DB_COMPOSE_BACKEND_SERVICES,
       ], composeOptions)).stdout);
       if (running.length > 0) {
         await commandRunner("docker", [
           ...composePrefix, "stop", "--timeout", "30", ...running,
         ], { ...composeOptions, timeoutMs: 35_000 });
+      }
+      // K3s pod는 containerd에서 돌므로, drain 뒤 docker에 남은 backend 프로세스는 모두
+      // 활성 K3s digest가 아닌 이미지로 운영 DB에 붙은 프로세스다(Issue #219).
+      const foreign = findForeignBackendContainers((await commandRunner("docker", [
+        "ps", "--filter", "status=running", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+      ])).stdout);
+      if (foreign.length > 0) {
+        throw new Error(
+          `backend process outside the active K3s digest is still running: ${foreign.join(", ")}`,
+        );
       }
       oldWorkloadCount += running.length;
       return {
@@ -1260,11 +1274,26 @@ export async function waitForActiveEndpoint({
 export function parseRunningComposeServices(output) {
   if (typeof output !== "string") throw new Error("Compose service output is invalid");
   const services = output.split(/\r?\n/).filter((value) => value.length > 0);
-  const allowed = new Set(["backend", "backend-standby"]);
+  const allowed = new Set(PRODUCTION_DB_COMPOSE_BACKEND_SERVICES);
   if (new Set(services).size !== services.length || services.some((service) => !allowed.has(service))) {
     throw new Error("Compose running service identity is invalid");
   }
   return services;
+}
+
+export function findForeignBackendContainers(output) {
+  if (typeof output !== "string") throw new Error("docker container output is invalid");
+  const foreign = [];
+  for (const line of output.split(/\r?\n/).filter((value) => value.length > 0)) {
+    const fields = line.split("\t");
+    if (fields.length !== 2 || fields[0].length === 0 || fields[1].length === 0) {
+      throw new Error("docker container identity is invalid");
+    }
+    const [name, image] = fields;
+    // 태그가 지워진 이미지는 ID로만 보여 backend 여부를 증명할 수 없으므로 실패로 본다.
+    if (BACKEND_IMAGE_REFERENCE.test(image) || UNRESOLVED_IMAGE_ID.test(image)) foreign.push(name);
+  }
+  return foreign;
 }
 
 function sameObject(left, right) {

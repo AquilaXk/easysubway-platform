@@ -50,7 +50,7 @@ updates:
   # 갱신 경로가 없으면 CVE 대응이 전부 사람 주도로 남는다. 그래서 대상으로 삼는다.
   #
   # digest-only 계약(AquilaXk/easysubway#2712) 보호:
-  # backend·backend-standby·back-worker 서비스의 image 는
+  # backend·backend-standby 서비스의 image 는
   # `${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}` 라는 환경변수 참조라
   # 리터럴 이미지 참조가 아니고, dependabot 이 버전을 해석할 대상 자체가 아니다.
   # 그럼에도 backend 이미지의 유일한 갱신 경로가 #2712 의 digest 결속임을 설정으로 못박기 위해
