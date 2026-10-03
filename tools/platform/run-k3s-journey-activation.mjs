@@ -396,7 +396,8 @@ export function createK3sJourneyActivationEffects({
         ],
       );
       rendered = parseJson(Buffer.from(renderResult.stdout));
-      validateRender(rendered, request, await readObservabilityContract());
+      const renderInput = parseJson(await readStableRegularFile(request.candidateInputPath));
+      validateRender(rendered, request, await readObservabilityContract(), renderInput.nodeInternalIp);
       const configMap = {
         apiVersion: "v1",
         kind: "ConfigMap",
@@ -964,18 +965,32 @@ async function readObservabilityContract() {
   return parseJson(await readStableRegularFile(OBSERVABILITY_CONTRACT_PATH));
 }
 
-function renderMatchesObservability(value, observability) {
+// 보안 경계(Issue #221 F1): backend ingress의 모든 규칙은 TCP 8080 하나만 연다. ipBlock 출처는 노드 /32와
+// 계약 compose subnet 둘뿐이고 except가 붙지 않아야 하며, 그 밖의 출처는 자기 namespace selector뿐이다.
+// 각 조건은 서로를 대신하지 않도록 독립적으로 검사한다.
+function renderMatchesObservability(value, observability, nodeInternalIp) {
   const policy = value?.candidateObjects?.find((object) => object?.kind === "NetworkPolicy");
   const ingress = policy?.spec?.ingress;
-  return value?.activationPlan?.activeServiceTemplate?.spec?.clusterIP === observability.activeService.clusterIP &&
-    Array.isArray(ingress) && ingress.length > 0 &&
-    ingress.every((rule) => JSON.stringify(rule?.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }])) &&
-    ingress.some((rule) => rule?.from?.some((source) =>
-      source?.ipBlock?.cidr === observability.composeNetwork.subnet && source.ipBlock.except === undefined));
+  if (value?.activationPlan?.activeServiceTemplate?.spec?.clusterIP !== observability.activeService.clusterIP ||
+    !Array.isArray(ingress) || ingress.length === 0) return false;
+  const onlyPort8080 = ingress.every((rule) =>
+    JSON.stringify(rule?.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }]));
+  const sources = ingress.flatMap((rule) => (Array.isArray(rule?.from) ? rule.from : [undefined]));
+  const allowedCidrs = new Set([`${nodeInternalIp}/32`, observability.composeNetwork.subnet]);
+  const ipBlocksAllowed = sources.every((source) => source?.ipBlock === undefined ||
+    allowedCidrs.has(source.ipBlock.cidr));
+  const noExcept = sources.every((source) => source?.ipBlock?.except === undefined);
+  const ownNamespaceSelector = JSON.stringify({
+    namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } },
+  });
+  const otherSourcesAllowed = sources.every((source) =>
+    source?.ipBlock !== undefined || JSON.stringify(source) === ownNamespaceSelector);
+  const subnetAdmitted = sources.some((source) => source?.ipBlock?.cidr === observability.composeNetwork.subnet);
+  return onlyPort8080 && ipBlocksAllowed && noExcept && otherSourcesAllowed && subnetAdmitted;
 }
 
-function validateRender(value, request, observability) {
-  if (!renderMatchesObservability(value, observability) ||
+function validateRender(value, request, observability, nodeInternalIp) {
+  if (!renderMatchesObservability(value, observability, nodeInternalIp) ||
     value?.schemaVersion !== "PLATFORM_K3S_CANDIDATE_RENDER_V1" ||
     value?.artifactKind !== "platform-k3s-candidate-render" ||
     value?.releaseIdentity?.tupleSha256 !== request.releaseTuple.tupleSha256 ||

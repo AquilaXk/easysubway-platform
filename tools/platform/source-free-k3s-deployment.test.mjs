@@ -376,7 +376,11 @@ function mockCandidateRenderPlan({
       metadata: { name: "journey-backend-boundary", namespace: "easysubway-journey" },
       spec: {
         ingress: [{
-          from: [{ ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } }],
+          from: [
+            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+            { ipBlock: { cidr: "10.0.0.17/32" } },
+            { ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } },
+          ],
           ports: [{ protocol: "TCP", port: 8080 }],
         }],
       },
@@ -1121,8 +1125,19 @@ test("verifyRuntime fails closed when the live active Service ClusterIP drifts f
 test("applyCandidate rejects a render whose NetworkPolicy or active ClusterIP drifts from the contract before apply", async () => {
   for (const mutate of [
     (plan) => { plan.activationPlan.activeServiceTemplate.spec.clusterIP = "10.43.0.99"; },
-    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[0].ipBlock.cidr = "172.19.0.0/16"; },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[2].ipBlock.cidr = "172.19.0.0/16"; },
     (plan) => { plan.candidateObjects[0].spec.ingress[0].ports.push({ protocol: "TCP", port: 9090 }); },
+    // F1: 넓어지는 변이(전체 허용 출처, except가 붙은 subnet, 다른 포트를 여는 별도 규칙, 다른 /32)를 거부한다.
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ ipBlock: { cidr: "0.0.0.0/0" } }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[2].ipBlock.except = ["172.18.0.6/32"]; },
+    (plan) => {
+      plan.candidateObjects[0].spec.ingress.push({
+        from: [{ ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } }],
+        ports: [{ protocol: "TCP", port: 9090 }],
+      });
+    },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ ipBlock: { cidr: "10.0.0.99/32" } }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ namespaceSelector: {} }); },
   ]) {
     const root = await mkdtemp(path.join(tmpdir(), "k3s-render-observability-drift-"));
     const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });

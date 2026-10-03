@@ -127,15 +127,38 @@ test("rendered active Service pins the contract ClusterIP and NetworkPolicy admi
   assert.equal(active.spec.clusterIP, contract.activeService.clusterIP);
   assert.equal(active.spec.ports[0].port, contract.activeService.port);
 
+  // 보안 경계(F1): ingress 출처는 정확히 [namespace, 노드 /32, 계약 subnet]이고 포트는 TCP 8080 하나뿐이다.
+  // egress는 Issue #221 이전 규칙과 정확히 같아야 한다(관측 경로 추가가 egress를 넓히지 않는다).
   const policy = rendered.candidateObjects.find(({ kind }) => kind === "NetworkPolicy");
-  const sources = policy.spec.ingress.flatMap((rule) => rule.from);
-  assert.ok(
-    sources.some((source) => source.ipBlock?.cidr === contract.composeNetwork.subnet && !source.ipBlock.except),
-    "compose subnet ipBlock must be admitted",
-  );
-  for (const rule of policy.spec.ingress) {
-    assert.deepEqual(rule.ports, [{ protocol: "TCP", port: 8080 }]);
-  }
+  assert.deepEqual(policy.spec.ingress, [{
+    from: [
+      { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+      { ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } },
+      { ipBlock: { cidr: contract.composeNetwork.subnet } },
+    ],
+    ports: [{ protocol: "TCP", port: 8080 }],
+  }]);
+  assert.ok(policy.spec.ingress.every((rule) =>
+    JSON.stringify(rule.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }])));
+  assert.deepEqual(policy.spec.egress, [
+    {
+      to: [{ ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } }],
+      ports: [{ protocol: "TCP", port: 15432 }, { protocol: "TCP", port: 9000 }],
+    },
+    {
+      to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }],
+      ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }],
+    },
+    {
+      to: [{
+        ipBlock: {
+          cidr: "0.0.0.0/0",
+          except: ["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"],
+        },
+      }],
+      ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 80 }],
+    },
+  ]);
 });
 
 test("Prometheus backend probe and app metrics scrape target the rendered active Service", () => {
