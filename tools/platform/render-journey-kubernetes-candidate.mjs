@@ -57,6 +57,11 @@ const JOURNEY_PROFILE_RESOURCE_POLICY = Object.freeze({
   lastConnectionCostUnits: 4,
   maxCostUnitsPerSession: 10,
 });
+// 정책 1.1.0의 한도(작업량 1,000만 등)는 backend 프로필 알고리즘 식별자 EASYSUBWAY_RAPTOR_SUITE_V2 2.0.0
+// (AquilaXk/easysubway-backend#464)을 전제로 실측에서 역산했다. 이전 엔진(1.0.0)과 짝지으면 질의는 여전히 거절되면서
+// 거절 전까지 최대 1,000만 작업 단위를 쓴다. 이 렌더러는 release tuple의 불투명한 이미지 digest만 받고 외부 조회 없이
+// 결정적으로 렌더해야 하므로(레지스트리·Kubernetes API 호출 없음) 이미지 안의 알고리즘 식별자를 읽어 검사할 수 없다.
+// 그래서 짝 맞춤은 배포 순서(backend#464 이미지 먼저, 이 정책 다음)로 지키며, 배포 담당 세션이 수동으로 확인한다.
 const JOURNEY_PROFILE_RESOURCE_POLICY_JSON = JSON.stringify(JOURNEY_PROFILE_RESOURCE_POLICY);
 const JOURNEY_PROFILE_RESOURCE_POLICY_SHA256 = createHash("sha256")
   .update(JOURNEY_PROFILE_RESOURCE_POLICY_JSON, "utf8")
