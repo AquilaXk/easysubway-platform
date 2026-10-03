@@ -190,6 +190,9 @@ test("backend scrape down alerts still fire and no longer describe the drained c
   assert.doesNotMatch(alerts, /backend:8080/);
   assert.doesNotMatch(alertTests, /backend:8080/);
   assert.match(alertTests, /name: backend app metrics scrape down fires dead-mans switch/);
+  // F4: probe 경로 실패는 dead-man 경보와 별개의 probe_success 경보로 드러난다.
+  assert.match(alerts, /- alert: AquilaBackendReadinessProbeFailed\n\s+expr: min\(probe_success\{job="easysubway-backend"\}\) < 1\n\s+for: 5m/);
+  assert.match(alertTests, /alertname: AquilaBackendReadinessProbeFailed\n\s+exp_alerts:\n\s+- exp_labels:/);
 });
 
 test("CI runs this contract exactly once", () => {

@@ -109,6 +109,40 @@ tests:
         alertname: AquilaBackendAppMetricsScrapeDown
         exp_alerts: []
 
+  # Issue #221 F4: blackbox readiness probe가 활성 K3s Service에 5분 이상 실패하면(probe_success=0) 발화한다.
+  # 이 job의 up은 blackbox exporter 자체 상태라 probe 경로(NetworkPolicy 포함) 차단을 잡지 못한다.
+  - interval: 1m
+    name: backend readiness probe failure fires
+    input_series:
+      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+        values: '0x10'
+      - series: 'up{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AquilaBackendReadinessProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: aquila-backend-readiness
+            exp_annotations:
+              summary: Backend readiness probe is failing
+              description: The blackbox readiness probe to the active K3s journey-active Service has failed for 5m. The active backend is not ready or the compose-to-ClusterIP path (NetworkPolicy) is blocked.
+              title_ko: "백엔드 readiness 점검 실패"
+              impact_ko: "활성 K3s backend가 준비되지 않았거나 관측 경로가 막혀 backend 상태를 확인할 수 없습니다."
+              action_ko: "journey-active Service의 활성 pod 상태와 /actuator/health/readiness 응답, compose 네트워크에서 ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
+
+  # 짧은 실패(5분 미만)는 발화하지 않고, 정상 probe는 조용하다.
+  - interval: 1m
+    name: backend readiness probe success or short blip stays silent
+    input_series:
+      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+        values: '1 1 0 0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AquilaBackendReadinessProbeFailed
+        exp_alerts: []
+
   # Hub Issue #2434: 높은 5xx + 충분한 트래픽(>1 req/min)이면 Critical multi-window burn-rate가 발화한다.
   # interval 1m × 70표본으로 1h/5m 창을 채운다. rate()*60 ≈ 분당 증가분.
   - interval: 1m
