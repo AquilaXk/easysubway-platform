@@ -37,7 +37,8 @@ const UNRESOLVED_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{12,64}$/;
 const BACKEND_IMAGE_SOURCE = /^https:\/\/github\.com\/AquilaXk\/easysubway(?:-backend)?$/i;
 const HOST_BACKEND_SCAN_ARGS = Object.freeze([
   "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
-  "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+  "--no-trunc", "--format",
+  '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}',
 ]);
 const FALLBACK_ZERO = Object.freeze({
   legacyGraphSuccessCount: 0,
@@ -179,10 +180,19 @@ async function executeK3sActivation(input, effects, state) {
   });
   const nginx = await effects.switchNginx({ input, endpoint, activation });
   state.nginxMutationCount = 1;
-  const drain = await effects.drainOldWorkloads({
-    input, candidate, preparedActiveService: state.preparedActiveService,
-    serviceCas: state.serviceCas,
-  });
+  let drain;
+  try {
+    drain = await effects.drainOldWorkloads({
+      input, candidate, preparedActiveService: state.preparedActiveService,
+      serviceCas: state.serviceCas,
+    });
+  } catch (error) {
+    // drain이 일부 workload를 멈춘 뒤 실패하면 실패 receipt가 실제 변경 수를 기록해야 한다.
+    if (Number.isSafeInteger(error?.oldWorkloadCount) && error.oldWorkloadCount >= 0) {
+      state.oldWorkloadMutationCount = error.oldWorkloadCount;
+    }
+    throw error;
+  }
   state.oldWorkloadMutationCount = drain.oldWorkloadCount;
   const publicSmoke = await effects.runPublicSmoke({
     input, endpoint, activation, canary,
@@ -317,6 +327,15 @@ export function createK3sJourneyActivationEffects({
       };
     },
     async verifyRuntime() {
+      // 트래픽 전환 전 읽기 전용 검사: drain 대상이 아닌 backend가 운영 DB에 붙어 있으면 변경 없이 실패한다.
+      const precommitForeign = await scanForeignBackendContainers(commandRunner, {
+        tolerateComposeProject: request.projectName,
+      });
+      if (precommitForeign.length > 0) {
+        throw new Error(
+          `backend process outside the active K3s digest is running: ${precommitForeign.join(", ")}`,
+        );
+      }
       await commandRunner(
         "sudo",
         [
@@ -712,9 +731,9 @@ export function createK3sJourneyActivationEffects({
       // 활성 K3s digest가 아닌 이미지로 운영 DB에 붙은 프로세스다(Issue #219).
       const foreign = await scanForeignBackendContainers(commandRunner);
       if (foreign.length > 0) {
-        throw new Error(
+        throw Object.assign(new Error(
           `backend process outside the active K3s digest is still running: ${foreign.join(", ")}`,
-        );
+        ), { oldWorkloadCount: oldWorkloadCount + running.length });
       }
       oldWorkloadCount += running.length;
       return {
@@ -1293,17 +1312,22 @@ export function isBackendImageReference(image) {
 // docker에서 running·restarting 상태인 backend 이미지 컨테이너 이름을 돌려준다(Issue #219).
 // restarting은 재시작 사이에 running 목록에서 빠지지만 곧 다시 운영 DB에 붙으므로 포함한다.
 // 태그가 지워져 ID로만 보이는 이미지는 docker image inspect로 판정하고, 판정할 수 없을 때만 실패로 본다.
-export async function scanForeignBackendContainers(commandRunner) {
+// tolerateComposeProject를 주면 그 project의 drain 집합 서비스는 활성화가 곧 멈출 대상이므로 제외한다.
+export async function scanForeignBackendContainers(commandRunner, { tolerateComposeProject } = {}) {
   const raw = (await commandRunner("docker", [...HOST_BACKEND_SCAN_ARGS]))?.stdout;
   const output = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
   if (typeof output !== "string") throw new Error("docker container output is invalid");
   const foreign = [];
   for (const line of output.split(/\r?\n/).filter((value) => value.length > 0)) {
     const fields = line.split("\t");
-    if (fields.length !== 2 || fields[0].length === 0 || fields[1].length === 0) {
+    if (fields.length !== 4 || fields[0].length === 0 || fields[1].length === 0) {
       throw new Error("docker container identity is invalid");
     }
-    const [name, image] = fields;
+    const [name, image, composeProject, composeService] = fields;
+    if (tolerateComposeProject !== undefined && composeProject === tolerateComposeProject &&
+      PRODUCTION_DB_COMPOSE_BACKEND_SERVICES.includes(composeService)) {
+      continue;
+    }
     if (isBackendImageReference(image)) {
       foreign.push(name);
     } else if (UNRESOLVED_IMAGE_ID.test(image) &&

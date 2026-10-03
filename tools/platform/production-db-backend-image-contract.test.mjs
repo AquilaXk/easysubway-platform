@@ -187,7 +187,8 @@ test("observability no longer expects a back-worker process", () => {
 
 const HOST_SCAN_ARGS = Object.freeze([
   "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
-  "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+  "--no-trunc", "--format",
+  '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}',
 ]);
 
 function hostRunner({ ps, inspect = {} }) {
@@ -227,9 +228,9 @@ test("isBackendImageReference matches any repository whose last path segment sta
 test("scanForeignBackendContainers scans running and restarting containers host-wide", async () => {
   const { runner, calls } = hostRunner({
     ps: [
-      "easysubway-back-worker\teasysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c",
-      "renamed\teasysubway-backend-legacy:tag",
-      "easysubway-postgres\timresamu/postgis:16-3.5",
+      "easysubway-back-worker\teasysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c\teasysubway\tback-worker",
+      "renamed\teasysubway-backend-legacy:tag\t\t",
+      "easysubway-postgres\timresamu/postgis:16-3.5\teasysubway\tpostgres",
       "",
     ].join("\n"),
   });
@@ -244,10 +245,10 @@ test("scanForeignBackendContainers resolves untagged image ids through docker im
   const unknownId = `sha256:${"e".repeat(64)}`;
   const { runner, calls } = hostRunner({
     ps: [
-      `backend-by-digest\t${backendId}`,
-      `backend-by-label\t${legacyLabelId}`,
-      `unrelated\t${unrelatedId}`,
-      `uninspectable\t${unknownId}`,
+      `backend-by-digest\t${backendId}\t\t`,
+      `backend-by-label\t${legacyLabelId}\t\t`,
+      `unrelated\t${unrelatedId}\t\t`,
+      `uninspectable\t${unknownId}\t\t`,
     ].join("\n"),
     inspect: {
       [backendId]: [{
@@ -279,7 +280,7 @@ test("scanForeignBackendContainers resolves untagged image ids through docker im
 test("scanForeignBackendContainers fails closed on unparseable inspect output", async () => {
   const id = `sha256:${"f".repeat(64)}`;
   const runner = async (command, args) => args[0] === "ps"
-    ? { stdout: `odd\t${id}\n` }
+    ? { stdout: `odd\t${id}\t\t\n` }
     : { stdout: "not-json" };
   assert.deepEqual(await scanForeignBackendContainers(runner), ["odd"]);
 });
@@ -287,7 +288,7 @@ test("scanForeignBackendContainers fails closed on unparseable inspect output", 
 test("scanForeignBackendContainers accepts Buffer output and ignores unrelated images", async () => {
   const { runner } = hostRunner({ ps: "" });
   assert.deepEqual(await scanForeignBackendContainers(runner), []);
-  const bufferRunner = async () => ({ stdout: Buffer.from("easysubway-alloy\tgrafana/alloy:v1.17.1\n") });
+  const bufferRunner = async () => ({ stdout: Buffer.from("easysubway-alloy\tgrafana/alloy:v1.17.1\teasysubway\talloy\n") });
   assert.deepEqual(await scanForeignBackendContainers(bufferRunner), []);
 });
 
@@ -295,5 +296,7 @@ test("scanForeignBackendContainers rejects malformed docker output", async () =>
   await assert.rejects(scanForeignBackendContainers(async () => ({ stdout: undefined })),
     /docker container output is invalid/);
   await assert.rejects(scanForeignBackendContainers(async () => ({ stdout: "no-tab-here\n" })),
+    /docker container identity is invalid/);
+  await assert.rejects(scanForeignBackendContainers(async () => ({ stdout: "name\timage\n" })),
     /docker container identity is invalid/);
 });
