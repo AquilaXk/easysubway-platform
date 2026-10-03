@@ -412,6 +412,23 @@ export function createK3sJourneyActivationEffects({
         immutable: true,
         data: rendered.configPlan.overrides,
       };
+      // Issue #228: immutable ConfigMap은 같은 이름에 다른 data를 둘 수 없다. 어떤 create·apply보다 먼저
+      // 기존 객체와 대조하고, 다르면 지우거나 덮어쓰지 않고 실패한다.
+      const existingConfigMapBytes = Buffer.from((await kubectl([
+        "get", "configmap", configMap.metadata.name, "--namespace", NAMESPACE,
+        "--ignore-not-found", "-o", "json",
+      ])).stdout);
+      if (existingConfigMapBytes.toString("utf8").trim() !== "") {
+        const existingData = parseJson(existingConfigMapBytes)?.data ?? {};
+        const differing = [...new Set([...Object.keys(existingData), ...Object.keys(configMap.data)])]
+          .filter((key) => existingData[key] !== configMap.data[key])
+          .sort();
+        if (differing.length > 0) {
+          throw new Error(
+            `immutable ConfigMap ${configMap.metadata.name} already exists with different data: ${differing.join(",")}`,
+          );
+        }
+      }
       const candidateEnv = {
         ...Object.fromEntries(
           Object.entries(backendEnvironment).filter(([key]) => !OVERRIDE_KEYS.has(key)),

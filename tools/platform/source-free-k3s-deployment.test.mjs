@@ -1170,6 +1170,76 @@ test("applyCandidate rejects a render whose NetworkPolicy or active ClusterIP dr
   }
 });
 
+// Issue #228: 같은 이름의 immutable ConfigMap이 다른 data로 이미 있으면 Secret create나 apply 전에 실패한다.
+// 기존 객체를 지우거나 덮어쓰지 않는다.
+function existingConfigMapRunner(rendered, existingData, commands) {
+  return async (command, args, options = {}) => {
+    commands.push([command, ...args]);
+    if (command === process.execPath) return { stdout: Buffer.from(JSON.stringify(rendered)) };
+    if (args.includes("get") && args.includes("configmap")) {
+      return {
+        stdout: existingData === undefined ? "" : JSON.stringify({
+          apiVersion: "v1", kind: "ConfigMap",
+          metadata: { name: rendered.configPlan.name, namespace: "easysubway-journey" },
+          immutable: true,
+          data: existingData,
+        }),
+      };
+    }
+    return { stdout: Buffer.alloc(0) };
+  };
+}
+
+test("applyCandidate fails closed before any create or apply when an immutable ConfigMap name holds different data", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-configmap-collision-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+  const rendered = mockCandidateRenderPlan({
+    activationRequest,
+    configOverrides: { EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: "37129430478" },
+  });
+  const existingData = {
+    ...rendered.configPlan.overrides,
+    EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: "37125930222",
+  };
+  const commands = [];
+  const effects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    commandRunner: existingConfigMapRunner(rendered, existingData, commands),
+    serviceToken: "token".repeat(7),
+    fetchImpl: async () => { throw new Error("not invoked"); },
+  });
+  await effects.verifyInputs();
+  await assert.rejects(effects.applyCandidate(), (error) => {
+    assert.equal(error.message,
+      `immutable ConfigMap ${rendered.configPlan.name} already exists with different data: ` +
+      "EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION");
+    return true;
+  });
+  for (const command of commands) {
+    for (const verb of ["create", "apply", "delete", "replace", "patch"]) {
+      assert.equal(command.includes(verb), false, `unexpected mutation ${command.join(" ")}`);
+    }
+  }
+});
+
+test("applyCandidate proceeds when the same-named ConfigMap holds identical data or is absent", async () => {
+  for (const sameData of [true, false]) {
+    const root = await mkdtemp(path.join(tmpdir(), "k3s-configmap-same-"));
+    const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+    const rendered = mockCandidateRenderPlan({ activationRequest, configOverrides: { SAFE_CONFIG: "true" } });
+    const commands = [];
+    const effects = createK3sJourneyActivationEffects({
+      request: activationRequest,
+      commandRunner: existingConfigMapRunner(rendered, sameData ? { ...rendered.configPlan.overrides } : undefined, commands),
+      serviceToken: "token".repeat(7),
+      fetchImpl: async () => { throw new Error("not invoked"); },
+    });
+    await effects.verifyInputs();
+    await effects.applyCandidate();
+    assert.ok(commands.some((command) => command.includes("apply")));
+  }
+});
+
 test("activation failure receipt counts old workloads stopped before the drain failed", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-drain-count-"));
   const events = [];

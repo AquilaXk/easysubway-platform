@@ -199,9 +199,23 @@ function digestHex(value) {
   return value.slice("sha256:".length);
 }
 
-function candidateToken(input) {
+// Issue #228: candidate가 소유하는 객체(ConfigMap·Secret·Deployment·candidate Service) 이름은 이 token에서
+// 나온다. token은 tuple·candidateGeneration과 함께 렌더된 candidate 내용의 digest를 묶어, 내용이 달라지면
+// (trafficGeneration, secretIdentity, 렌더러 변경 등) 반드시 새 이름이 되도록 한다. 같은 이름에 다른 내용을
+// apply하면 immutable ConfigMap이 거부되거나 기존 Deployment가 바뀌기 때문이다.
+const CONTENT_DIGEST_PLACEHOLDER_TOKEN = "0".repeat(20);
+
+function candidateContentDigest(rendered) {
+  const owned = rendered.candidateObjects.filter(({ kind, metadata }) =>
+    kind === "Deployment" || (kind === "Service" && metadata.name.startsWith("journey-candidate-")));
   return createHash("sha256")
-    .update(`${input.tupleSha256}\n${input.candidateGeneration}\n`, "utf8")
+    .update(JSON.stringify({ configPlan: rendered.configPlan, secretPlan: rendered.secretPlan, owned }), "utf8")
+    .digest("hex");
+}
+
+function candidateToken(input, contentDigest) {
+  return createHash("sha256")
+    .update(`${input.tupleSha256}\n${input.candidateGeneration}\n${contentDigest}\n`, "utf8")
     .digest("hex")
     .slice(0, 20);
 }
@@ -400,7 +414,11 @@ function activeServiceTemplate(token, observability) {
 function render(input) {
   validateInput(input);
   const observability = readObservabilityContract();
-  const token = candidateToken(input);
+  const placeholder = renderWithToken(input, observability, CONTENT_DIGEST_PLACEHOLDER_TOKEN);
+  return renderWithToken(input, observability, candidateToken(input, candidateContentDigest(placeholder)));
+}
+
+function renderWithToken(input, observability, token) {
   const deploymentName = `journey-candidate-${token}`;
   const serviceName = `journey-candidate-${token}`;
   const configName = `journey-config-${token}`;
