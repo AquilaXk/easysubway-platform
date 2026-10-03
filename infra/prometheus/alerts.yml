@@ -38,13 +38,13 @@ groups:
           service: aquila-backend-app-metrics
         annotations:
           summary: Backend app metrics scrape is down
-          description: Prometheus cannot scrape backend_app_metrics (backend:8080/actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
+          description: Prometheus cannot scrape backend_app_metrics (K3s journey-active Service /actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
           title_ko: "백엔드 앱 메트릭 수집 실패"
           impact_ko: "운행표 snapshot 잔여시간 게이지가 사라져 만료 24/6시간 전 경보가 조용히 멈춥니다."
-          action_ko: "backend 컨테이너 상태와 /actuator/prometheus 응답, docker network 내부 backend:8080 접근을 확인하세요."
+          action_ko: "K3s journey-active Service의 활성 pod 상태와 /actuator/prometheus 응답, compose 네트워크에서 Service ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
 
       # 이 시계열은 backend actuator 메트릭에서 라이브로 scrape된다(Hub Issue #2376): prometheus.yml의
-      # backend_app_metrics job이 docker network 내부 backend:8080/actuator/prometheus 를 직접 수집한다.
+      # backend_app_metrics job이 활성 K3s journey-active Service의 /actuator/prometheus 를 직접 수집한다(Issue #221).
       # actuator는 공개 노출하지 않고 nginx 공개 경로에서 /actuator/* 를 차단하되 readiness/liveness probe만
       # 예외로 둔다. .github/workflows/timetable-auto-refresh.yml의 T-24h/T-6h Slack 통지는 보완 경보로
       # 병행 유지된다.

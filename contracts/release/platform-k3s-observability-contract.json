@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "PLATFORM_K3S_OBSERVABILITY_CONTRACT_V1",
+  "artifactKind": "platform-k3s-observability-contract",
+  "issueRef": {
+    "repository": "AquilaXk/easysubway-platform",
+    "issueNumber": 221
+  },
+  "composeNetwork": {
+    "name": "easysubway_default",
+    "subnet": "172.18.0.0/16"
+  },
+  "activeService": {
+    "name": "journey-active",
+    "namespace": "easysubway-journey",
+    "clusterIP": "10.43.11.187",
+    "port": 8080
+  }
+}

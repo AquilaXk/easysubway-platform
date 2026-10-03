@@ -32,6 +32,9 @@ const RESOURCE_VERSION = /^[1-9]\d*$/;
 const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\/runs\/[1-9]\d*$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 // Issue #219: Compose 서비스 중 운영 DB에 붙는 backend는 이 집합뿐이며, K3s 활성화가 모두 drain한다.
+const OBSERVABILITY_CONTRACT_PATH = path.join(
+  REPOSITORY_ROOT, "contracts/release/platform-k3s-observability-contract.json",
+);
 export const PRODUCTION_DB_COMPOSE_BACKEND_SERVICES = Object.freeze(["backend", "backend-standby"]);
 const UNRESOLVED_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{12,64}$/;
 const BACKEND_IMAGE_SOURCE = /^https:\/\/github\.com\/AquilaXk\/easysubway(?:-backend)?$/i;
@@ -360,6 +363,24 @@ export function createK3sJourneyActivationEffects({
         throw new Error("protected node InternalIP does not match K3s runtime");
       }
       await adminKubectl(["get", "namespace", NAMESPACE, "-o", "name"]);
+      // Issue #221: NetworkPolicy ipBlock과 Prometheus 대상(ClusterIP)이 실제 런타임과 같은지 PRECOMMIT에서
+      // 읽기 전용으로 확인한다. 다르면 어떤 K3s 변경도 하기 전에 실패한다.
+      const observability = await readObservabilityContract();
+      const networkConfig = parseJson(Buffer.from((await commandRunner("docker", [
+        "network", "inspect", observability.composeNetwork.name, "--format", "{{json .IPAM.Config}}",
+      ])).stdout));
+      if (!Array.isArray(networkConfig) || networkConfig.length !== 1 ||
+        networkConfig[0]?.Subnet !== observability.composeNetwork.subnet) {
+        throw new Error("compose network subnet does not match the observability contract");
+      }
+      const activeServiceBytes = Buffer.from((await kubectl([
+        "get", "service", observability.activeService.name, "--namespace", NAMESPACE,
+        "--ignore-not-found", "-o", "json",
+      ])).stdout);
+      if (activeServiceBytes.toString("utf8").trim() !== "" &&
+        parseJson(activeServiceBytes)?.spec?.clusterIP !== observability.activeService.clusterIP) {
+        throw new Error("active Service ClusterIP does not match the observability contract");
+      }
       return {
         nodeInternalIp: internalAddresses[0].address,
         evidenceDigest: evidence([nodes.items[0].metadata?.uid, internalAddresses[0].address]),
@@ -375,7 +396,7 @@ export function createK3sJourneyActivationEffects({
         ],
       );
       rendered = parseJson(Buffer.from(renderResult.stdout));
-      validateRender(rendered, request);
+      validateRender(rendered, request, await readObservabilityContract());
       const configMap = {
         apiVersion: "v1",
         kind: "ConfigMap",
@@ -939,8 +960,23 @@ function validateEffects(effects) {
   }
 }
 
-function validateRender(value, request) {
-  if (value?.schemaVersion !== "PLATFORM_K3S_CANDIDATE_RENDER_V1" ||
+async function readObservabilityContract() {
+  return parseJson(await readStableRegularFile(OBSERVABILITY_CONTRACT_PATH));
+}
+
+function renderMatchesObservability(value, observability) {
+  const policy = value?.candidateObjects?.find((object) => object?.kind === "NetworkPolicy");
+  const ingress = policy?.spec?.ingress;
+  return value?.activationPlan?.activeServiceTemplate?.spec?.clusterIP === observability.activeService.clusterIP &&
+    Array.isArray(ingress) && ingress.length > 0 &&
+    ingress.every((rule) => JSON.stringify(rule?.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }])) &&
+    ingress.some((rule) => rule?.from?.some((source) =>
+      source?.ipBlock?.cidr === observability.composeNetwork.subnet && source.ipBlock.except === undefined));
+}
+
+function validateRender(value, request, observability) {
+  if (!renderMatchesObservability(value, observability) ||
+    value?.schemaVersion !== "PLATFORM_K3S_CANDIDATE_RENDER_V1" ||
     value?.artifactKind !== "platform-k3s-candidate-render" ||
     value?.releaseIdentity?.tupleSha256 !== request.releaseTuple.tupleSha256 ||
     value?.configPlan?.overrides?.EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION !==
