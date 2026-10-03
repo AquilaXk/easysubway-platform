@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  findForeignBackendContainers,
+  isBackendImageReference,
   PRODUCTION_DB_COMPOSE_BACKEND_SERVICES,
+  scanForeignBackendContainers,
 } from "./run-k3s-journey-activation.mjs";
 
 // Issue #219: 운영 DB에 붙는 backend 프로세스는 K3s 활성 digest 하나여야 한다.
@@ -51,12 +52,6 @@ function composeServiceBlocks(content) {
     if (current) blocks.get(current).push(line);
   }
   return blocks;
-}
-
-// 레포 경로의 마지막 구성요소가 easysubway-backend로 시작하면 backend 이미지다.
-function isBackendImageReference(image) {
-  const repository = image.split("@")[0].replace(/:[^/]*$/, "");
-  return repository.split("/").pop().startsWith("easysubway-backend");
 }
 
 const DB_SETTING_KEY = /^\s*(?:-\s*)?(?:EASYSUBWAY_DATASOURCE_|SPRING_DATASOURCE_)[A-Z0-9_]*\s*[:=]/;
@@ -190,29 +185,115 @@ test("observability no longer expects a back-worker process", () => {
   assert.doesNotMatch(read("infra/docker-compose.yml"), /back-worker/);
 });
 
-test("findForeignBackendContainers flags every running docker backend process", () => {
-  const output = [
-    "easysubway-back-worker\teasysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c",
-    `easysubway-backend\tghcr.io/aquilaxk/easysubway-backend@sha256:${"a".repeat(64)}`,
-    `orphan\tsha256:${"b".repeat(64)}`,
-    "easysubway-postgres\timresamu/postgis:16-3.5",
-    "easysubway-prometheus\tprom/prometheus:v3.5.4",
-    "easysubway-backend-logs-helper\tbusybox:1.38.0",
-    "",
-  ].join("\n");
-  assert.deepEqual(findForeignBackendContainers(output), [
-    "easysubway-back-worker",
+const HOST_SCAN_ARGS = Object.freeze([
+  "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
+  "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+]);
+
+function hostRunner({ ps, inspect = {} }) {
+  const calls = [];
+  const runner = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === "docker" && args[0] === "ps") return { stdout: ps, stderr: "" };
+    if (command === "docker" && args[0] === "image" && args[1] === "inspect") {
+      const result = inspect[args[2]];
+      if (result === undefined) throw new Error("No such image");
+      return { stdout: JSON.stringify(result), stderr: "" };
+    }
+    throw new Error(`unexpected command ${command} ${args.join(" ")}`);
+  };
+  return { runner, calls };
+}
+
+test("isBackendImageReference matches any repository whose last path segment starts with easysubway-backend", () => {
+  for (const image of [
+    "easysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c",
+    `ghcr.io/aquilaxk/easysubway-backend@sha256:${"a".repeat(64)}`,
+    "easysubway-backend-legacy:tag",
+    "registry.local:5000/team/easysubway-backend-worker:1",
     "easysubway-backend",
-    "orphan",
+  ]) {
+    assert.equal(isBackendImageReference(image), true, image);
+  }
+  for (const image of [
+    "imresamu/postgis:16-3.5",
+    "prom/prometheus:v3.5.4",
+    "easysubway-backend-logs/busybox:1.38.0",
+  ]) {
+    assert.equal(isBackendImageReference(image), false, image);
+  }
+});
+
+test("scanForeignBackendContainers scans running and restarting containers host-wide", async () => {
+  const { runner, calls } = hostRunner({
+    ps: [
+      "easysubway-back-worker\teasysubway-backend:84f4fb94e1255df64326b90fdb8f7539f283961c",
+      "renamed\teasysubway-backend-legacy:tag",
+      "easysubway-postgres\timresamu/postgis:16-3.5",
+      "",
+    ].join("\n"),
+  });
+  assert.deepEqual(await scanForeignBackendContainers(runner), ["easysubway-back-worker", "renamed"]);
+  assert.deepEqual(calls, [["docker", ...HOST_SCAN_ARGS]]);
+});
+
+test("scanForeignBackendContainers resolves untagged image ids through docker image inspect", async () => {
+  const backendId = `sha256:${"b".repeat(64)}`;
+  const legacyLabelId = `sha256:${"c".repeat(64)}`;
+  const unrelatedId = `sha256:${"d".repeat(64)}`;
+  const unknownId = `sha256:${"e".repeat(64)}`;
+  const { runner, calls } = hostRunner({
+    ps: [
+      `backend-by-digest\t${backendId}`,
+      `backend-by-label\t${legacyLabelId}`,
+      `unrelated\t${unrelatedId}`,
+      `uninspectable\t${unknownId}`,
+    ].join("\n"),
+    inspect: {
+      [backendId]: [{
+        RepoTags: [],
+        RepoDigests: [`ghcr.io/aquilaxk/easysubway-backend@sha256:${"b".repeat(64)}`],
+        Config: { Labels: { "org.opencontainers.image.title": "ubuntu" } },
+      }],
+      [legacyLabelId]: [{
+        RepoTags: [],
+        RepoDigests: [],
+        Config: { Labels: { "org.opencontainers.image.source": "https://github.com/AquilaXk/easysubway-backend" } },
+      }],
+      [unrelatedId]: [{
+        RepoTags: [],
+        RepoDigests: [`grafana/alloy@sha256:${"d".repeat(64)}`],
+        Config: { Labels: { "org.opencontainers.image.source": "https://github.com/grafana/alloy" } },
+      }],
+    },
+  });
+  assert.deepEqual(await scanForeignBackendContainers(runner), [
+    "backend-by-digest", "backend-by-label", "uninspectable",
   ]);
-  assert.deepEqual(findForeignBackendContainers(""), []);
   assert.deepEqual(
-    findForeignBackendContainers("easysubway-alloy\tgrafana/alloy:v1.17.1\n"),
-    [],
+    calls.filter((call) => call[1] === "image").map((call) => call[3]),
+    [backendId, legacyLabelId, unrelatedId, unknownId],
   );
 });
 
-test("findForeignBackendContainers rejects malformed docker output", () => {
-  assert.throws(() => findForeignBackendContainers(undefined), /docker container output is invalid/);
-  assert.throws(() => findForeignBackendContainers("no-tab-here\n"), /docker container identity is invalid/);
+test("scanForeignBackendContainers fails closed on unparseable inspect output", async () => {
+  const id = `sha256:${"f".repeat(64)}`;
+  const runner = async (command, args) => args[0] === "ps"
+    ? { stdout: `odd\t${id}\n` }
+    : { stdout: "not-json" };
+  assert.deepEqual(await scanForeignBackendContainers(runner), ["odd"]);
+});
+
+test("scanForeignBackendContainers accepts Buffer output and ignores unrelated images", async () => {
+  const { runner } = hostRunner({ ps: "" });
+  assert.deepEqual(await scanForeignBackendContainers(runner), []);
+  const bufferRunner = async () => ({ stdout: Buffer.from("easysubway-alloy\tgrafana/alloy:v1.17.1\n") });
+  assert.deepEqual(await scanForeignBackendContainers(bufferRunner), []);
+});
+
+test("scanForeignBackendContainers rejects malformed docker output", async () => {
+  await assert.rejects(scanForeignBackendContainers(async () => ({ stdout: undefined })),
+    /docker container output is invalid/);
+  await assert.rejects(scanForeignBackendContainers(async () => ({ stdout: "no-tab-here\n" })),
+    /docker container identity is invalid/);
 });

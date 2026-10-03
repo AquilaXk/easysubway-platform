@@ -862,7 +862,8 @@ test("drainOldWorkloads queries running Compose services with base compose and b
   const hostScan = commands.find((entry) => entry.command === "docker" && entry.args[0] === "ps");
   assert.ok(hostScan, "drain must scan every running docker container after stopping Compose backends");
   assert.deepEqual(hostScan.args, [
-    "ps", "--filter", "status=running", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+    "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
+    "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
   ]);
   assert.ok(commands.indexOf(stopCall) < commands.indexOf(hostScan));
 });

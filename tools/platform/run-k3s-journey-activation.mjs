@@ -33,8 +33,12 @@ const RUN_URL = /^https:\/\/github\.com\/AquilaXk\/easysubway-platform\/actions\
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 // Issue #219: Compose 서비스 중 운영 DB에 붙는 backend는 이 집합뿐이며, K3s 활성화가 모두 drain한다.
 export const PRODUCTION_DB_COMPOSE_BACKEND_SERVICES = Object.freeze(["backend", "backend-standby"]);
-const BACKEND_IMAGE_REFERENCE = /(?:^|\/)easysubway-backend(?:[:@]|$)/;
 const UNRESOLVED_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{12,64}$/;
+const BACKEND_IMAGE_SOURCE = /^https:\/\/github\.com\/AquilaXk\/easysubway(?:-backend)?$/i;
+const HOST_BACKEND_SCAN_ARGS = Object.freeze([
+  "ps", "--all", "--filter", "status=running", "--filter", "status=restarting",
+  "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
+]);
 const FALLBACK_ZERO = Object.freeze({
   legacyGraphSuccessCount: 0,
   localRouteInvocationCount: 0,
@@ -706,9 +710,7 @@ export function createK3sJourneyActivationEffects({
       }
       // K3s pod는 containerd에서 돌므로, drain 뒤 docker에 남은 backend 프로세스는 모두
       // 활성 K3s digest가 아닌 이미지로 운영 DB에 붙은 프로세스다(Issue #219).
-      const foreign = findForeignBackendContainers((await commandRunner("docker", [
-        "ps", "--filter", "status=running", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}",
-      ])).stdout);
+      const foreign = await scanForeignBackendContainers(commandRunner);
       if (foreign.length > 0) {
         throw new Error(
           `backend process outside the active K3s digest is still running: ${foreign.join(", ")}`,
@@ -1281,7 +1283,19 @@ export function parseRunningComposeServices(output) {
   return services;
 }
 
-export function findForeignBackendContainers(output) {
+// 레포 경로의 마지막 구성요소가 easysubway-backend로 시작하면 backend 이미지다.
+export function isBackendImageReference(image) {
+  if (typeof image !== "string") return false;
+  const repository = image.split("@")[0].replace(/:[^/]*$/, "");
+  return repository.split("/").pop().startsWith("easysubway-backend");
+}
+
+// docker에서 running·restarting 상태인 backend 이미지 컨테이너 이름을 돌려준다(Issue #219).
+// restarting은 재시작 사이에 running 목록에서 빠지지만 곧 다시 운영 DB에 붙으므로 포함한다.
+// 태그가 지워져 ID로만 보이는 이미지는 docker image inspect로 판정하고, 판정할 수 없을 때만 실패로 본다.
+export async function scanForeignBackendContainers(commandRunner) {
+  const raw = (await commandRunner("docker", [...HOST_BACKEND_SCAN_ARGS]))?.stdout;
+  const output = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
   if (typeof output !== "string") throw new Error("docker container output is invalid");
   const foreign = [];
   for (const line of output.split(/\r?\n/).filter((value) => value.length > 0)) {
@@ -1290,10 +1304,32 @@ export function findForeignBackendContainers(output) {
       throw new Error("docker container identity is invalid");
     }
     const [name, image] = fields;
-    // 태그가 지워진 이미지는 ID로만 보여 backend 여부를 증명할 수 없으므로 실패로 본다.
-    if (BACKEND_IMAGE_REFERENCE.test(image) || UNRESOLVED_IMAGE_ID.test(image)) foreign.push(name);
+    if (isBackendImageReference(image)) {
+      foreign.push(name);
+    } else if (UNRESOLVED_IMAGE_ID.test(image) &&
+      await inspectedImageIsBackendOrUnknown(commandRunner, image)) {
+      foreign.push(name);
+    }
   }
   return foreign;
+}
+
+async function inspectedImageIsBackendOrUnknown(commandRunner, imageId) {
+  let image;
+  try {
+    const raw = (await commandRunner("docker", ["image", "inspect", imageId]))?.stdout;
+    const parsed = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw);
+    if (!Array.isArray(parsed) || parsed.length !== 1 || !parsed[0] || typeof parsed[0] !== "object") {
+      return true;
+    }
+    image = parsed[0];
+  } catch {
+    return true;
+  }
+  const references = [...(image.RepoTags ?? []), ...(image.RepoDigests ?? [])];
+  const source = image.Config?.Labels?.["org.opencontainers.image.source"];
+  return references.some(isBackendImageReference) ||
+    (typeof source === "string" && BACKEND_IMAGE_SOURCE.test(source));
 }
 
 function sameObject(left, right) {
