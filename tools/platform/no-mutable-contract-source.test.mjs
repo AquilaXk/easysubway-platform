@@ -33,7 +33,7 @@ test("K3s workflow pins the Hub bundle revision and never reads a mutable Hub re
   const workflow = readFileSync(resolve(root, ".github/workflows/source-free-journey-k3s-deploy.yml"), "utf8");
   assert.match(workflow, /acquire-platform-contract-bundle\.mjs/);
   assert.doesNotMatch(workflow, /raw\.githubusercontent\.com\/AquilaXk\/easysubway\/(?:main|master)\//);
-  assert.doesNotMatch(workflow, /contracts\/bundles\/platform-contracts-v1\.1\.0\.json/);
+  assert.doesNotMatch(workflow, /contracts\/bundles\/platform-contracts-v[0-9]/);
 });
 
 function trackedReferences(forbidden) {

@@ -111,8 +111,8 @@ function request(root) {
       maxTransfers: 2, alternativeCount: 1,
     },
     platformBundle: {
-      hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
-      bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
+      hubRevision: "a2f0e637849416c6109b2291bc0bafb354e525f5",
+      bundleSha256: "sha256:539229491d8cf072118c8a5d658459ce51d993daac099ee6f00afd019f9059fa",
       resourceSetSha256: "sha256:024e239b18364a3b1be9465cf3f9af0b3127344462c72ace7ff5071d332f48c6",
       acquisitionEvidenceDigest: digest("7"),
       runtimeContractPath: path.join(root, "platform-contracts", "resources", "platform", "k3s-runtime-contract.json"),
@@ -160,14 +160,14 @@ async function writePlatformBundle(root) {
   const resourceSetSha256 = sha256(Buffer.from(evidenceResources.map((entry) => `${entry.resourcePath}\n${entry.sha256.slice(7)}\n`).join("")));
   const evidenceBytes = Buffer.from(`${JSON.stringify({
     schemaVersion: "PLATFORM_HUB_BUNDLE_ACQUISITION_EVIDENCE_V1", artifactKind: "platform-hub-bundle-acquisition-evidence",
-    hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
-    bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
+    hubRevision: "a2f0e637849416c6109b2291bc0bafb354e525f5",
+    bundleSha256: "sha256:539229491d8cf072118c8a5d658459ce51d993daac099ee6f00afd019f9059fa",
     resourceSetSha256, resources: evidenceResources,
   }, null, 2)}\n`);
   await writeFile(path.join(bundleRoot, "evidence.json"), evidenceBytes);
   return {
-    hubRevision: "e14964e588ef79b1cff6e01e18d8b943d7724420",
-    bundleSha256: "sha256:ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58",
+    hubRevision: "a2f0e637849416c6109b2291bc0bafb354e525f5",
+    bundleSha256: "sha256:539229491d8cf072118c8a5d658459ce51d993daac099ee6f00afd019f9059fa",
     resourceSetSha256,
     acquisitionEvidenceDigest: sha256(evidenceBytes),
     runtimeContractPath: path.join(bundleRoot, "resources", "platform", "k3s-runtime-contract.json"),
@@ -317,7 +317,7 @@ test("preparer projects validated fixed-host inputs into a distinct secret-free 
   assert.equal(candidateInput.secretIdentity, sha256(backendEnvironment));
   assert.equal(candidateInput.nodeInternalIp, "10.0.0.17");
   assert.equal(k3sRequest.releaseTuple.tupleSha256, tuple.tupleSha256);
-  assert.equal(k3sRequest.platformBundle.hubRevision, "e14964e588ef79b1cff6e01e18d8b943d7724420");
+  assert.equal(k3sRequest.platformBundle.hubRevision, "a2f0e637849416c6109b2291bc0bafb354e525f5");
   assert.match(k3sRequest.platformBundle.bundleSha256, /^sha256:[a-f0-9]{64}$/);
   assert.match(k3sRequest.platformBundle.acquisitionEvidenceDigest, /^sha256:[a-f0-9]{64}$/);
   assert.equal(k3sRequest.operationDirectory, fixedRequest.operationDirectory);
