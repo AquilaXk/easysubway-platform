@@ -65,13 +65,45 @@ const ERROR_MESSAGES = Object.freeze({
   JOURNEY_CANARY_INPUT_UNSTABLE: "Journey canary input changed during request",
 });
 
+// backend가 UNAVAILABLE 응답에 추가하는 실패 사유(additive). 닫힌 집합만 신뢰하고, 없거나 모르는 값은 사유 없음으로 둔다.
+const FAILURE_REASONS = Object.freeze([
+  "SNAPSHOT_ERROR", "WINDOW_MISMATCH", "PLAN_ERROR", "NO_CANDIDATES",
+]);
+const FAILURE_BODY_ARTIFACT_KIND = "journey-v3-candidate-canary-failure";
+const DETAIL_FIELDS = Object.freeze(["probeId", "regionId", "httpStatus", "failureReason"]);
+
+/**
+ * canary 대표 출발 시각은 backend가 정한다(운행일 10:00 KST). 어댑터는 시각을 보내지 않으므로
+ * 실행 시각이 요청에 영향을 주지 않는다. 실패하면 실패한 probe(probeId, regionId)와 backend가 보고한
+ * 사유(failureReason)를 오류 필드와 메시지에 남긴다. 토큰·응답 본문은 메시지에 넣지 않는다.
+ */
 export class JourneyCandidateCanaryAdapterError extends Error {
-  constructor(code, exitCode = 1, options = undefined) {
-    super(ERROR_MESSAGES[code] ?? "Journey candidate canary failed", options);
+  constructor(code, exitCode = 1, options = undefined, details = {}) {
+    super(`${ERROR_MESSAGES[code] ?? "Journey candidate canary failed"}${formatDetails(details)}`, options);
     this.name = "JourneyCandidateCanaryAdapterError";
     this.code = code;
     this.exitCode = exitCode;
+    for (const field of DETAIL_FIELDS) {
+      if (details[field] !== undefined) this[field] = details[field];
+    }
   }
+}
+
+function formatDetails(details) {
+  const entries = DETAIL_FIELDS.filter((field) => details[field] !== undefined)
+    .map((field) => `${field}=${details[field]}`);
+  return entries.length === 0 ? "" : ` (${entries.join(" ")})`;
+}
+
+function withProbe(error, probe) {
+  if (!(error instanceof JourneyCandidateCanaryAdapterError) || error.probeId !== undefined) return error;
+  const details = { probeId: probe.requestId };
+  if (typeof probe.regionId === "string") details.regionId = probe.regionId;
+  for (const field of ["httpStatus", "failureReason"]) {
+    if (error[field] !== undefined) details[field] = error[field];
+  }
+  return new JourneyCandidateCanaryAdapterError(
+    error.code, error.exitCode, error.cause === undefined ? undefined : { cause: error.cause }, details);
 }
 
 export async function runJourneyCandidateCanary({
@@ -131,14 +163,17 @@ export async function runJourneyCandidateCanary({
         maxTransfers: probe.maxTransfers,
         alternativeCount: probe.alternativeCount,
       });
-      const result = await requestCanary({
-        baseUrl,
-        command,
-        serviceToken,
-        fetchImpl,
-        now,
-      });
-      results.push(result);
+      try {
+        results.push(await requestCanary({
+          baseUrl,
+          command,
+          serviceToken,
+          fetchImpl,
+          now,
+        }));
+      } catch (error) {
+        throw withProbe(error, probe);
+      }
     }
     await verifyTupleInput(input);
     const combinedDigest = probeList.length === 1
@@ -357,9 +392,24 @@ async function requireHttpContract(response) {
     } catch {
       // ignore body read error on failure diagnostic
     }
+    // 응답 본문은 로그 안전을 위해 원문을 남기지 않는다. 상태, 길이, 닫힌 사유만 기록한다.
+    const httpStatus = Number.isSafeInteger(response?.status) ? response.status : undefined;
+    const failureReason = reportedFailureReason(body);
+    const reasonText = failureReason === undefined ? "" : `, failureReason=${failureReason}`;
     throw failure("JOURNEY_CANARY_HTTP", 1, {
-      cause: new Error(`status=${response?.status}, mediaType=${mediaType}, cacheControl=${response?.headers?.get("cache-control")}, body=${body.slice(0, 1000)}`),
-    });
+      cause: new Error(`status=${httpStatus}, bodyLength=${Buffer.byteLength(body)}${reasonText}`),
+    }, { httpStatus, failureReason });
+  }
+}
+
+function reportedFailureReason(body) {
+  try {
+    const value = JSON.parse(body);
+    return value?.artifactKind === FAILURE_BODY_ARTIFACT_KIND && FAILURE_REASONS.includes(value.failureReason)
+      ? value.failureReason
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -486,8 +536,8 @@ function isExactObject(value, fields) {
     fields.every((field, index) => actual[index] === field);
 }
 
-function failure(code, exitCode = 1, options = undefined) {
-  return new JourneyCandidateCanaryAdapterError(code, exitCode, options);
+function failure(code, exitCode = 1, options = undefined, details = undefined) {
+  return new JourneyCandidateCanaryAdapterError(code, exitCode, options, details);
 }
 
 function parseCliArguments(args) {

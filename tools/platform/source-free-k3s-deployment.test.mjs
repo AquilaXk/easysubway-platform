@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   commitServiceCasWithReconciliation,
   createK3sJourneyActivationEffects,
+  formatActivationFailure,
   K3sJourneyActivationError,
   normalizePem,
   parseRunningComposeServices,
@@ -16,6 +17,7 @@ import {
   waitForActiveEndpoint,
 } from "./run-k3s-journey-activation.mjs";
 import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
+import { JourneyCandidateCanaryAdapterError } from "./run-journey-candidate-canary.mjs";
 const digest = (value) => `sha256:${value.repeat(64)}`;
 const OBSERVABILITY_CONTRACT = JSON.parse(readFileSync(new URL(
   "../../contracts/release/platform-k3s-observability-contract.json", import.meta.url,
@@ -636,6 +638,39 @@ test("precommit failure cleans only candidate and leaves active traffic surfaces
   assert.equal(failure.successReceiptCreated, false);
   assert.equal(failure.bundleAcquisitionEvidenceDigest, digest("7"));
   await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
+});
+test("a failing canary probe aborts activation and the activation CLI stderr names the probe and reason", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-canary-probe-"));
+  const events = [];
+  const fake = effects(events);
+  fake.runCandidateCanary = async () => {
+    events.push("candidate.canary");
+    throw new JourneyCandidateCanaryAdapterError("JOURNEY_CANARY_HTTP", 1, {
+      cause: new Error("status=503, bodyLength=120, failureReason=NO_CANDIDATES"),
+    }, {
+      probeId: "01K2H7Q5B7E3T19N8J4M6P0R2X", regionId: "daegu", httpStatus: 503, failureReason: "NO_CANDIDATES",
+    });
+  };
+  let failure;
+  await assert.rejects(
+    runK3sJourneyActivation(request(root), fake, { failureNow: () => "2026-08-14T04:01:00.000Z" }),
+    (error) => {
+      failure = error;
+      return error instanceof K3sJourneyActivationError && error.code === "K3S_PRECOMMIT_FAILED";
+    },
+  );
+  assert.ok(!events.includes("candidate.observe"));
+  assert.ok(!events.some((event) => event.startsWith("active-service.")));
+  assert.ok(!events.includes("nginx.switch"));
+  assert.ok(events.includes("candidate.cleanup"));
+
+  // 활성화 CLI가 실패 시 stderr에 쓰는 바로 그 출력이다.
+  assert.equal(typeof formatActivationFailure, "function");
+  const stderr = formatActivationFailure(failure);
+  assert.match(stderr, /^K3S_PRECOMMIT_FAILED /);
+  assert.match(stderr, /probeId=01K2H7Q5B7E3T19N8J4M6P0R2X regionId=daegu httpStatus=503 failureReason=NO_CANDIDATES/);
+  assert.match(stderr, /=== ACTIVATION ERROR CAUSE ===/);
+  assert.equal(stderr.includes("private"), false);
 });
 test("partial candidate apply is cleanup-owned and cleanup failure stops terminal receipt", async () => {
   const partialRoot = await mkdtemp(path.join(tmpdir(), "k3s-partial-apply-"));
