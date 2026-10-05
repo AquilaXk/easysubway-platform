@@ -23,8 +23,9 @@ export function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-export function inspectPlatformContractBundle(bytes) {
-  if (!Buffer.isBuffer(bytes) || sha256(bytes) !== BUNDLE_SHA256) throw new PlatformContractBundleError("HUB_BUNDLE_DIGEST_DRIFT");
+// pin 인자는 단위 테스트가 각 검증 단계를 격리하기 위한 주입점이다. 운영 호출은 항상 기본 핀을 쓴다.
+export function inspectPlatformContractBundle(bytes, { bundleSha256 = BUNDLE_SHA256, resourceIdentities = RESOURCE_IDENTITIES } = {}) {
+  if (!Buffer.isBuffer(bytes) || sha256(bytes) !== bundleSha256) throw new PlatformContractBundleError("HUB_BUNDLE_DIGEST_DRIFT");
   let bundle;
   try { bundle = JSON.parse(bytes.toString("utf8")); } catch { throw new PlatformContractBundleError("HUB_BUNDLE_MALFORMED"); }
   if (!bundle || typeof bundle !== "object" || Array.isArray(bundle) ||
@@ -35,10 +36,10 @@ export function inspectPlatformContractBundle(bytes) {
     throw new PlatformContractBundleError("HUB_BUNDLE_MALFORMED");
   }
   const keys = Object.keys(bundle.resources);
-  if (keys.length !== RESOURCE_IDENTITIES.length || !keys.every((key, index) => key === RESOURCE_IDENTITIES[index][0])) {
+  if (keys.length !== resourceIdentities.length || !keys.every((key, index) => key === resourceIdentities[index][0])) {
     throw new PlatformContractBundleError("HUB_BUNDLE_RESOURCE_SET_DRIFT");
   }
-  const resources = RESOURCE_IDENTITIES.map(([resourcePath, expectedSha256]) => {
+  const resources = resourceIdentities.map(([resourcePath, expectedSha256]) => {
     const value = bundle.resources[resourcePath];
     if (typeof value !== "string" || value.length === 0 || sha256(Buffer.from(value, "utf8")) !== expectedSha256) {
       throw new PlatformContractBundleError("HUB_BUNDLE_RESOURCE_DIGEST_DRIFT");
