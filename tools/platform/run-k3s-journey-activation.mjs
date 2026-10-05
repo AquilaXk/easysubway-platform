@@ -1531,22 +1531,28 @@ function isMainModule() {
   }
 }
 
+/** 활성화 CLI가 실패 시 stderr에 쓰는 전체 출력. cause 사슬(canary probe·사유 포함)을 그대로 싣는다. */
+export function formatActivationFailure(error) {
+  const failure = error instanceof K3sJourneyActivationError
+    ? error
+    : typed("K3S_PRECOMMIT_FAILED", error);
+  let output = `${failure.code} ${failure.message}\n`;
+  if (failure.cause) {
+    output += `\n=== ACTIVATION ERROR CAUSE ===\n${failure.cause?.stack ?? failure.cause}\n`;
+    let cause = failure.cause.cause;
+    while (cause) {
+      output += `\n=== ROOT CAUSE ===\n${cause?.stack ?? cause}\n`;
+      cause = cause.cause;
+    }
+  }
+  return output;
+}
+
 if (isMainModule()) {
   try {
     await main();
   } catch (error) {
-    const failure = error instanceof K3sJourneyActivationError
-      ? error
-      : typed("K3S_PRECOMMIT_FAILED", error);
-    process.stderr.write(`${failure.code} ${failure.message}\n`);
-    if (failure.cause) {
-      process.stderr.write(`\n=== ACTIVATION ERROR CAUSE ===\n${failure.cause?.stack ?? failure.cause}\n`);
-      let cause = failure.cause.cause;
-      while (cause) {
-        process.stderr.write(`\n=== ROOT CAUSE ===\n${cause?.stack ?? cause}\n`);
-        cause = cause.cause;
-      }
-    }
-    process.exitCode = failure.exitCode;
+    process.stderr.write(formatActivationFailure(error));
+    process.exitCode = error instanceof K3sJourneyActivationError ? error.exitCode : 1;
   }
 }
