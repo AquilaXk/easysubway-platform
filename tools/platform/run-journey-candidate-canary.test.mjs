@@ -210,6 +210,33 @@ test("a backend without the additive reason field still names the failing probe 
   );
 });
 
+test("a closed-set failureReason in a body of another artifactKind is never reported", async () => {
+  const bodies = [
+    { failureReason: "NO_CANDIDATES" },
+    { artifactKind: "something-else", failureReason: "NO_CANDIDATES", probeId: REQUEST_ID },
+    { artifactKind: "journey-v3-candidate-canary-result", failureReason: "PLAN_ERROR" },
+    { artifactKind: null, failureReason: "WINDOW_MISMATCH" },
+    { artifactKind: ["journey-v3-candidate-canary-failure"], failureReason: "SNAPSHOT_ERROR" },
+  ];
+  for (const body of bodies) {
+    const fixture = await createFixture();
+    await assert.rejects(
+      runJourneyCandidateCanary({
+        ...validInput(fixture),
+        fetchImpl: async () => response(body, { status: 503 }),
+      }),
+      (error) => {
+        assert.equal(error.code, "JOURNEY_CANARY_HTTP");
+        assert.equal(error.failureReason, undefined);
+        assert.equal(error.probeId, REQUEST_ID);
+        assert.equal(error.message.includes("failureReason="), false);
+        return true;
+      },
+      JSON.stringify(body),
+    );
+  }
+});
+
 test("a failing regional probe aborts activation and names its region, probe id and reason", async () => {
   const fixture = await createFixture();
   const probes = regionalProbes();
