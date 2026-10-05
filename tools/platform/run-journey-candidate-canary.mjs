@@ -392,12 +392,13 @@ async function requireHttpContract(response) {
     } catch {
       // ignore body read error on failure diagnostic
     }
+    // 응답 본문은 로그 안전을 위해 원문을 남기지 않는다. 상태, 길이, 닫힌 사유만 기록한다.
+    const httpStatus = Number.isSafeInteger(response?.status) ? response.status : undefined;
+    const failureReason = reportedFailureReason(body);
+    const reasonText = failureReason === undefined ? "" : `, failureReason=${failureReason}`;
     throw failure("JOURNEY_CANARY_HTTP", 1, {
-      cause: new Error(`status=${response?.status}, mediaType=${mediaType}, cacheControl=${response?.headers?.get("cache-control")}, body=${body.slice(0, 1000)}`),
-    }, {
-      httpStatus: Number.isSafeInteger(response?.status) ? response.status : undefined,
-      failureReason: reportedFailureReason(body),
-    });
+      cause: new Error(`status=${httpStatus}, bodyLength=${Buffer.byteLength(body)}${reasonText}`),
+    }, { httpStatus, failureReason });
   }
 }
 

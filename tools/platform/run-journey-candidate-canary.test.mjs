@@ -237,6 +237,41 @@ test("a closed-set failureReason in a body of another artifactKind is never repo
   }
 });
 
+test("the HTTP failure cause keeps only status, length and reason and never an excerpt of the response body", async () => {
+  const secret = "Bearer leaked-secret-token internal-host.example.test";
+  const bodies = [
+    JSON.stringify(canaryFailureBody({ failureReason: "NO_CANDIDATES", detail: secret })),
+    `plain text ${secret}`,
+  ];
+  for (const body of bodies) {
+    const fixture = await createFixture();
+    await assert.rejects(
+      runJourneyCandidateCanary({
+        ...validInput(fixture),
+        fetchImpl: async () => response(body, { status: 503 }),
+      }),
+      (error) => {
+        assert.equal(error.code, "JOURNEY_CANARY_HTTP");
+        const logged = `${error.message}\n${error.stack}\n${error.cause?.message}\n${error.cause?.stack}`;
+        assert.equal(logged.includes("leaked-secret-token"), false);
+        assert.equal(logged.includes("internal-host.example.test"), false);
+        assert.equal(logged.includes("plain text"), false);
+        assert.match(error.cause.message, /status=503/);
+        assert.match(error.cause.message, new RegExp(`bodyLength=${Buffer.byteLength(body)}\\b`));
+        return true;
+      },
+    );
+  }
+  const fixture = await createFixture();
+  await assert.rejects(
+    runJourneyCandidateCanary({
+      ...validInput(fixture),
+      fetchImpl: async () => response(canaryFailureBody({ failureReason: "PLAN_ERROR" }), { status: 503 }),
+    }),
+    (error) => /failureReason=PLAN_ERROR/.test(error.cause.message),
+  );
+});
+
 test("a failing regional probe aborts activation and names its region, probe id and reason", async () => {
   const fixture = await createFixture();
   const probes = regionalProbes();
