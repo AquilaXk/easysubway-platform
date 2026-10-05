@@ -4,12 +4,12 @@ import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
-export const HUB_REVISION = "e14964e588ef79b1cff6e01e18d8b943d7724420";
-export const BUNDLE_SHA256 = "ffbfed08c46916a6a9f7e1bf3d3de46989fe4f2517ed341bd2e2f89e02b7ce58";
-export const BUNDLE_URL = `https://raw.githubusercontent.com/AquilaXk/easysubway/${HUB_REVISION}/contracts/bundles/platform-contracts-v1.1.0.json`;
+export const HUB_REVISION = "a2f0e637849416c6109b2291bc0bafb354e525f5";
+export const BUNDLE_SHA256 = "539229491d8cf072118c8a5d658459ce51d993daac099ee6f00afd019f9059fa";
+export const BUNDLE_URL = `https://raw.githubusercontent.com/AquilaXk/easysubway/${HUB_REVISION}/contracts/bundles/platform-contracts-v1.2.0.json`;
 export const RESOURCE_IDENTITIES = Object.freeze([
   ["platform/deployment-contract.json", "e5fba2310dcda64ca1a25ada3d933a22058857c66bb4772c2cb7e44af8a59ad8"],
-  ["platform/k3s-activation-contract.json", "5e5cc0aec2423e5568acc25d92ca47fb81ab314b390372d5b068d8178c4b54e2"],
+  ["platform/k3s-activation-contract.json", "dc89f0fdacbc1116dbc8341d62338c3dd38b0b15cb3150234ccb367ec4631d02"],
   ["platform/k3s-runtime-contract.json", "ce226499224b3a3279d6bf1e41a181fc2a47afe100d9230411e3d782de36220b"],
   ["platform/k3s-runtime-contract.schema.json", "9b7a6d208d826a7046a80bab99d2c6856f4e59f15b923f9081926c95a8c88bdd"],
   ["platform/k3s-activation-receipt.schema.json", "bb4d9e3e57e52186f29a651cd514c095790cb10b36ddb60dfa490e80c16fe8b4"],
@@ -28,7 +28,7 @@ export function inspectPlatformContractBundle(bytes) {
   let bundle;
   try { bundle = JSON.parse(bytes.toString("utf8")); } catch { throw new PlatformContractBundleError("HUB_BUNDLE_MALFORMED"); }
   if (!bundle || typeof bundle !== "object" || Array.isArray(bundle) ||
-    Object.keys(bundle).length !== 5 || bundle.schemaVersion !== 1 || bundle.bundleVersion !== "1.1.0" ||
+    Object.keys(bundle).length !== 5 || bundle.schemaVersion !== 1 || bundle.bundleVersion !== "1.2.0" ||
     !/^[a-f0-9]{64}$/.test(bundle.componentManifestSchemaSha256 ?? "") ||
     !/^[a-f0-9]{64}$/.test(bundle.issueRefSchemaSha256 ?? "") ||
     !bundle.resources || typeof bundle.resources !== "object" || Array.isArray(bundle.resources)) {
