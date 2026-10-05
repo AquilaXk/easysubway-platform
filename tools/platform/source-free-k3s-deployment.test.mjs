@@ -16,6 +16,7 @@ import {
   waitForActiveEndpoint,
 } from "./run-k3s-journey-activation.mjs";
 import { prepareSourceFreeK3sDeployment } from "./prepare-source-free-k3s-deployment.mjs";
+import { JourneyCandidateCanaryAdapterError } from "./run-journey-candidate-canary.mjs";
 const digest = (value) => `sha256:${value.repeat(64)}`;
 const OBSERVABILITY_CONTRACT = JSON.parse(readFileSync(new URL(
   "../../contracts/release/platform-k3s-observability-contract.json", import.meta.url,
@@ -636,6 +637,32 @@ test("precommit failure cleans only candidate and leaves active traffic surfaces
   assert.equal(failure.successReceiptCreated, false);
   assert.equal(failure.bundleAcquisitionEvidenceDigest, digest("7"));
   await missing(path.join(root, "operation", "k3s-activation-receipt.json"));
+});
+test("a failing canary probe aborts activation and its probe id and reason stay in the logged cause", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-activation-canary-probe-"));
+  const events = [];
+  const fake = effects(events);
+  fake.runCandidateCanary = async () => {
+    events.push("candidate.canary");
+    throw new JourneyCandidateCanaryAdapterError("JOURNEY_CANARY_HTTP", 1, undefined, {
+      probeId: "01K2H7Q5B7E3T19N8J4M6P0R2X", regionId: "daegu", httpStatus: 503, failureReason: "NO_CANDIDATES",
+    });
+  };
+  await assert.rejects(
+    runK3sJourneyActivation(request(root), fake, { failureNow: () => "2026-08-14T04:01:00.000Z" }),
+    (error) => {
+      assert.ok(error instanceof K3sJourneyActivationError);
+      assert.equal(error.code, "K3S_PRECOMMIT_FAILED");
+      // 활성화 CLI는 cause의 stack을 stderr에 출력한다. 첫 줄에 probe와 사유가 있어야 로그에서 보인다.
+      assert.match(error.cause.stack, /Journey canary HTTP contract failed/);
+      assert.match(error.cause.stack, /probeId=01K2H7Q5B7E3T19N8J4M6P0R2X regionId=daegu httpStatus=503 failureReason=NO_CANDIDATES/);
+      return true;
+    },
+  );
+  assert.ok(!events.includes("candidate.observe"));
+  assert.ok(!events.some((event) => event.startsWith("active-service.")));
+  assert.ok(!events.includes("nginx.switch"));
+  assert.ok(events.includes("candidate.cleanup"));
 });
 test("partial candidate apply is cleanup-owned and cleanup failure stops terminal receipt", async () => {
   const partialRoot = await mkdtemp(path.join(tmpdir(), "k3s-partial-apply-"));

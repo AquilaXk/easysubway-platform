@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -127,6 +128,229 @@ test("multi-probe canary fails closed if any regional probe fails", async () => 
   );
   assert.equal(callIndex, 3);
 });
+
+const FAILURE_REASONS = ["SNAPSHOT_ERROR", "WINDOW_MISMATCH", "PLAN_ERROR", "NO_CANDIDATES"];
+
+function canaryFailureBody(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    artifactKind: "journey-v3-candidate-canary-failure",
+    passed: false,
+    reason: "UNAVAILABLE",
+    ...overrides,
+  };
+}
+
+test("an UNAVAILABLE probe reports the backend failure reason and the failing probe id", async () => {
+  for (const failureReason of FAILURE_REASONS) {
+    const fixture = await createFixture();
+    let attempts = 0;
+    await assert.rejects(
+      runJourneyCandidateCanary({
+        ...validInput(fixture),
+        fetchImpl: async () => {
+          attempts += 1;
+          return response(canaryFailureBody({ failureReason, probeId: REQUEST_ID }), { status: 503 });
+        },
+      }),
+      (error) => {
+        assert.ok(error instanceof JourneyCandidateCanaryAdapterError);
+        assert.equal(error.code, "JOURNEY_CANARY_HTTP");
+        assert.equal(error.exitCode, 1);
+        assert.equal(error.httpStatus, 503);
+        assert.equal(error.failureReason, failureReason);
+        assert.equal(error.probeId, REQUEST_ID);
+        assert.match(error.message, new RegExp(`probeId=${REQUEST_ID}\\b`));
+        assert.match(error.message, new RegExp(`httpStatus=503\\b`));
+        assert.match(error.message, new RegExp(`failureReason=${failureReason}\\b`));
+        assert.equal(error.message.includes(TOKEN), false);
+        return true;
+      },
+      failureReason,
+    );
+    assert.equal(attempts, 1, failureReason);
+  }
+});
+
+test("a backend without the additive reason field still names the failing probe and never invents a reason", async () => {
+  const bodies = [
+    {},
+    canaryFailureBody(),
+    canaryFailureBody({ failureReason: "SOMETHING_ELSE", probeId: "attacker\ninjected" }),
+    canaryFailureBody({ failureReason: 7 }),
+  ];
+  for (const body of bodies) {
+    const fixture = await createFixture();
+    await assert.rejects(
+      runJourneyCandidateCanary({
+        ...validInput(fixture),
+        fetchImpl: async () => response(body, { status: 503 }),
+      }),
+      (error) => {
+        assert.equal(error.code, "JOURNEY_CANARY_HTTP");
+        assert.equal(error.failureReason, undefined);
+        assert.equal(error.probeId, REQUEST_ID);
+        assert.equal(error.httpStatus, 503);
+        assert.match(error.message, new RegExp(`probeId=${REQUEST_ID}\\b`));
+        assert.equal(error.message.includes("failureReason="), false);
+        assert.equal(error.message.includes("injected"), false);
+        return true;
+      },
+      JSON.stringify(body),
+    );
+  }
+  const fixture = await createFixture();
+  await assert.rejects(
+    runJourneyCandidateCanary({
+      ...validInput(fixture),
+      fetchImpl: async () => response("not json", { status: 503, contentType: "text/plain" }),
+    }),
+    (error) => error.code === "JOURNEY_CANARY_HTTP" && error.failureReason === undefined &&
+      error.probeId === REQUEST_ID,
+  );
+});
+
+test("a failing regional probe aborts activation and names its region, probe id and reason", async () => {
+  const fixture = await createFixture();
+  const probes = regionalProbes();
+  let callIndex = 0;
+  await assert.rejects(
+    runJourneyCandidateCanary({
+      tuplePath: fixture.path,
+      baseUrl: "http://127.0.0.1:8082",
+      candidateGeneration: 7,
+      canaryRequestIdentity: "deploy-abc:standby",
+      probes,
+      serviceToken: TOKEN,
+      fetchImpl: async () => {
+        callIndex += 1;
+        if (callIndex === 3) {
+          return response(canaryFailureBody({
+            failureReason: "NO_CANDIDATES", probeId: probes[2].requestId,
+          }), { status: 503 });
+        }
+        const probe = probes[callIndex - 1];
+        return response(canaryResponse(fixture.tuple, { requestId: probe.requestId, queryId: probe.requestId }));
+      },
+      now: () => NOW,
+    }),
+    (error) => {
+      assert.equal(error.code, "JOURNEY_CANARY_HTTP");
+      assert.equal(error.probeId, probes[2].requestId);
+      assert.equal(error.regionId, "daegu");
+      assert.equal(error.failureReason, "NO_CANDIDATES");
+      assert.match(error.message, /regionId=daegu\b/);
+      assert.match(error.message, new RegExp(`probeId=${probes[2].requestId}\\b`));
+      assert.match(error.message, /failureReason=NO_CANDIDATES\b/);
+      return true;
+    },
+  );
+  assert.equal(callIndex, 3);
+});
+
+test("non-HTTP probe failures also name the failing probe", async () => {
+  const fixture = await createFixture();
+  await assert.rejects(
+    runJourneyCandidateCanary({
+      ...validInput(fixture),
+      fetchImpl: async () => response(canaryResponse(fixture.tuple, { candidateGeneration: 8 })),
+    }),
+    (error) => error.code === "JOURNEY_CANARY_IDENTITY" && error.probeId === REQUEST_ID &&
+      error.message.includes(`probeId=${REQUEST_ID}`),
+  );
+});
+
+test("night and daytime runs send the same request and reach the same verdict", async () => {
+  const outcomes = [];
+  for (const wallClock of [
+    new Date("2026-08-13T05:00:00.000Z"),
+    new Date("2026-08-13T14:50:00.000Z"),
+    new Date("2026-08-13T15:06:00.000Z"),
+  ]) {
+    const fixture = await createFixture();
+    const bodies = [];
+    const result = await runJourneyCandidateCanary({
+      ...validInput(fixture),
+      now: () => wallClock,
+      fetchImpl: async (_url, options) => {
+        bodies.push(options.body);
+        return response(canaryResponse(fixture.tuple, { capturedAt: wallClock.toISOString().replace(".000Z", "Z") }));
+      },
+    });
+    outcomes.push({ bodies, passed: result.passed });
+  }
+  assert.deepEqual(outcomes.map((outcome) => outcome.passed), [true, true, true]);
+  assert.equal(new Set(outcomes.map((outcome) => outcome.bodies.join("\n"))).size, 1);
+  assert.equal(Object.keys(JSON.parse(outcomes[0].bodies[0])).some((key) => /time|clock|depart/i.test(key)), false);
+});
+
+test("CLI failure for an UNAVAILABLE probe prints the closed code, probe id and reason without secrets", async () => {
+  const fixture = await createFixture();
+  const cliRoot = await mkdtemp(join(tmpdir(), "journey canary cli "));
+  const cliScript = join(cliRoot, "canary.mjs");
+  await symlink(fileURLToPath(SCRIPT), cliScript);
+  const server = createServer((_request, reply) => {
+    reply.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+    reply.end(JSON.stringify(canaryFailureBody({ failureReason: "NO_CANDIDATES", probeId: REQUEST_ID })));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const result = await runCli(cliScript, [
+      "--tuple", fixture.path,
+      "--base-url", `http://127.0.0.1:${server.address().port}`,
+      "--candidate-generation", "7",
+      "--canary-request-identity", "deploy-abc:standby",
+      "--request-id", REQUEST_ID,
+      "--origin-station-id", "0108",
+      "--destination-station-id", "0201",
+      "--mobility-profile", "STANDARD",
+      "--constraint-mode", "NONE",
+      "--max-transfers", "3",
+      "--alternative-count", "3",
+    ], { EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN: TOKEN });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /^JOURNEY_CANARY_HTTP /);
+    assert.match(result.stderr, new RegExp(`probeId=${REQUEST_ID}`));
+    assert.match(result.stderr, /failureReason=NO_CANDIDATES/);
+    for (const forbidden of [TOKEN, fixture.root, "0108", "0201"]) {
+      assert.equal(result.stderr.includes(forbidden), false);
+    }
+    assert.equal(result.stdout, "");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+function runCli(script, args, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script, ...args], { env: { ...process.env, ...env } });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+function regionalProbes() {
+  const stations = [
+    ["capital", "station-6a5e08288b46", "station-gangnam"],
+    ["busan", "station-1fc7a7c971c8", "station-3752d457e1c0"],
+    ["daegu", "station-44dc03b65cae", "station-5b51eac5a29c"],
+    ["daejeon", "station-ee3cc9d04ee7", "station-b35cc28f2c19"],
+    ["gwangju", "station-45d732c94df2", "station-956d3c1b71cf"],
+  ];
+  return stations.map(([regionId, originStationId, destinationStationId], index) => ({
+    regionId,
+    requestId: `01K2H7Q5B7E3T19N8J4M6P0R2${"VWXYZ"[index]}`,
+    originStationId,
+    destinationStationId,
+    mobilityProfile: "STANDARD",
+    constraintMode: "NONE",
+    maxTransfers: 3,
+    alternativeCount: 3,
+  }));
+}
 
 test("tuple, command, host, and secret failures make no network request", async () => {
   const fixture = await createFixture();
