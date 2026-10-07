@@ -76,6 +76,7 @@ function createHost({
   existingContainerId = "1".repeat(64), recreateOnUp = true, restartFixesLive = true, promtoolFails = null,
   liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
+  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }],
 } = {}) {
   const calls = [];
   const state = { containerId: existingContainerId, live: liveBefore, generation: 0 };
@@ -135,7 +136,7 @@ function createHost({
         stdout: JSON.stringify([{
           Id: state.containerId, Name: "/easysubway-prometheus", Config: { Image: IMAGE },
           State: { Running: true, Health: { Status: health } },
-          Mounts: [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }],
+          Mounts: mounts,
         }]),
         stderr: "",
       };
@@ -459,6 +460,27 @@ test("데이터 volume 정체가 바뀌면 실패한다", async () => {
     await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VOLUME/u);
   } finally {
     box.cleanup();
+  }
+});
+
+test("컨테이너의 /prometheus 마운트가 지정 volume이 아니면 compose up 전에 E_OBS_DEPLOY_VOLUME으로 실패한다", async () => {
+  // 가드는 Type과 Name 둘 중 하나만 틀려도 막아야 한다(변이: || -> &&가 살아남지 않아야 한다).
+  const cases = [
+    ["다른 이름의 named volume", [{ Type: "volume", Name: "easysubway_other-data", Destination: "/prometheus" }]],
+    ["volume과 같은 이름이지만 bind mount", [{ Type: "bind", Name: "easysubway_prometheus-data", Source: "/srv/prometheus", Destination: "/prometheus" }]],
+    ["이름 없는 bind mount", [{ Type: "bind", Source: "/srv/prometheus", Destination: "/prometheus" }]],
+    ["/prometheus 마운트 없음", [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/other" }]],
+  ];
+  for (const [label, mounts] of cases) {
+    const box = sandbox();
+    try {
+      const host = createHost({ mounts });
+      await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VOLUME/u, label);
+      assert.equal(verbs(host).includes("compose:up"), false, label);
+      assert.equal(existsSync(join(box.observability, "current")), false, label);
+    } finally {
+      box.cleanup();
+    }
   }
 });
 
