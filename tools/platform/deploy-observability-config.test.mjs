@@ -622,6 +622,37 @@ test("컨테이너의 /prometheus 마운트가 지정 volume이 아니면 compos
   }
 });
 
+test("DEPLOY 시작 때 살아 있는 프로세스가 없는 오래된 .staging-*·.*.tmp-*를 정리하고 실행 중인 것과 무관한 항목은 건드리지 않는다", async () => {
+  const box = sandbox();
+  try {
+    const releases = join(box.observability, "releases");
+    mkdirSync(releases, { recursive: true });
+    const deadStaging = join(releases, ".staging-cccccccccccc-424242");
+    const liveStaging = join(releases, `.staging-dddddddddddd-${process.pid}`);
+    const unrelated = join(releases, ".staging-not-ours");
+    for (const dir of [deadStaging, liveStaging, unrelated]) {
+      mkdirSync(join(dir, "prometheus"), { recursive: true });
+      writeFileSync(join(dir, "prometheus", "prometheus.yml"), "partial\n");
+    }
+    symlinkSync("releases/zzz", join(box.observability, ".current.tmp-424242"));
+    symlinkSync("releases/zzz", join(box.observability, ".previous.tmp-424242"));
+    symlinkSync("releases/zzz", join(box.observability, `.current.tmp-${process.pid}`));
+    symlinkSync("releases/zzz", join(box.observability, ".notours.tmp-424242"));
+    const host = createHost();
+    await deployObservabilityConfig(base(box, host, { mode: "DEPLOY", isProcessAlive: (pid) => pid === process.pid }));
+    assert.equal(existsSync(deadStaging), false, "죽은 pid의 staging은 지운다");
+    assert.equal(existsSync(join(box.observability, ".current.tmp-424242")), false);
+    assert.equal(existsSync(join(box.observability, ".previous.tmp-424242")), false);
+    assert.equal(existsSync(liveStaging), true, "살아 있는 pid의 staging은 건드리지 않는다");
+    assert.equal(lstatSync(join(box.observability, `.current.tmp-${process.pid}`)).isSymbolicLink(), true);
+    assert.equal(existsSync(unrelated), true, "이름 형식이 다른 항목은 건드리지 않는다");
+    assert.equal(lstatSync(join(box.observability, ".notours.tmp-424242")).isSymbolicLink(), true);
+    assert.equal(existsSync(join(releases, COMMIT)), true);
+  } finally {
+    box.cleanup();
+  }
+});
+
 test("명령 목록은 허용된 동사만 쓰고 down·rm(운영)·volume 삭제·remove-orphans·force-recreate를 쓰지 않는다", async () => {
   const box = sandbox();
   try {
