@@ -42,7 +42,7 @@ function walk(root, base = root) {
 }
 
 // 라이브·reference Prometheus가 돌려주는 응답을 만든다. 같은 설정이면 같은 값을 돌려준다.
-const snapshot = ({ jobs = ["easysubway-backend", "backend_app_metrics", "docker_runtime_probe", "public_edge_probe"], revision = "new", flags = {} } = {}) => ({
+const snapshot = ({ jobs = ["easysubway-backend", "backend_app_metrics", "docker_runtime_probe", "public_edge_probe"], revision = "new", flags = {}, targets = null, ruleHealth = "ok" } = {}) => ({
   version: "3.15.0",
   flags: {
     "config.file": "/etc/prometheus/prometheus.yml",
@@ -57,6 +57,8 @@ const snapshot = ({ jobs = ["easysubway-backend", "backend_app_metrics", "docker
   rules: [{ name: "g", file: "/etc/prometheus/alerts.yml", interval: 15, rules: [{ name: `Alert-${revision}`, type: "alerting", query: "up < 1", duration: 60, labels: {}, annotations: {} }] }],
   reloadSuccessful: "1",
   lowestTimestamp: "1759000000000",
+  targets: targets ?? jobs.map((job) => ({ scrapePool: job, health: "up" })),
+  ruleHealth,
 });
 
 function httpBody(path, data) {
@@ -64,8 +66,9 @@ function httpBody(path, data) {
   if (path === "/api/v1/status/flags") return JSON.stringify({ status: "success", data: data.flags });
   if (path === "/api/v1/status/config") return JSON.stringify({ status: "success", data: { yaml: data.yaml } });
   if (path === "/api/v1/rules") {
-    return JSON.stringify({ status: "success", data: { groups: data.rules.map((group) => ({ ...group, rules: group.rules.map((rule) => ({ ...rule, health: "ok", lastEvaluation: "2026-10-08T00:00:00Z", evaluationTime: 0.001, state: "inactive" })) })) } });
+    return JSON.stringify({ status: "success", data: { groups: data.rules.map((group) => ({ ...group, rules: group.rules.map((rule) => ({ ...rule, health: data.ruleHealth ?? "ok", lastEvaluation: "2026-10-08T00:00:00Z", evaluationTime: 0.001, state: "inactive" })) })) } });
   }
+  if (path === "/api/v1/targets?state=active") return JSON.stringify({ status: "success", data: { activeTargets: data.targets.map((target) => ({ ...target, scrapeUrl: "http://x" })), droppedTargets: [] } });
   if (path === "/metrics") return `# HELP prometheus_config_last_reload_successful x\n# TYPE prometheus_config_last_reload_successful gauge\nprometheus_config_last_reload_successful ${data.reloadSuccessful}\nprometheus_tsdb_lowest_timestamp ${data.lowestTimestamp}\n`;
   if (path === "/-/ready") return "Prometheus Server is Ready.\n";
   throw new Error(`unexpected prometheus path ${path}`);
@@ -76,10 +79,10 @@ function createHost({
   existingContainerId = "1".repeat(64), recreateOnUp = true, restartFixesLive = true, promtoolFails = null,
   liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
-  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null,
+  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null,
 } = {}) {
   const calls = [];
-  const state = { containerId: existingContainerId, live: liveBefore, generation: 0 };
+  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
     { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
@@ -103,6 +106,8 @@ function createHost({
           state.generation += 1;
           state.containerId = String(8 + state.generation).repeat(64);
           state.live = liveAfter ?? expected;
+          if (networksAfterUp) state.networks = networksAfterUp;
+          if (extraHostsAfterUp) state.extraHosts = extraHostsAfterUp;
         }
         return { stdout: "", stderr: "" };
       }
@@ -126,8 +131,12 @@ function createHost({
       const [, target, tool, , url] = args;
       assert.equal(tool, "wget");
       const path = url.replace("http://127.0.0.1:9090", "");
-      if (target === reference) return { stdout: httpBody(path, expected), stderr: "" };
+      if (target === reference) return { stdout: httpBody(path, { ...expected, targets: expected.targets.map((item) => ({ ...item, health: "down" })) }), stderr: "" };
       assert.equal(target, "easysubway-prometheus");
+      if ((path.startsWith("/api/v1/targets") || path === "/api/v1/rules") && state.generation > 0 && state.warmup < liveWarmupReads) {
+        if (path === "/api/v1/rules") state.warmup += 1;
+        return { stdout: httpBody(path, { ...state.live, targets: state.live.targets.map((item) => ({ ...item, health: "unknown" })), ruleHealth: "unknown" }), stderr: "" };
+      }
       return { stdout: httpBody(path, state.live), stderr: "" };
     }
     if (verb === "restart") {
@@ -141,6 +150,8 @@ function createHost({
         Id: state.containerId, Name: "/easysubway-prometheus", Image: "sha256:prometheus", Config: { Image: IMAGE },
         State: { Running: true, StartedAt: "2026-10-08T00:00:00Z", Health: { Status: health } },
         Mounts: mounts,
+        HostConfig: { ExtraHosts: state.extraHosts },
+        NetworkSettings: { Networks: Object.fromEntries(state.networks.map((name) => [name, {}])) },
       };
       if (targets.length === 1 && targets[0] === "easysubway-prometheus") {
         if (containerMissing) throw new Error("No such object: easysubway-prometheus");
@@ -298,7 +309,7 @@ test("receipt는 닫힌 필드 집합이고 compose.env 값이나 secret이 들�
     assert.equal(result.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RECEIPT_V1");
     assert.equal(result.composeProject, "easysubway");
     assert.deepEqual(Object.keys(result.container), ["name", "idBefore", "idAfter", "action"]);
-    assert.deepEqual(Object.keys(result.verification), ["version", "flags", "statusConfigSha256", "expectedStatusConfigSha256", "rulesSha256", "expectedRulesSha256", "jobs", "absentJobs", "configReloadSuccessful", "untouchedContainers", "volume"]);
+    assert.deepEqual(Object.keys(result.verification), ["version", "flags", "statusConfigSha256", "expectedStatusConfigSha256", "rulesSha256", "expectedRulesSha256", "jobs", "absentJobs", "targets", "ruleHealth", "configReloadSuccessful", "untouchedContainers", "volume", "network"]);
   } finally {
     box.cleanup();
   }
@@ -455,6 +466,55 @@ test("제거된 대상(back_worker)이 라이브에 남아 있으면 실패한�
     const live = snapshot({ jobs: ["easysubway-backend", "backend_app_metrics", "docker_runtime_probe", "public_edge_probe", "back_worker"] });
     const host = createHost({ liveAfter: live });
     await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY.*back_worker/su);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("복원 가능한 상태에서 라이브 scrape·규칙·네트워크가 깨지면 모든 경우 복원하고 실패한다", async () => {
+  const jobs = ["easysubway-backend", "backend_app_metrics", "docker_runtime_probe", "public_edge_probe"];
+  const cases = [
+    ["target down", { liveAfter: snapshot({ targets: jobs.map((job) => ({ scrapePool: job, health: job === "backend_app_metrics" ? "down" : "up" })) }) }, /E_OBS_DEPLOY_VERIFY.*backend_app_metrics/su],
+    ["job의 target 없음", { liveAfter: snapshot({ targets: jobs.slice(0, 3).map((job) => ({ scrapePool: job, health: "up" })) }) }, /E_OBS_DEPLOY_VERIFY.*public_edge_probe/su],
+    ["규칙 health err", { liveAfter: snapshot({ ruleHealth: "err" }) }, /E_OBS_DEPLOY_VERIFY.*rule/su],
+    ["네트워크 변경", { networksAfterUp: ["bridge"] }, /E_OBS_DEPLOY_VERIFY.*network/su],
+    ["extra_hosts 변경", { extraHostsAfterUp: [] }, /E_OBS_DEPLOY_VERIFY.*extra_hosts/su],
+  ];
+  for (const [label, options, pattern] of cases) {
+    const box = sandbox();
+    try {
+      seedPreviousRelease(box);
+      const host = createHost(options);
+      await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), pattern, label);
+      assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS), label);
+      assert.equal(existsSync(receiptPath(box)), false, label);
+      assert.equal(failureReceipt(box).restore, "RESTORED", label);
+    } finally {
+      box.cleanup();
+    }
+  }
+});
+
+test("첫 scrape·첫 규칙 평가를 기다린 뒤 모든 기대 job의 target이 up이고 규칙이 ok면 통과하고 receipt에 남긴다", async () => {
+  const box = sandbox();
+  try {
+    const host = createHost({ liveWarmupReads: 3 });
+    const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
+    assert.deepEqual(result.verification.targets, [
+      { job: "backend_app_metrics", health: "up" }, { job: "docker_runtime_probe", health: "up" }, { job: "easysubway-backend", health: "up" }, { job: "public_edge_probe", health: "up" },
+    ]);
+    assert.deepEqual(result.verification.ruleHealth, { total: 1, ok: 1 });
+    assert.deepEqual(result.verification.network, { networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] });
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("scrape·규칙이 제한 시간 안에 정상화되지 않으면 실패한다", async () => {
+  const box = sandbox();
+  try {
+    const host = createHost({ liveWarmupReads: 1000 });
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY/u);
   } finally {
     box.cleanup();
   }
