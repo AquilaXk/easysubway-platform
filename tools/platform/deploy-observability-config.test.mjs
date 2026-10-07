@@ -636,7 +636,7 @@ test("DEPLOY 시작 때 살아 있는 프로세스가 없는 오래된 .staging-
     }
     symlinkSync("releases/zzz", join(box.observability, ".current.tmp-424242"));
     symlinkSync("releases/zzz", join(box.observability, ".previous.tmp-424242"));
-    symlinkSync("releases/zzz", join(box.observability, `.current.tmp-${process.pid}`));
+    symlinkSync("releases/zzz", join(box.observability, `.previous.tmp-${process.pid}`));
     symlinkSync("releases/zzz", join(box.observability, ".notours.tmp-424242"));
     const host = createHost();
     await deployObservabilityConfig(base(box, host, { mode: "DEPLOY", isProcessAlive: (pid) => pid === process.pid }));
@@ -644,7 +644,7 @@ test("DEPLOY 시작 때 살아 있는 프로세스가 없는 오래된 .staging-
     assert.equal(existsSync(join(box.observability, ".current.tmp-424242")), false);
     assert.equal(existsSync(join(box.observability, ".previous.tmp-424242")), false);
     assert.equal(existsSync(liveStaging), true, "살아 있는 pid의 staging은 건드리지 않는다");
-    assert.equal(lstatSync(join(box.observability, `.current.tmp-${process.pid}`)).isSymbolicLink(), true);
+    assert.equal(lstatSync(join(box.observability, `.previous.tmp-${process.pid}`)).isSymbolicLink(), true);
     assert.equal(existsSync(unrelated), true, "이름 형식이 다른 항목은 건드리지 않는다");
     assert.equal(lstatSync(join(box.observability, ".notours.tmp-424242")).isSymbolicLink(), true);
     assert.equal(existsSync(join(releases, COMMIT)), true);
