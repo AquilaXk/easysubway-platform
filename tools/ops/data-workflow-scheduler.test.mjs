@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { createAppJwt, dueEntries, runScheduler, validateScheduleConfig } from "./data-workflow-scheduler.mjs";
@@ -207,4 +211,24 @@ test("설정은 닫힌 형식이고 main의 data 레포·actions write만 허용
     { ...config, workflows: [{ ...config.workflows[0], unknown: true }] },
   ];
   for (const value of bad) assert.throws(() => validateScheduleConfig(value), /SCHEDULER_CONFIG/u, JSON.stringify(value).slice(0, 120));
+});
+
+test("ConfigMap 볼륨처럼 심볼릭 링크로 마운트돼도 진입점이 main을 실행하고 실패하면 비0으로 끝난다", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "scheduler-mount-"));
+  try {
+    // kubelet 레이아웃: <mount>/..data -> <mount>/..<timestamp>, <mount>/scheduler.mjs -> ..data/scheduler.mjs
+    const timestamp = path.join(directory, "..2026_10_07_00_00_00.000000000");
+    mkdirSync(timestamp);
+    writeFileSync(path.join(timestamp, "scheduler.mjs"), readFileSync(new URL("./data-workflow-scheduler.mjs", import.meta.url)));
+    symlinkSync(path.basename(timestamp), path.join(directory, "..data"));
+    symlinkSync(path.join("..data", "scheduler.mjs"), path.join(directory, "scheduler.mjs"));
+    const result = spawnSync(process.execPath, [path.join(directory, "scheduler.mjs")], {
+      env: { PATH: process.env.PATH, SCHEDULER_CONFIG: path.join(directory, "missing-schedule.json"), SCHEDULER_SECRET_DIR: path.join(directory, "missing-secrets") },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1, `main이 실행되지 않았다: ${result.stderr}`);
+    assert.match(result.stderr, /ENOENT/u);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -8,6 +8,7 @@
 // 이전 결과로 대신하거나 재시도로 덮지 않는다. GitHub `schedule`은 data 레포에 백업으로 남아 있다.
 // token·JWT·private key는 로그와 오류에 남기지 않는다.
 import { createPrivateKey, createSign } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -200,7 +201,9 @@ export async function main(env = process.env) {
   return runScheduler({ config, clientId, privateKeyPem });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// ConfigMap 볼륨은 심볼릭 링크라 node가 모듈 URL을 실제 경로로 푼다. argv[1]도 실제 경로로 풀어 비교하지 않으면
+// 진입 조건이 거짓이 되어 main이 돌지 않고 Job이 아무것도 하지 않은 채 성공한다.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     await main();
   } catch (error) {
