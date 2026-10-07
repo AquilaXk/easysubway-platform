@@ -80,10 +80,10 @@ function createHost({
   existingContainerId = "1".repeat(64), recreateOnUp = true, restartFixesLive = true, promtoolFails = null,
   liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
-  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale",
+  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale", liveAfterRestore = null,
 } = {}) {
   const calls = [];
-  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, mounted: mountedBefore, dirs: {}, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
+  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, mounted: mountedBefore, dirs: {}, upCount: 0, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
     { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
@@ -102,14 +102,15 @@ function createHost({
       if (args.includes("config")) return { stdout: JSON.stringify({ services: { prometheus: { image: IMAGE, command: composeCommand } } }), stderr: "" };
       if (args.includes("up")) {
         if (upFails) throw new Error("compose up failed");
-        if (changeOthersOnUp) changeOthersOnUp(others);
+        state.upCount += 1;
+        if (changeOthersOnUp && state.upCount === 1) changeOthersOnUp(others);
         if (recreateOnUp) {
           state.generation += 1;
           state.containerId = String(8 + state.generation).repeat(64);
           state.mounted = "current";
-          state.live = liveAfter ?? expected;
-          if (networksAfterUp) state.networks = networksAfterUp;
-          if (extraHostsAfterUp) state.extraHosts = extraHostsAfterUp;
+          state.live = state.upCount >= 2 ? (liveAfterRestore ?? expected) : (liveAfter ?? expected);
+          if (networksAfterUp && state.upCount === 1) state.networks = networksAfterUp;
+          if (extraHostsAfterUp && state.upCount === 1) state.extraHosts = extraHostsAfterUp;
         }
         return { stdout: "", stderr: "" };
       }
@@ -149,7 +150,8 @@ function createHost({
     }
     if (verb === "restart") {
       assert.equal(args[1], "easysubway-prometheus");
-      if (restartFixesLive) state.live = liveAfter ?? expected;
+      if (state.upCount >= 2) state.live = liveAfterRestore ?? expected;
+      else if (restartFixesLive) state.live = liveAfter ?? expected;
       state.mounted = "current";
       return { stdout: "", stderr: "" };
     }
@@ -761,6 +763,54 @@ test("중단된 뒤 같은 커밋을 재시도하면 컨테이너가 어떤 상�
     assert.equal(result.container.action, "restarted");
     assert.equal(readlinkSync(join(box.observability, "current")), join("releases", COMMIT));
     assert.equal(result.previousCommit, PREVIOUS);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("복원도 직전 release의 reference와 라이브를 대조하고, 대조에 실패하면 복원 성공이라고 하지 않는다", async () => {
+  const ok = sandbox();
+  try {
+    seedPreviousRelease(ok);
+    const host = createHost({ liveAfter: snapshot({ revision: "old" }) });
+    await assert.rejects(deployObservabilityConfig(base(ok, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY.*restored previous release/su);
+    const references = host.calls.filter((call) => call.args[0] === "run" && !call.args.includes("promtool"));
+    assert.equal(references.length, 2, "새 release와 직전 release 각각의 reference");
+    const mounts = references.map((call) => call.args[call.args.indexOf("-v") + 1]);
+    assert.ok(mounts[1].startsWith(join(ok.observability, "releases", PREVIOUS, "prometheus")), mounts[1]);
+    assert.equal(failureReceipt(ok).restore, "RESTORED");
+  } finally {
+    ok.cleanup();
+  }
+  const bad = sandbox();
+  try {
+    seedPreviousRelease(bad);
+    const host = createHost({ liveAfter: snapshot({ revision: "old" }), liveAfterRestore: snapshot({ revision: "unexpected" }) });
+    await assert.rejects(deployObservabilityConfig(base(bad, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_RESTORE.*restore verification/su);
+    const failure = failureReceipt(bad);
+    assert.equal(failure.restore, "FAILED");
+    assert.equal(failure.error.code, "E_OBS_DEPLOY_RESTORE");
+  } finally {
+    bad.cleanup();
+  }
+});
+
+test("첫 배포 수동 rollback 런북은 추적 파일이고 오류 메시지가 그 파일을 가리킨다", async () => {
+  const runbookPath = "contracts/release/platform-observability-config-deploy-runbook.json";
+  const runbook = JSON.parse(readFileSync(join(repoRoot, runbookPath), "utf8"));
+  assert.equal(runbook.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RUNBOOK_V1");
+  const first = runbook.rollback.firstRolloutRollback;
+  const commands = first.steps.map((step) => step.run).join("\n");
+  assert.match(commands, /cd \/opt\/easysubway\/repository\/infra/u, "구 hub 체크아웃의 compose를 쓴다");
+  assert.match(commands, /docker compose -p easysubway --env-file \/opt\/easysubway\/shared\/current-env\/compose\.env --profile observability up -d --no-deps --no-build --pull never prometheus/u);
+  assert.match(first.preconditions.join("\n"), /hub 체크아웃.*보존/u);
+  assert.match(runbook.backup.steps.map((step) => step.run).join("\n"), /docker stop easysubway-prometheus[\s\S]*tar [\s\S]*easysubway_prometheus-data[\s\S]*docker start easysubway-prometheus/u);
+  for (const forbidden of ["docker compose down", "--remove-orphans", "docker volume rm", "rm -rf /opt/easysubway/repository"]) assert.ok(runbook.neverRun.includes(forbidden), forbidden);
+  for (const section of ["preview", "deploy", "verify", "interruptedDeploy"]) assert.ok(runbook[section], section);
+  const box = sandbox();
+  try {
+    const host = createHost({ liveAfter: snapshot({ revision: "old" }) });
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), (error) => error.message.includes(runbookPath) && error.message.includes("firstRolloutRollback"));
   } finally {
     box.cleanup();
   }
