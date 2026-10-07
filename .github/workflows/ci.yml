@@ -89,6 +89,9 @@ jobs:
           node --test tools/ops/post-deploy-smoke.test.mjs
           node --test tools/ops/trigger-journey-deploy.test.mjs
           node --test tools/platform/nginx-host-rate-limit.test.mjs
+          node --test tools/ops/data-workflow-scheduler.test.mjs
+          node --test tools/platform/data-workflow-scheduler-contract.test.mjs
+          node --test tools/platform/deploy-data-workflow-scheduler.test.mjs
 
       - name: Validate Compose configurations
         env:

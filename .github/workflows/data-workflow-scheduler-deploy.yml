@@ -1,0 +1,65 @@
+name: Data Workflow Scheduler Deploy
+
+# AquilaXk/easysubway-platform#237: data 레포 정기 workflow를 깨우는 OCI k3s CronJob 스케줄러를 배포한다.
+# PREVIEW는 GitHub-hosted runner에서 객체만 렌더한다(secret 없음). DEPLOY는 승인 환경(production-deploy)의
+# self-hosted runner에서만 돌고, GitHub App secret은 DEPLOY 단계의 env로만 받는다. PR 병합만으로 배포되지 않는다.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Closed execution mode"
+        required: true
+        type: choice
+        options:
+          - PREVIEW
+          - DEPLOY
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: data-workflow-scheduler-production
+  cancel-in-progress: false
+
+jobs:
+  scheduler:
+    name: ${{ inputs.mode == 'DEPLOY' && 'Deploy data workflow scheduler on K3s' || 'Render data workflow scheduler' }}
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    environment: production-deploy
+    runs-on: ${{ fromJSON(inputs.mode == 'DEPLOY' && '["self-hosted","Linux","ARM64","easysubway-production"]' || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Verify production-deploy admission
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
+            --repository "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${RUNNER_TEMP}/admission-receipt.json"
+
+      - name: Render or deploy the scheduler
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          EASYSUBWAY_DISPATCH_APP_CLIENT_ID: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DISPATCH_APP_CLIENT_ID || '' }}
+          EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY || '' }}
+        run: |
+          set -euo pipefail
+          node tools/platform/deploy-data-workflow-scheduler.mjs --mode "${MODE}" > "${RUNNER_TEMP}/scheduler-result.json"
+          cat "${RUNNER_TEMP}/scheduler-result.json" | tee -a "${GITHUB_STEP_SUMMARY}"
