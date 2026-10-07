@@ -221,3 +221,488 @@ tests:
               title_ko: "백엔드 5xx 버짓 소진 티켓"
               impact_ko: "장기 창에서 오류 예산이 소진되고 있어 추적·개선 작업이 필요합니다."
               action_ko: "Grafana '오류 조회' 대시보드에서 5xx 비율·버짓 소진과 ERROR 로그를 확인한 뒤, /admin/api/errors로 동일 구간 오류를 대조 확인하세요."
+
+
+
+
+  # Platform Issue #235 / backend#494: Journey V3 검색 지연 SLO burn-rate 경보. 합성 시계열로 모드별 SLO 임계 le 버킷
+  # (depart_at 0.025, arrive_by·last_connection 0.25, depart_between 0.5), ok|no_route만 세는 SLI, multi-window,
+  # 트래픽 가드, 무트래픽, 지표 누락을 검증한다. 분당 60건 = 증가분 60/min.
+  # 분당 60건 중 30%가 25 ms 초과 = burn 30x(> 14.4x)가 1h·5m 두 창에서 모두 지속되면 mode 라벨별로 발화한다.
+  - interval: 1m
+    name: BackendJourneyLatencyBurnRateCritical fires when depart_at is slower than 25 ms on both windows
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0+42x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.25"}'
+        values: '0+60x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts:
+          - exp_labels:
+              mode: depart_at
+              severity: critical
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency burn rate exceeds critical multi-window threshold
+              description: "depart_at search latency burn rate is above 14.4x the 0.01 error budget (share of ok/no_route searches slower than the mode SLO threshold) on both the 1h and 5m windows, with traffic above 1 req/min on the 1h window. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 버짓 소진 긴급"
+              impact_ko: "짧은 시간에 지연 SLO(99%) 오류 예산이 빠르게 소진되고 있어 해당 모드의 경로 검색 응답이 느려졌을 수 있습니다."
+              action_ko: "Grafana 'Journey 검색 지연 SLO' 대시보드에서 해당 모드의 지연 분포와 요청량을 확인하고, 최근 backend 배포·번들 활성화와 엔진 자원 포화 여부를 점검하세요."
+
+  # 99% 이내(불량 1% = burn 1x 미만)면 어느 단계도 발화하지 않는다.
+  - interval: 1m
+    name: healthy latency stays silent on every tier
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0+59.4x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateWarning
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateTicket
+        exp_alerts: []
+
+  # 최근 10분만 전부 느리면 5m 창은 초과하지만 1h 창 불량 비율은 약 8%(= 5/60)로 14.4%에 못 미쳐 발화하지 않는다.
+  - interval: 1m
+    name: short spike alone does not fire Critical (only the 5m window exceeds)
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0+60x60 3600+0x10'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts: []
+
+  # 전부 느려도 분당 1건 이하(rate*60 <= 1)면 트래픽 가드로 발화하지 않는다.
+  - interval: 1m
+    name: BackendJourneyLatencyBurnRateCritical stays silent under the traffic guard
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0+0.5x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts: []
+
+  # 시계열이 0건으로 존재하고 증가율이 0이면 0/0=NaN이라 burn-rate도, 누락 경보도 발화하지 않는다(무트래픽은 장애가 아니다).
+  - interval: 1m
+    name: no traffic (zero rate, count 0) never fires any latency alert
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route",le="0.25"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+        values: '0x70'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+        values: '1x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateWarning
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateTicket
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts: []
+
+  # 과거에 느린 요청이 많았더라도 지금 증가분이 없으면(rate 0) 발화하지 않는다.
+  - interval: 1m
+    name: idle after historical traffic (counters flat, rate 0) stays silent
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+        values: '5000x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+        values: '100x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateWarning
+        exp_alerts: []
+
+  # arrive_by는 0.25 버킷이 30% 모자라 발화한다. depart_between은 0.025·0.25 버킷이 모자라도 SLO 경계 0.5에서 99% 이상이면 조용하다(한 단계 아래 버킷을 대체로 쓰지 않는다).
+  - interval: 1m
+    name: arrive_by uses the 0.25 boundary while depart_between uses 0.5
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.025"}'
+        values: '0+10x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+        values: '0+42x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.025"}'
+        values: '0+20x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.25"}'
+        values: '0+30x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+        values: '0+59.5x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts:
+          - exp_labels:
+              mode: arrive_by
+              severity: critical
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency burn rate exceeds critical multi-window threshold
+              description: "arrive_by search latency burn rate is above 14.4x the 0.01 error budget (share of ok/no_route searches slower than the mode SLO threshold) on both the 1h and 5m windows, with traffic above 1 req/min on the 1h window. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 버짓 소진 긴급"
+              impact_ko: "짧은 시간에 지연 SLO(99%) 오류 예산이 빠르게 소진되고 있어 해당 모드의 경로 검색 응답이 느려졌을 수 있습니다."
+              action_ko: "Grafana 'Journey 검색 지연 SLO' 대시보드에서 해당 모드의 지연 분포와 요청량을 확인하고, 최근 backend 배포·번들 활성화와 엔진 자원 포화 여부를 점검하세요."
+
+  # 느린 error·fail_closed 요청은 지연 SLI 분모에 넣지 않는다(가용성은 5xx 경보 몫).
+  - interval: 1m
+    name: error and fail_closed outcomes are excluded from the latency SLI
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0+59.4x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="error"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="error",le="0.025"}'
+        values: '0x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="fail_closed"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="fail_closed",le="0.025"}'
+        values: '0x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts: []
+
+  # 경로 없음 응답도 사용자가 기다린 검색이라 SLI에 포함한다. ok가 100% 빨라도 no_route가 전부 느리면 불량 50%다.
+  - interval: 1m
+    name: slow no_route searches count against the latency SLI
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+        values: '0+60x70'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+        values: '0x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: BackendJourneyLatencyBurnRateCritical
+        exp_alerts:
+          - exp_labels:
+              mode: depart_at
+              severity: critical
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency burn rate exceeds critical multi-window threshold
+              description: "depart_at search latency burn rate is above 14.4x the 0.01 error budget (share of ok/no_route searches slower than the mode SLO threshold) on both the 1h and 5m windows, with traffic above 1 req/min on the 1h window. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 버짓 소진 긴급"
+              impact_ko: "짧은 시간에 지연 SLO(99%) 오류 예산이 빠르게 소진되고 있어 해당 모드의 경로 검색 응답이 느려졌을 수 있습니다."
+              action_ko: "Grafana 'Journey 검색 지연 SLO' 대시보드에서 해당 모드의 지연 분포와 요청량을 확인하고, 최근 backend 배포·번들 활성화와 엔진 자원 포화 여부를 점검하세요."
+
+  # interval 5m x 85표본으로 6h/30m 창을 채운다(분당 60건, 불량 30% = 6x 초과).
+  - interval: 5m
+    name: BackendJourneyLatencyBurnRateWarning fires on the 6h and 30m windows
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+        values: '0+300x85'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+        values: '0+210x85'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: BackendJourneyLatencyBurnRateWarning
+        exp_alerts:
+          - exp_labels:
+              mode: last_connection
+              severity: warning
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency burn rate exceeds warning multi-window threshold
+              description: "last_connection search latency burn rate is above 6x the 0.01 error budget (share of ok/no_route searches slower than the mode SLO threshold) on both the 6h and 30m windows, with traffic above 1 req/min on the 6h window. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 버짓 소진 주의"
+              impact_ko: "중기 창에서 지연 오류 예산 소진이 계속되면 해당 모드의 지연 SLO(99%) 위반으로 이어질 수 있습니다."
+              action_ko: "Grafana 'Journey 검색 지연 SLO' 대시보드에서 해당 모드의 지연 분포와 요청량을 확인하고, 최근 backend 배포·번들 활성화와 엔진 자원 포화 여부를 점검하세요."
+
+  # interval 1h x 80표본으로 3d/6h 창을 채운다(분당 60건, 불량 약 16.7% = 1x 초과).
+  - interval: 1h
+    name: BackendJourneyLatencyBurnRateTicket fires on the 3d and 6h windows
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0+3600x80'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+        values: '0+3000x80'
+    alert_rule_test:
+      - eval_time: 75h
+        alertname: BackendJourneyLatencyBurnRateTicket
+        exp_alerts:
+          - exp_labels:
+              mode: depart_between
+              severity: info
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency burn rate exceeds ticket multi-window threshold
+              description: "depart_between search latency burn rate is above 1x the 0.01 error budget (share of ok/no_route searches slower than the mode SLO threshold) on both the 3d and 6h windows, with traffic above 1 req/min on the 3d window. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 버짓 소진 티켓"
+              impact_ko: "장기 창에서 지연 오류 예산이 소진되고 있어 추적·개선 작업이 필요합니다."
+              action_ko: "Grafana 'Journey 검색 지연 SLO' 대시보드에서 해당 모드의 지연 분포와 요청량을 확인하고, 최근 backend 배포·번들 활성화와 엔진 자원 포화 여부를 점검하세요."
+
+  # 불량 0.5%는 예산 1% 이내라 Ticket도 발화하지 않는다.
+  - interval: 1h
+    name: BackendJourneyLatencyBurnRateTicket stays silent within the budget
+    input_series:
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0+3600x80'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+        values: '0+3582x80'
+    alert_rule_test:
+      - eval_time: 75h
+        alertname: BackendJourneyLatencyBurnRateTicket
+        exp_alerts: []
+
+  # scrape는 정상(up=1)인데 지연 시계열이 아예 없으면 burn-rate 경보는 식이 비어 조용하므로 누락 경보가 명시적으로 발화한다.
+  - interval: 1m
+    name: missing SLI series with a healthy scrape fires the missing-series alert
+    input_series:
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency SLI series or SLO bucket boundary is missing
+              description: "backend_app_metrics is not scrape-down, but at least one of the 16 histogram series that the journey latency SLO reads (modes x ok/no_route: 8 buckets at the SLO le boundary and 8 count series) is absent, so the latency burn-rate alerts cannot evaluate. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 지표 누락"
+              impact_ko: "지연 SLO를 계산할 시계열이나 임계 버킷 경계가 없어 경로 검색 지연 경보가 평가되지 않습니다."
+              action_ko: "backend가 /actuator/prometheus에 easysubway_journey_search_duration_seconds 히스토그램(mode·outcome 태그, SLO 버킷 0.025·0.25·0.5)을 노출하는지 확인하고, backend 버전과 platform 경보의 버킷 경계가 같은지 대조하세요."
+
+  # depart_between ok의 SLO 경계(0.5) 버킷 하나만 없어도 발화한다. 다른 버킷으로 대체해 평가하지 않는다.
+  - interval: 1m
+    name: one missing SLO bucket boundary fires the missing-series alert
+    input_series:
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+        values: '1x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency SLI series or SLO bucket boundary is missing
+              description: "backend_app_metrics is not scrape-down, but at least one of the 16 histogram series that the journey latency SLO reads (modes x ok/no_route: 8 buckets at the SLO le boundary and 8 count series) is absent, so the latency burn-rate alerts cannot evaluate. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 지표 누락"
+              impact_ko: "지연 SLO를 계산할 시계열이나 임계 버킷 경계가 없어 경로 검색 지연 경보가 평가되지 않습니다."
+              action_ko: "backend가 /actuator/prometheus에 easysubway_journey_search_duration_seconds 히스토그램(mode·outcome 태그, SLO 버킷 0.025·0.25·0.5)을 노출하는지 확인하고, backend 버전과 platform 경보의 버킷 경계가 같은지 대조하세요."
+
+  # 한 outcome의 버킷만 빠지면 분자가 줄어 불량 비율이 부풀려지므로 count가 모두 있어도 누락으로 드러낸다.
+  - interval: 1m
+    name: a single missing outcome bucket fires even when every count series exists
+    input_series:
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+        values: '1x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency SLI series or SLO bucket boundary is missing
+              description: "backend_app_metrics is not scrape-down, but at least one of the 16 histogram series that the journey latency SLO reads (modes x ok/no_route: 8 buckets at the SLO le boundary and 8 count series) is absent, so the latency burn-rate alerts cannot evaluate. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 지표 누락"
+              impact_ko: "지연 SLO를 계산할 시계열이나 임계 버킷 경계가 없어 경로 검색 지연 경보가 평가되지 않습니다."
+              action_ko: "backend가 /actuator/prometheus에 easysubway_journey_search_duration_seconds 히스토그램(mode·outcome 태그, SLO 버킷 0.025·0.25·0.5)을 노출하는지 확인하고, backend 버전과 platform 경보의 버킷 경계가 같은지 대조하세요."
+
+  # 분모와 트래픽 가드가 읽는 _count 하나만 빠져도(예: relabel drop) 모든 burn-rate 경보가 조용해지므로 누락으로 드러낸다.
+  - interval: 1m
+    name: a missing count series fires even when every SLO bucket exists
+    input_series:
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+        values: '1x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route",le="0.25"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+        values: '0x20'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency SLI series or SLO bucket boundary is missing
+              description: "backend_app_metrics is not scrape-down, but at least one of the 16 histogram series that the journey latency SLO reads (modes x ok/no_route: 8 buckets at the SLO le boundary and 8 count series) is absent, so the latency burn-rate alerts cannot evaluate. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 지표 누락"
+              impact_ko: "지연 SLO를 계산할 시계열이나 임계 버킷 경계가 없어 경로 검색 지연 경보가 평가되지 않습니다."
+              action_ko: "backend가 /actuator/prometheus에 easysubway_journey_search_duration_seconds 히스토그램(mode·outcome 태그, SLO 버킷 0.025·0.25·0.5)을 노출하는지 확인하고, backend 버전과 platform 경보의 버킷 경계가 같은지 대조하세요."
+
+  # scrape가 죽은 상태(up=0)는 AquilaBackendAppMetricsScrapeDown이 맡는다. 누락 경보는 중복 발화하지 않는다.
+  - interval: 1m
+    name: scrape down does not double-fire the missing-series alert
+    input_series:
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts: []
+
+  # up 시계열 자체가 없으면 scrape 상태를 알 수 없으므로 억제하지 않고 드러낸다(조용한 성공 금지).
+  - interval: 1m
+    name: no up series and no latency series still fires the missing-series alert
+    input_series:
+      - series: 'unrelated_metric{job="other"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackendJourneyLatencySliMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: aquila-journey-latency
+            exp_annotations:
+              summary: Journey search latency SLI series or SLO bucket boundary is missing
+              description: "backend_app_metrics is not scrape-down, but at least one of the 16 histogram series that the journey latency SLO reads (modes x ok/no_route: 8 buckets at the SLO le boundary and 8 count series) is absent, so the latency burn-rate alerts cannot evaluate. SLO thresholds: depart_at 25 ms, arrive_by and last_connection 250 ms, depart_between 500 ms."
+              title_ko: "경로 검색 지연 지표 누락"
+              impact_ko: "지연 SLO를 계산할 시계열이나 임계 버킷 경계가 없어 경로 검색 지연 경보가 평가되지 않습니다."
+              action_ko: "backend가 /actuator/prometheus에 easysubway_journey_search_duration_seconds 히스토그램(mode·outcome 태그, SLO 버킷 0.025·0.25·0.5)을 노출하는지 확인하고, backend 버전과 platform 경보의 버킷 경계가 같은지 대조하세요."
