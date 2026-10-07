@@ -30,6 +30,7 @@ const MODES = Object.freeze(["PREVIEW", "DEPLOY"]);
 const COMPOSE_PROJECT = "easysubway";
 const COMPOSE_PROFILE = "observability";
 const SERVICE = "prometheus";
+const RUNBOOK_PATH = "contracts/release/platform-observability-config-deploy-runbook.json";
 const CONTAINER = "easysubway-prometheus";
 const DATA_VOLUME = "easysubway_prometheus-data";
 const DATA_MOUNT = "/prometheus";
@@ -46,6 +47,8 @@ const COMPOSE_PARSE_ENV = Object.freeze({
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/+-]+$/u;
 const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const MOUNTED_FILES = Object.freeze(["prometheus.yml", "alerts.yml"]);
+const SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143, SIGINT: 130 });
 const WAIT_ATTEMPTS = 60;
 const VERIFY_ATTEMPTS = 20;
 
@@ -401,6 +404,39 @@ async function waitHealthy(docker, sleep) {
   });
 }
 
+/** 컨테이너가 실제로 마운트한 설정 파일의 sha256. symlink 이력이 아니라 컨테이너 안에서 읽은 내용이다. */
+async function readMountedDigests(docker) {
+  const paths = MOUNTED_FILES.map((file) => `/etc/prometheus/${file}`);
+  const { stdout } = await docker.docker(["exec", CONTAINER, "sha256sum", ...paths]);
+  return Object.fromEntries(stdout.split("\n").filter((line) => line.trim() !== "").map((line) => {
+    const [digest, path] = line.trim().split(/\s+/u);
+    return [path.split("/").at(-1), digest];
+  }));
+}
+
+const releaseDigests = (files) => Object.fromEntries(MOUNTED_FILES.map((file) => [file, files[`prometheus/${file}`]]));
+const mountMismatch = (mounted, wanted) => MOUNTED_FILES.filter((file) => mounted[file] !== wanted[file]);
+
+/**
+ * compose up 뒤 컨테이너가 release의 설정 파일을 실제로 읽고 있는지 확인하고, 아니면(재생성되지 않아 옛 inode를 잡고 있는 경우) 재시작한다.
+ * 재시작 판단은 current symlink의 과거 값이 아니라 컨테이너 내용이므로 중단 후 같은 커밋 재시도도 수렴한다.
+ */
+async function convergeContainer({ docker, sleep, root, composeEnvFile, wantedDigests, idBefore }) {
+  await docker.composeUp(join(root, "current"), composeEnvFile);
+  const containerId = (await docker.json(["inspect", "--type", "container", CONTAINER]))[0].Id;
+  await waitHealthy(docker, sleep);
+  let restarted = false;
+  let stale = mountMismatch(await readMountedDigests(docker), wantedDigests);
+  if (stale.length > 0) {
+    await docker.docker(["restart", CONTAINER]);
+    restarted = true;
+    await waitHealthy(docker, sleep);
+    stale = mountMismatch(await readMountedDigests(docker), wantedDigests);
+    if (stale.length > 0) fail("E_OBS_DEPLOY_VERIFY", `mounted config files differ from the release after restart (${stale.join(",")})`);
+  }
+  return { containerId, action: restarted ? "restarted" : containerId === idBefore ? "unchanged" : "recreated" };
+}
+
 async function verifyLive({ docker, sleep, expected, flagKeys }) {
   let problems = ["live prometheus was not readable"];
   let live;
@@ -458,7 +494,7 @@ function readOptions(options) {
 
 export async function deployObservabilityConfig(options = {}) {
   const { mode, commit, sourceRoot, deployRoot, composeEnvFile, runUrl, runId } = readOptions(options);
-  const { commandRunner = runCommand, sleep = defaultSleep, now = () => new Date(), stagingRoot, isProcessAlive = processIsAlive } = options;
+  const { commandRunner = runCommand, sleep = defaultSleep, now = () => new Date(), stagingRoot, isProcessAlive = processIsAlive, signalSource = process, exit = (code) => process.exit(code) } = options;
   if (typeof commandRunner !== "function") fail("E_OBS_DEPLOY_USAGE", "commandRunner must be a function");
   const docker = createDocker(commandRunner);
 
@@ -517,7 +553,7 @@ export async function deployObservabilityConfig(options = {}) {
       hostMutationCount: 0,
     };
   }
-  return applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result });
+  return applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result, signalSource, exit });
 }
 
 async function preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep }) {
@@ -530,10 +566,30 @@ async function preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFil
   return { tree, image, command, flagKeys: expectedFlagKeys(command), validation, expected };
 }
 
-async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result }) {
+/**
+ * 적용 도중 SIGTERM·SIGINT(workflow 취소·타임아웃)를 받으면, current를 마지막으로 검증된 직전 release로 되돌리고(가능할 때)
+ * 중단 receipt를 동기적으로 남긴 뒤 종료한다. 컨테이너 상태는 알 수 없으므로 같은 DEPLOY를 다시 실행해 수렴시키라고 알린다.
+ */
+function installInterruptGuard({ signalSource, exit, onInterrupt }) {
+  const state = { handled: false };
+  const listeners = Object.keys(SIGNAL_EXIT_CODES).map((signal) => [signal, () => {
+    if (state.handled) return;
+    state.handled = true;
+    try {
+      onInterrupt(signal);
+    } finally {
+      exit(SIGNAL_EXIT_CODES[signal]);
+    }
+  }]);
+  for (const [signal, listener] of listeners) signalSource.on(signal, listener);
+  return { state, dispose: () => { for (const [signal, listener] of listeners) signalSource.removeListener(signal, listener); } };
+}
+
+async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result, signalSource, exit }) {
   const releaseDir = join(root, "releases", commit);
   let installedNow = false;
   let switched = false;
+  let guard = null;
   try {
     const previousCommit = readManagedLink(root, "current");
     const before = await readHostState(docker);
@@ -553,30 +609,35 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       renameSync(stagingDir, releaseDir);
       installedNow = true;
     }
-    const configChanged = previousCommit === null || describePrometheusDirectory(root, previousCommit) !== preview.tree.directoryDigests.prometheus;
 
+    guard = installInterruptGuard({
+      signalSource,
+      exit,
+      onInterrupt: (signal) => {
+        const canRestore = previousCommit !== null && previousCommit !== commit;
+        if (canRestore) atomicSymlink(root, "current", join("releases", previousCommit));
+        writeFailureReceipt({
+          deployRoot, runId, runUrl, commit, previousCommit, now, outcome: "INTERRUPTED", configDigest: result.configDigest,
+          error: new DeployError("E_OBS_DEPLOY_INTERRUPTED", `${signal} received while applying; container state is unknown; rerun the same DEPLOY to converge (runbook: ${RUNBOOK_PATH})`),
+          restore: canRestore ? "LINK_RESTORED" : previousCommit === null ? "NO_MANAGED_PREVIOUS" : "SAME_COMMIT",
+        });
+      },
+    });
     if (previousCommit !== null && previousCommit !== commit) atomicSymlink(root, "previous", join("releases", previousCommit));
     atomicSymlink(root, "current", join("releases", commit));
     switched = true;
 
-    let action;
+    let converged;
     let verified;
-    let containerIdAfter;
     try {
-      await docker.composeUp(join(root, "current"), composeEnvFile);
-      containerIdAfter = (await docker.json(["inspect", "--type", "container", CONTAINER]))[0].Id;
-      action = containerIdAfter === before.containerId ? "unchanged" : "recreated";
-      if (action === "unchanged" && configChanged) {
-        await docker.docker(["restart", CONTAINER]);
-        action = "restarted";
-      }
-      await waitHealthy(docker, sleep);
+      converged = await convergeContainer({ docker, sleep, root, composeEnvFile, wantedDigests: releaseDigests(preview.tree.files), idBefore: before.containerId });
       verified = await verifyLive({ docker, sleep, expected: preview.expected, flagKeys: preview.flagKeys });
       assertScopeAndVolume(before, verified.hostAfter);
       assertRuntimeWiring(before, verified.hostAfter);
     } catch (error) {
+      if (guard.state.handled) throw error;
       const outcome = await restorePrevious({ docker, sleep, root, composeEnvFile, previousCommit, commit, error });
-      writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, error: outcome.error, restore: outcome.restore, configDigest: result.configDigest });
+      writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, outcome: "FAILED", error: outcome.error, restore: outcome.restore, configDigest: result.configDigest });
       throw outcome.error;
     }
 
@@ -596,7 +657,7 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       files: result.files,
       directoryDigests: result.directoryDigests,
       configDigest: result.configDigest,
-      container: { name: CONTAINER, idBefore: before.containerId, idAfter: containerIdAfter, action },
+      container: { name: CONTAINER, idBefore: before.containerId, idAfter: converged.containerId, action: converged.action },
       verification,
     };
     writeFileSync(join(receiptDirectory(deployRoot, commit, runId), "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
@@ -606,14 +667,8 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
     // current가 이 release로 넘어가기 전에 실패했다면 방금 설치한 release는 어디에서도 참조되지 않는다.
     if (installedNow && !switched) rmSync(releaseDir, { recursive: true, force: true });
     throw error;
-  }
-}
-
-function describePrometheusDirectory(root, commit) {
-  try {
-    return describeTree(join(root, "releases", commit)).directoryDigests.prometheus;
-  } catch {
-    return null;
+  } finally {
+    guard?.dispose();
   }
 }
 
@@ -697,11 +752,11 @@ function receiptDirectory(deployRoot, commit, runId) {
   return directory;
 }
 
-function writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, error, restore, configDigest }) {
+function writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, outcome, error, restore, configDigest }) {
   const receipt = {
     schemaVersion: "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V1",
     mode: "DEPLOY",
-    outcome: "FAILED",
+    outcome,
     commit,
     previousCommit,
     runUrl,
