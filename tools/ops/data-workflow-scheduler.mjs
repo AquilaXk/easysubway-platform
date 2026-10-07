@@ -136,7 +136,7 @@ async function call(fetchImpl, redact, method, path, { bearer, body } = {}) {
 }
 
 /**
- * 로그 한 줄은 JSON이다. 원격(GitHub) 응답 본문은 로그에 싣지 않는다: 상태 코드와 설정에서 온 id·workflow만 남긴다.
+ * 로그 한 줄은 JSON이다. 원격(GitHub) 응답에서 읽은 값(설치 id, 만료 시각, 메시지)은 로그에 싣지 않는다: 상태 코드와 설정에서 온 id·workflow만 남긴다.
  * 원격 메시지는 한 줄로 정제해 실패 오류 메시지에만 넣는다.
  */
 function createEmitter(log, now) {
@@ -157,7 +157,7 @@ async function withScopedInstallationToken({ config, clientId, privateKeyPem, no
   if (installation.status !== 200 || !Number.isSafeInteger(installation.json?.id) || installation.json.id < 1) {
     fail("SCHEDULER_INSTALLATION_LOOKUP_FAILED", `HTTP ${installation.status} ${installation.message}`.trim());
   }
-  emit("installation_resolved", { installationId: installation.json.id });
+  emit("installation_resolved");
 
   const minted = await call(fetchImpl, redact, "POST", accessTokensPath(installation.json.id), {
     bearer: jwt,
@@ -178,8 +178,7 @@ async function withScopedInstallationToken({ config, clientId, privateKeyPem, no
       || minted.json.repository_selection !== "selected" || repositories.length !== 1 || repositories[0] !== TARGET_REPOSITORY) {
       fail("SCHEDULER_TOKEN_SCOPE", "installation token is broader than actions:write on the data repository only");
     }
-    const expiresAt = new Date(minted.json.expires_at);
-    emit("token_minted", { expiresAt: Number.isNaN(expiresAt.getTime()) ? null : expiresAt.toISOString() });
+    emit("token_minted");
     return await useToken({ token, redact });
   } finally {
     const revoked = await call(fetchImpl, redact, "DELETE", "/installation/token", { bearer: token }).catch(() => ({ status: 0 }));
