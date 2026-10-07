@@ -9,7 +9,7 @@ import { createHash, createPrivateKey } from "node:crypto";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-import { createAppJwt } from "../ops/data-workflow-scheduler.mjs";
+import { createAppJwt, verifyAppAccess } from "../ops/data-workflow-scheduler.mjs";
 import { readSchedulerContract, readSchedulerScript, renderDataWorkflowScheduler } from "./render-data-workflow-scheduler.mjs";
 
 const NAMESPACE = "easysubway-journey";
@@ -61,7 +61,7 @@ function summarize(cronJob) {
   };
 }
 
-export async function deployDataWorkflowScheduler({ mode, env = process.env, commandRunner = runCommand } = {}) {
+export async function deployDataWorkflowScheduler({ mode, env = process.env, commandRunner = runCommand, verifyAccess = verifyAppAccess } = {}) {
   if (!MODES.includes(mode) || typeof commandRunner !== "function") fail("E_SCHEDULER_DEPLOY_USAGE", "mode must be PREVIEW or DEPLOY");
   const contract = readSchedulerContract();
   const scriptBytes = readSchedulerScript();
@@ -83,6 +83,12 @@ export async function deployDataWorkflowScheduler({ mode, env = process.env, com
 
   const secrets = readSecrets(env);
   const rendered = renderDataWorkflowScheduler({ contract, scriptBytes, secretIdentity: secretIdentity(secrets) });
+  // 클러스터를 건드리기 전에 App 자격이 실제로 동작하는지 확인한다(범위를 줄인 token 발급·검증·폐기, dispatch 없음).
+  try {
+    await verifyAccess({ config: JSON.parse(rendered.objects.configMap.data["schedule.json"]), clientId: secrets.clientId, privateKeyPem: secrets.privateKeyPem, log: () => {} });
+  } catch (error) {
+    fail("E_SCHEDULER_DEPLOY_APP_ACCESS", String(error?.message ?? "app access check failed").slice(0, 300));
+  }
   const redact = (text) => [secrets.clientId, secrets.privateKeyPem, ...secrets.privateKeyPem.split("\n").filter((line) => line.length >= 16)]
     .reduce((current, value) => current.split(value).join("[redacted]"), String(text));
   const kubectl = async (args, input) => {

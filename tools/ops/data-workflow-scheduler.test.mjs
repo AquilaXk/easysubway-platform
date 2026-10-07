@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createAppJwt, dueEntries, runScheduler, validateScheduleConfig } from "./data-workflow-scheduler.mjs";
+import { createAppJwt, dueEntries, runScheduler, validateScheduleConfig, verifyAppAccess } from "./data-workflow-scheduler.mjs";
 
 // AquilaXk/easysubway-platform#237: OCI k3s CronJob이 App easysubway-release-chain으로 data 레포 workflow를 dispatch한다.
 // 이 테스트는 스크립트가 (1) 범위를 줄인 installation token만 쓰고 (2) 때가 된 workflow만 정해진 분에 dispatch하며
@@ -192,6 +192,22 @@ test("로그와 오류 어디에도 token·JWT·private key가 남지 않는다"
   for (const text of [...ok.logs, ...failing.logs, message]) for (const secret of secrets) assert.equal(text.includes(secret), false);
   assert.ok(ok.logs.length > 0);
   for (const line of ok.logs) assert.doesNotThrow(() => JSON.parse(line));
+});
+
+test("배포 전 자격 확인은 token을 범위 검증까지 발급하고 dispatch 없이 폐기한다", async () => {
+  const github = fakeGitHub({ now: at("2026-10-07T03:00:00Z") });
+  const result = await verifyAppAccess({ config, clientId: CLIENT_ID, privateKeyPem, now: github.now, fetchImpl: github.fetchImpl, log: github.log });
+  assert.deepEqual(result, { verified: true });
+  assert.deepEqual(github.calls.map(({ method, url }) => `${method} ${url.replace("https://api.github.com", "")}`), [
+    `GET /repos/${REPOSITORY}/installation`,
+    "POST /app/installations/167775157/access_tokens",
+    "DELETE /installation/token",
+  ]);
+  assert.ok(github.logs.some((line) => JSON.parse(line).event === "app_access_verified"));
+  const broad = fakeGitHub({ now: at("2026-10-07T03:00:00Z"), mint: () => new Response(JSON.stringify({ token: INSTALLATION_TOKEN, permissions: { actions: "write", contents: "write" }, repository_selection: "selected", repositories: [{ full_name: REPOSITORY }] }), { status: 201 }) });
+  await assert.rejects(verifyAppAccess({ config, clientId: CLIENT_ID, privateKeyPem, now: broad.now, fetchImpl: broad.fetchImpl, log: broad.log }), /SCHEDULER_TOKEN_SCOPE/u);
+  const denied = fakeGitHub({ now: at("2026-10-07T03:00:00Z"), mint: () => new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }) });
+  await assert.rejects(verifyAppAccess({ config, clientId: CLIENT_ID, privateKeyPem, now: denied.now, fetchImpl: denied.fetchImpl, log: denied.log }), /SCHEDULER_TOKEN_MINT_FAILED: HTTP 401/u);
 });
 
 test("설정은 닫힌 형식이고 main의 data 레포·actions write만 허용한다", () => {

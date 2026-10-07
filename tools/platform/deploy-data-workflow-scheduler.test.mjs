@@ -50,6 +50,9 @@ const previousCronJob = (secretName, configName) => {
   volumes[1].secret.secretName = secretName;
   return cronJob;
 };
+const accessChecks = [];
+const verifyAccess = async (options) => { accessChecks.push(options); };
+const deploy = (options) => deployDataWorkflowScheduler({ verifyAccess, ...options });
 const verbs = (cluster) => cluster.calls.map(({ args }) => args.slice(args.indexOf("kubectl") + 2).filter((value) => !value.startsWith("--"))[0]);
 
 test("PREVIEW는 secret도 클러스터도 없이 객체 이름만 렌더하고 0 digest를 쓴다", async () => {
@@ -65,7 +68,7 @@ test("PREVIEW는 secret도 클러스터도 없이 객체 이름만 렌더하고 
 
 test("DEPLOY는 secret과 ConfigMap을 만든 뒤 나머지를 apply하고 읽어서 대조한다", async () => {
   const cluster = fakeCluster();
-  const result = await deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
+  const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
   assert.deepEqual(verbs(cluster), ["get", "create", "create", "apply", "get"]);
   const [, createSecret, createConfig, apply] = cluster.calls;
   const secret = JSON.parse(createSecret.input);
@@ -87,7 +90,7 @@ test("DEPLOY는 secret과 ConfigMap을 만든 뒤 나머지를 apply하고 읽�
 
 test("secret 값은 명령행 인자·apply 입력·결과 어디에도 나오지 않고 secret create의 stdin에만 있다", async () => {
   const cluster = fakeCluster();
-  const result = await deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
+  const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
   const keyBody = PEM.split("\n")[1];
   for (const call of cluster.calls) {
     assert.equal(call.args.join(" ").includes(keyBody), false);
@@ -104,7 +107,7 @@ test("이전 CronJob이 다른 secret·ConfigMap을 쓰면 새 CronJob을 확인
   const oldSecret = `data-workflow-scheduler-secret-${"1".repeat(20)}`;
   const oldConfig = `data-workflow-scheduler-config-${"2".repeat(20)}`;
   const cluster = fakeCluster({ previous: previousCronJob(oldSecret, oldConfig) });
-  const result = await deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
+  const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
   assert.deepEqual(verbs(cluster), ["get", "create", "create", "apply", "get", "delete", "delete"]);
   const deletes = cluster.calls.slice(-2).map(({ args }) => args.slice(args.indexOf("kubectl") + 2));
   assert.deepEqual(deletes, [
@@ -119,7 +122,7 @@ test("같은 secret·ConfigMap이면 아무것도 지우지 않고 AlreadyExists
     previous: previousCronJob(expected.names.secret, expected.names.configMap),
     createError: { Secret: 'Error from server (AlreadyExists): secrets "x" already exists', ConfigMap: 'Error from server (AlreadyExists): configmaps "x" already exists' },
   });
-  const result = await deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
+  const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
   assert.equal(verbs(cluster).includes("delete"), false);
   assert.deepEqual(result.pruned, []);
   assert.equal(result.kubernetesMutationCount, 3);
@@ -127,7 +130,7 @@ test("같은 secret·ConfigMap이면 아무것도 지우지 않고 AlreadyExists
 
 test("create가 AlreadyExists 말고 실패하면 apply 없이 실패한다", async () => {
   const cluster = fakeCluster({ createError: { Secret: "Error from server (Forbidden): secrets is forbidden" } });
-  await assert.rejects(deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_KUBECTL/u);
+  await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_KUBECTL/u);
   assert.equal(verbs(cluster).includes("apply"), false);
 });
 
@@ -136,11 +139,11 @@ test("적용한 CronJob을 읽어 대조해 다르면 실패하고 이전 객체
   drifted.spec.suspend = true;
   const oldSecret = `data-workflow-scheduler-secret-${"1".repeat(20)}`;
   const cluster = fakeCluster({ previous: previousCronJob(oldSecret, expected.names.configMap), liveOverride: drifted });
-  await assert.rejects(deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
+  await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
   assert.equal(verbs(cluster).includes("delete"), false);
   const wrongImage = structuredClone(expected.objects.cronJob);
   wrongImage.spec.jobTemplate.spec.template.spec.containers[0].image = "docker.io/library/node:latest";
-  await assert.rejects(deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: fakeCluster({ liveOverride: wrongImage }).commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
+  await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: fakeCluster({ liveOverride: wrongImage }).commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
 });
 
 test("secret이 없거나 RSA 2048 미만이거나 PEM이 아니면 클러스터를 부르기 전에 실패한다", async () => {
@@ -156,9 +159,26 @@ test("secret이 없거나 RSA 2048 미만이거나 PEM이 아니면 클러스터
     { ...env, EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: ec },
   ]) {
     const cluster = fakeCluster();
-    await assert.rejects(deployDataWorkflowScheduler({ mode: "DEPLOY", env: bad, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_SECRET/u);
+    await assert.rejects(deploy({ mode: "DEPLOY", env: bad, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_SECRET/u);
     assert.equal(cluster.calls.length, 0);
   }
+});
+
+test("DEPLOY는 클러스터를 건드리기 전에 App 자격을 확인하고 실패하면 아무것도 만들지 않는다", async () => {
+  accessChecks.length = 0;
+  const cluster = fakeCluster();
+  await deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner, verifyAccess: async (options) => { accessChecks.push(options); assert.equal(cluster.calls.length, 0); } });
+  assert.equal(accessChecks.length, 1);
+  assert.equal(accessChecks[0].clientId, CLIENT_ID);
+  assert.equal(accessChecks[0].privateKeyPem, PEM);
+  assert.equal(accessChecks[0].config.target.repository, "AquilaXk/easysubway-data");
+  assert.deepEqual(accessChecks[0].config.workflows.map(({ id }) => id), contract.workflows.map(({ id }) => id));
+  const failing = fakeCluster();
+  await assert.rejects(deployDataWorkflowScheduler({ mode: "DEPLOY", env, commandRunner: failing.commandRunner, verifyAccess: async () => { throw new Error("SCHEDULER_TOKEN_MINT_FAILED: HTTP 401 Bad credentials"); } }), /E_SCHEDULER_DEPLOY_APP_ACCESS: SCHEDULER_TOKEN_MINT_FAILED/u);
+  assert.equal(failing.calls.length, 0);
+  accessChecks.length = 0;
+  await deployDataWorkflowScheduler({ mode: "PREVIEW", env: {}, commandRunner: fakeCluster().commandRunner, verifyAccess });
+  assert.equal(accessChecks.length, 0, "PREVIEW는 GitHub를 부르지 않는다");
 });
 
 test("mode는 PREVIEW와 DEPLOY만 받는다", async () => {

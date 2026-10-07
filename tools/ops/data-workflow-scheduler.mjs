@@ -117,21 +117,12 @@ async function call(fetchImpl, redact, method, path, { bearer, body } = {}) {
   return { status: response.status, json, message };
 }
 
-export async function runScheduler({
-  config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch,
-  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }), log = console.log,
-}) {
-  validateScheduleConfig(config);
-  const emit = (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }));
-  const started = now();
-  const due = dueEntries(config.workflows, started);
-  if (due.length === 0) {
-    emit("nothing_due", { hourUtc: started.getUTCHours() });
-    return { dispatched: [] };
-  }
-  emit("schedule_start", { hourUtc: started.getUTCHours(), due: due.map(({ id }) => id) });
-
-  const jwt = createAppJwt({ clientId, privateKeyPem, now: started });
+/**
+ * App JWT -> 설치 조회 -> 범위를 줄인 installation token 발급·검증 -> useToken 실행 -> token 폐기.
+ * 요청보다 넓게 발급된 token은 쓰지 않고 바로 폐기한다.
+ */
+async function withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, useToken) {
+  const jwt = createAppJwt({ clientId, privateKeyPem, now: now() });
   const secrets = [jwt];
   const redact = redactor(secrets);
   const repositoryName = TARGET_REPOSITORY.split("/")[1];
@@ -152,10 +143,7 @@ export async function runScheduler({
   }
   secrets.push(token);
 
-  const failures = [];
-  const dispatched = [];
   try {
-    // 요청보다 넓게 발급된 token은 쓰지 않는다(범위를 줄여 달라고 했으므로 응답이 그대로여야 한다).
     const granted = minted.json.permissions;
     const names = isObject(granted) ? Object.keys(granted) : [];
     const repositories = Array.isArray(minted.json.repositories) ? minted.json.repositories.map((item) => item?.full_name) : [];
@@ -165,7 +153,40 @@ export async function runScheduler({
       fail("SCHEDULER_TOKEN_SCOPE", "installation token is broader than actions:write on the data repository only");
     }
     emit("token_minted", { expiresAt: typeof minted.json.expires_at === "string" ? minted.json.expires_at : null });
+    return await useToken({ token, redact });
+  } finally {
+    const revoked = await call(fetchImpl, redact, "DELETE", "/installation/token", { bearer: token }).catch(() => ({ status: 0 }));
+    if (revoked.status === 204) emit("token_revoked");
+    else emit("token_revoke_failed", { status: revoked.status });
+  }
+}
 
+/** 배포 전에 App 자격이 실제로 동작하는지 확인한다: token을 범위 검증까지 발급하고 dispatch 없이 폐기한다. */
+export async function verifyAppAccess({ config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch, log = console.log }) {
+  validateScheduleConfig(config);
+  const emit = (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }));
+  await withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, async () => {});
+  emit("app_access_verified");
+  return { verified: true };
+}
+
+export async function runScheduler({
+  config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch,
+  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }), log = console.log,
+}) {
+  validateScheduleConfig(config);
+  const emit = (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }));
+  const started = now();
+  const due = dueEntries(config.workflows, started);
+  if (due.length === 0) {
+    emit("nothing_due", { hourUtc: started.getUTCHours() });
+    return { dispatched: [] };
+  }
+  emit("schedule_start", { hourUtc: started.getUTCHours(), due: due.map(({ id }) => id) });
+
+  const failures = [];
+  const dispatched = [];
+  await withScopedInstallationToken({ config, clientId, privateKeyPem, now: () => started, fetchImpl, emit }, async ({ token, redact }) => {
     const hourStart = Date.UTC(started.getUTCFullYear(), started.getUTCMonth(), started.getUTCDate(), started.getUTCHours());
     for (const entry of due) {
       const wait = hourStart + entry.minute * 60_000 - now().getTime();
@@ -182,11 +203,7 @@ export async function runScheduler({
         emit("dispatch_failed", { id: entry.id, workflow: entry.workflow, status: result.status, message: result.message });
       }
     }
-  } finally {
-    const revoked = await call(fetchImpl, redact, "DELETE", "/installation/token", { bearer: token }).catch(() => ({ status: 0 }));
-    if (revoked.status === 204) emit("token_revoked");
-    else emit("token_revoke_failed", { status: revoked.status });
-  }
+  });
   if (failures.length > 0) fail("SCHEDULER_DISPATCH_FAILED", failures.join(", "));
   emit("done", { dispatched });
   return { dispatched };
