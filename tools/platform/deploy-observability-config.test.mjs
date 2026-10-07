@@ -76,12 +76,16 @@ function createHost({
   existingContainerId = "1".repeat(64), recreateOnUp = true, restartFixesLive = true, promtoolFails = null,
   liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
-  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }],
+  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null,
 } = {}) {
   const calls = [];
   const state = { containerId: existingContainerId, live: liveBefore, generation: 0 };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
-  const others = projectContainers ?? [["easysubway-postgres", "2".repeat(12)], ["easysubway-alertmanager", "3".repeat(12)], ["easysubway-grafana", "4".repeat(12)]];
+  const others = projectContainers ?? [
+    { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
+    { name: "easysubway-alertmanager", id: "3".repeat(64), image: "sha256:alertmanager", startedAt: "2026-06-30T00:00:01Z" },
+    { name: "easysubway-grafana", id: "4".repeat(64), image: "sha256:grafana", startedAt: "2026-06-30T00:00:02Z" },
+  ];
   let reference = null;
   const runner = async (command, args, options = {}) => {
     calls.push({ command, args, env: options.env });
@@ -94,6 +98,7 @@ function createHost({
       if (args.includes("config")) return { stdout: JSON.stringify({ services: { prometheus: { image: IMAGE, command: composeCommand } } }), stderr: "" };
       if (args.includes("up")) {
         if (upFails) throw new Error("compose up failed");
+        if (changeOthersOnUp) changeOthersOnUp(others);
         if (recreateOnUp) {
           state.generation += 1;
           state.containerId = String(8 + state.generation).repeat(64);
@@ -131,18 +136,22 @@ function createHost({
       return { stdout: "", stderr: "" };
     }
     if (verb === "inspect") {
-      if (containerMissing) throw new Error("No such object: easysubway-prometheus");
-      return {
-        stdout: JSON.stringify([{
-          Id: state.containerId, Name: "/easysubway-prometheus", Config: { Image: IMAGE },
-          State: { Running: true, Health: { Status: health } },
-          Mounts: mounts,
-        }]),
-        stderr: "",
+      const targets = args.slice(args.indexOf("container") + 1);
+      const prometheus = {
+        Id: state.containerId, Name: "/easysubway-prometheus", Image: "sha256:prometheus", Config: { Image: IMAGE },
+        State: { Running: true, StartedAt: "2026-10-08T00:00:00Z", Health: { Status: health } },
+        Mounts: mounts,
       };
+      if (targets.length === 1 && targets[0] === "easysubway-prometheus") {
+        if (containerMissing) throw new Error("No such object: easysubway-prometheus");
+        return { stdout: JSON.stringify([prometheus]), stderr: "" };
+      }
+      const all = [prometheus, ...others.map((other) => ({ Id: other.id, Name: `/${other.name}`, Image: other.image, Config: { Image: other.image }, State: { Running: true, StartedAt: other.startedAt } }))];
+      return { stdout: JSON.stringify(targets.map((target) => all.find((item) => item.Id === target || item.Id.startsWith(target)))), stderr: "" };
     }
     if (verb === "ps") {
-      const rows = [["easysubway-prometheus", state.containerId.slice(0, 12)], ...others];
+      if (args.includes("-q")) return { stdout: [state.containerId, ...others.map((other) => other.id)].join("\n"), stderr: "" };
+      const rows = [["easysubway-prometheus", state.containerId.slice(0, 12)], ...others.map((other) => [other.name, other.id.slice(0, 12)])];
       return { stdout: rows.map((row) => row.join("\t")).join("\n"), stderr: "" };
     }
     if (verb === "volume") {
@@ -169,6 +178,9 @@ const base = (box, host, overrides = {}) => ({
   commandRunner: host.runner, sleep: async () => {}, now: () => new Date("2026-10-08T01:02:03.000Z"), ...overrides,
 });
 const verbs = (host) => host.calls.map(({ command, args }) => (command === "git" ? "git" : args[0] === "compose" ? `compose:${args.includes("up") ? "up" : "config"}` : args[0] === "run" ? (args.includes("promtool") ? `promtool:${args.includes("check") ? "check" : "test"}` : "run:reference") : args[0] === "volume" ? "volume" : args[0]));
+
+const receiptPath = (box, name = "receipt.json") => join(box.deployRoot, "release-receipts", `observability-config-${COMMIT.slice(0, 12)}-123`, name);
+const failureReceipt = (box) => JSON.parse(readFileSync(receiptPath(box, "failure-receipt.json"), "utf8"));
 
 // 이미 배포된 직전 release 하나를 만들고 current가 그것을 가리키게 한다.
 function seedPreviousRelease(box, { commit = PREVIEW_COMMIT_FOR_SEED } = {}) {
@@ -458,34 +470,73 @@ test("보존 flag가 라이브에 적용되지 않으면 실패한다", async ()
   }
 });
 
-test("prometheus 외 프로젝트 컨테이너가 바뀌거나 사라지면 실패한다", async () => {
+test("prometheus 외 프로젝트 컨테이너가 바뀌면(ID·이미지·시작 시각 중 하나라도) 복원하고 실패 receipt를 남기며 실패한다", async () => {
+  const changes = [
+    ["ID", (others) => { others[0].id = "f".repeat(64); }, /E_OBS_DEPLOY_SCOPE.*easysubway-postgres/su],
+    ["이미지", (others) => { others[1].image = "sha256:other-image"; }, /E_OBS_DEPLOY_SCOPE.*easysubway-alertmanager/su],
+    ["시작 시각(재시작)", (others) => { others[2].startedAt = "2026-10-08T01:00:00Z"; }, /E_OBS_DEPLOY_SCOPE.*easysubway-grafana/su],
+    ["사라짐", (others) => { others.pop(); }, /E_OBS_DEPLOY_SCOPE.*easysubway-grafana/su],
+    ["새로 생김", (others) => { others.push({ name: "easysubway-new", id: "5".repeat(64), image: "sha256:new", startedAt: "2026-10-08T01:00:00Z" }); }, /E_OBS_DEPLOY_SCOPE.*easysubway-new/su],
+  ];
+  for (const [label, change, pattern] of changes) {
+    const box = sandbox();
+    try {
+      seedPreviousRelease(box);
+      const host = createHost({ changeOthersOnUp: change });
+      await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), pattern, label);
+      assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS), `${label}: 복원`);
+      assert.equal(verbs(host).filter((verb) => verb === "compose:up").length, 2, `${label}: 복원도 compose를 거친다`);
+      const failure = failureReceipt(box);
+      assert.equal(failure.outcome, "FAILED", label);
+      assert.equal(failure.error.code, "E_OBS_DEPLOY_SCOPE", label);
+      assert.equal(failure.restore, "RESTORED", label);
+      assert.equal(existsSync(receiptPath(box)), false, `${label}: 성공 receipt는 없다`);
+    } finally {
+      box.cleanup();
+    }
+  }
+});
+
+test("데이터 volume 정체가 바뀌면 복원하고 실패 receipt를 남기며 실패한다", async () => {
   const box = sandbox();
   try {
-    const host = createHost();
-    const original = host.runner;
-    let psCount = 0;
-    const runner = async (command, args, options) => {
-      if (command === "docker" && args[0] === "ps") {
-        psCount += 1;
-        if (psCount === 2) return { stdout: ["easysubway-prometheus\t999999999999", "easysubway-postgres\tffffffffffff", "easysubway-alertmanager\t333333333333", "easysubway-grafana\t444444444444"].join("\n"), stderr: "" };
-      }
-      return original(command, args, options);
-    };
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", commandRunner: runner })), /E_OBS_DEPLOY_SCOPE.*easysubway-postgres/su);
+    seedPreviousRelease(box);
+    const probe = createHost();
+    const changed = { ...probe.volume, CreatedAt: "2026-10-08T00:00:00Z" };
+    const host = createHost({ volumeAfter: changed });
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VOLUME/u);
+    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
+    const failure = failureReceipt(box);
+    assert.equal(failure.error.code, "E_OBS_DEPLOY_VOLUME");
+    assert.equal(failure.restore, "RESTORED");
   } finally {
     box.cleanup();
   }
 });
 
-test("데이터 volume 정체가 바뀌면 실패한다", async () => {
-  const box = sandbox();
+test("적용 단계 실패는 실패 receipt를 남기고(복원 여부 포함), 검증 단계 실패는 남기지 않는다", async () => {
+  const first = sandbox();
   try {
-    const probe = createHost();
-    const changed = { ...probe.volume, CreatedAt: "2026-10-08T00:00:00Z" };
-    const host = createHost({ volumeAfter: changed });
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VOLUME/u);
+    const host = createHost({ liveAfter: snapshot({ revision: "old" }) });
+    await assert.rejects(deployObservabilityConfig(base(first, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY/u);
+    const failure = failureReceipt(first);
+    assert.deepEqual(Object.keys(failure), ["schemaVersion", "mode", "outcome", "commit", "previousCommit", "runUrl", "recordedAt", "error", "restore", "configDigest"]);
+    assert.equal(failure.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V1");
+    assert.equal(failure.commit, COMMIT);
+    assert.equal(failure.previousCommit, null);
+    assert.equal(failure.restore, "NO_MANAGED_PREVIOUS");
+    assert.equal(failure.recordedAt, "2026-10-08T01:02:03.000Z");
+    assert.equal(lstatSync(join(first.deployRoot, "release-receipts", `observability-config-${COMMIT.slice(0, 12)}-123`, "failure-receipt.json")).mode & 0o077, 0);
   } finally {
-    box.cleanup();
+    first.cleanup();
+  }
+  const validation = sandbox();
+  try {
+    const host = createHost({ promtoolFails: "check" });
+    await assert.rejects(deployObservabilityConfig(base(validation, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VALIDATE/u);
+    assert.equal(existsSync(join(validation.deployRoot, "release-receipts", `observability-config-${COMMIT.slice(0, 12)}-123`)), false);
+  } finally {
+    validation.cleanup();
   }
 });
 
