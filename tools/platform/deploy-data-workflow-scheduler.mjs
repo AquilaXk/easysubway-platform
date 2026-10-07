@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 // AquilaXk/easysubway-platform#237: data workflow 스케줄러(CronJob)를 OCI k3s에 배포한다.
-// PREVIEW는 렌더만 한다(클러스터·secret 접근 없음). DEPLOY는 self-hosted runner에서 별도 deployer 신원
-// (system:serviceaccount:easysubway-journey:data-scheduler-deployer)으로 다음을 한다.
+// PREVIEW는 렌더만 한다(클러스터·secret 접근 없음). DEPLOY는 self-hosted runner에서 App 자격을 확인한 뒤
+// 별도 deployer 신원(system:serviceaccount:easysubway-journey:data-scheduler-deployer)으로 다음을 한다.
 //   1) 현재 CronJob이 쓰는 secret·ConfigMap 이름 읽기  2) 내용 digest 이름의 immutable secret·ConfigMap create(같은 이름은 같은 내용이라 통과)
-//   3) ServiceAccount·NetworkPolicy·CronJob apply  4) 적용한 CronJob을 읽어 대조  5) 직전 secret·ConfigMap 한 세트만 삭제.
+//   3) ServiceAccount·NetworkPolicy·CronJob apply(관리자가 RBAC 파일로 미리 만들어 둔 고정 이름 객체를 갱신, deployer에는 create 권한이 없다)
+//   4) 적용한 객체를 읽어 렌더한 객체와 대조  5) 직전 secret·ConfigMap 한 세트만 삭제.
+// 삭제는 RBAC로 이름을 한정할 수 없어(내용 digest 이름) deployer에게 delete를 주지 않고, 이 도구가 관리자 권한으로 수행하되
+// 이름이 이 스케줄러 접두사+digest 형식이고 소유 label(app.kubernetes.io/name=data-workflow-scheduler)이 맞을 때만 지운다.
+// 이 검증은 도구 수준이며, 관리자 권한(sudo k3s kubectl)을 가진 runner가 임의 삭제를 할 수 있다는 사실 자체는 기존 journey 활성화와 같다.
 // 실패는 숨기지 않는다: 자동 rollback도, 이전 값으로 대체도 없다. secret 값은 create의 stdin으로만 가고 출력·인자·로그에 남지 않는다.
 import { createHash, createPrivateKey } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -15,6 +19,9 @@ import { readSchedulerContract, readSchedulerScript, renderDataWorkflowScheduler
 const NAMESPACE = "easysubway-journey";
 const DEPLOYER = "system:serviceaccount:easysubway-journey:data-scheduler-deployer";
 const MODES = Object.freeze(["PREVIEW", "DEPLOY"]);
+const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const OWNER_LABEL = "data-workflow-scheduler";
+const SCHEDULER_OBJECT_NAME = /^data-workflow-scheduler-(?:secret|config)-[0-9a-f]{20}$/u;
 const PREVIEW_SECRET_IDENTITY = `sha256:${"0".repeat(64)}`;
 
 class DeployError extends Error {
@@ -47,24 +54,19 @@ function secretIdentity({ clientId, privateKeyPem }) {
   return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 
-function summarize(cronJob) {
-  const pod = cronJob?.spec?.jobTemplate?.spec?.template?.spec;
-  const volume = (name) => pod?.volumes?.find((item) => item.name === name);
-  return {
-    schedule: cronJob?.spec?.schedule,
-    timeZone: cronJob?.spec?.timeZone,
-    concurrencyPolicy: cronJob?.spec?.concurrencyPolicy,
-    suspend: cronJob?.spec?.suspend,
-    startingDeadlineSeconds: cronJob?.spec?.startingDeadlineSeconds,
-    successfulJobsHistoryLimit: cronJob?.spec?.successfulJobsHistoryLimit,
-    failedJobsHistoryLimit: cronJob?.spec?.failedJobsHistoryLimit,
-    backoffLimit: cronJob?.spec?.jobTemplate?.spec?.backoffLimit,
-    activeDeadlineSeconds: cronJob?.spec?.jobTemplate?.spec?.activeDeadlineSeconds,
-    serviceAccountName: pod?.serviceAccountName,
-    image: pod?.containers?.[0]?.image,
-    configMap: volume("scheduler")?.configMap?.name,
-    secret: volume("dispatch-app")?.secret?.secretName,
-  };
+function referencedNames(cronJob) {
+  const volumes = cronJob?.spec?.jobTemplate?.spec?.template?.spec?.volumes;
+  const volume = (name) => (Array.isArray(volumes) ? volumes.find((item) => item.name === name) : undefined);
+  return { secret: volume("dispatch-app")?.secret?.secretName, configMap: volume("scheduler")?.configMap?.name };
+}
+
+/** expected의 모든 필드가 actual에 같은 값으로 있으면 참이다(클러스터가 채운 기본값 등 actual의 추가 필드는 허용). */
+export function isSubset(expected, actual) {
+  if (Array.isArray(expected)) return Array.isArray(actual) && expected.length === actual.length && expected.every((item, index) => isSubset(item, actual[index]));
+  if (expected !== null && typeof expected === "object") {
+    return actual !== null && typeof actual === "object" && Object.keys(expected).every((key) => isSubset(expected[key], actual[key]));
+  }
+  return expected === actual;
 }
 
 export async function deployDataWorkflowScheduler({
@@ -81,7 +83,6 @@ export async function deployDataWorkflowScheduler({
     schedule: contract.cronJob.schedule,
     workflowIds: contract.workflows.map(({ id }) => id),
     excludedWorkflows: contract.excluded.map(({ workflow }) => workflow),
-    secretValueSerializedCount: 0,
     ...extra,
   });
   if (mode === "PREVIEW") {
@@ -99,20 +100,22 @@ export async function deployDataWorkflowScheduler({
   }
   const redact = (text) => [secrets.clientId, secrets.privateKeyPem, ...secrets.privateKeyPem.split("\n").filter((line) => line.length >= 16)]
     .reduce((current, value) => current.split(value).join("[redacted]"), String(text));
-  const kubectl = async (args, input) => {
+  const run = async (prefix, args, input) => {
     try {
-      return await commandRunner("sudo", ["--non-interactive", "k3s", "kubectl", `--as=${DEPLOYER}`, ...args], input === undefined ? {} : { input: Buffer.from(input) });
+      return await commandRunner("sudo", ["--non-interactive", "k3s", "kubectl", ...prefix, ...args], input === undefined ? {} : { input: Buffer.from(input) });
     } catch (error) {
       return fail("E_SCHEDULER_DEPLOY_KUBECTL", redact(String(error?.message ?? "kubectl failed")).slice(0, 400));
     }
   };
+  const kubectl = (args, input) => run([`--as=${DEPLOYER}`], args, input);
+  const adminKubectl = (args) => run([], args);
   const json = (value) => JSON.stringify(value);
   let mutations = 0;
 
   const current = await kubectl(["get", "cronjob", rendered.names.cronJob, "--namespace", NAMESPACE, "--ignore-not-found", "-o", "json"]);
-  let previous = null;
+  let previous = { secret: undefined, configMap: undefined };
   try {
-    previous = current.stdout.trim() === "" ? null : summarize(JSON.parse(current.stdout));
+    previous = current.stdout.trim() === "" ? previous : referencedNames(JSON.parse(current.stdout));
   } catch {
     fail("E_SCHEDULER_DEPLOY_KUBECTL", "current CronJob is not readable JSON");
   }
@@ -139,34 +142,57 @@ export async function deployDataWorkflowScheduler({
   await kubectl(["apply", "-f", "-"], json({ apiVersion: "v1", kind: "List", items: applied }));
   mutations += applied.length;
 
-  const live = await kubectl(["get", "cronjob", rendered.names.cronJob, "--namespace", NAMESPACE, "-o", "json"]);
-  let liveSummary;
-  try {
-    liveSummary = summarize(JSON.parse(live.stdout));
-  } catch {
-    fail("E_SCHEDULER_DEPLOY_READBACK", "live CronJob is not readable JSON");
-  }
-  const wanted = summarize(rendered.objects.cronJob);
-  if (JSON.stringify(liveSummary) !== JSON.stringify(wanted)) fail("E_SCHEDULER_DEPLOY_READBACK", "live CronJob differs from the rendered CronJob");
-
-  const pruned = [];
-  for (const [kind, resource, oldName, newName] of [
-    ["secret", "secret", previous?.secret, rendered.names.secret],
-    ["configmap", "configmap", previous?.configMap, rendered.names.configMap],
+  for (const [resource, name, wanted] of [
+    ["cronjob", rendered.names.cronJob, rendered.objects.cronJob],
+    ["serviceaccount", rendered.names.serviceAccount, rendered.objects.serviceAccount],
+    ["networkpolicy", rendered.names.networkPolicy, rendered.objects.networkPolicy],
   ]) {
-    if (typeof oldName !== "string" || oldName === newName) continue;
-    await kubectl(["delete", resource, oldName, "--namespace", NAMESPACE, "--ignore-not-found=true"]);
+    const live = await kubectl(["get", resource, name, "--namespace", NAMESPACE, "-o", "json"]);
+    let liveObject;
+    try {
+      liveObject = JSON.parse(live.stdout);
+    } catch {
+      fail("E_SCHEDULER_DEPLOY_READBACK", `live ${resource} is not readable JSON`);
+    }
+    if (!isSubset(wanted, liveObject)) fail("E_SCHEDULER_DEPLOY_READBACK", `live ${resource} differs from the rendered ${resource}`);
+  }
+
+  // 직전 한 세트: 이름 형식을 모두 확인하고 소유 label을 읽어 맞는 것만, 전부 맞을 때 지운다.
+  const stale = [["secret", previous.secret, rendered.names.secret], ["configmap", previous.configMap, rendered.names.configMap]]
+    .filter(([, oldName, newName]) => typeof oldName === "string" && oldName !== newName)
+    .map(([resource, oldName]) => ({ resource, oldName }));
+  for (const { resource, oldName } of stale) {
+    if (!SCHEDULER_OBJECT_NAME.test(oldName) || !oldName.startsWith(`${OWNER_LABEL}-${resource === "secret" ? "secret" : "config"}-`)) {
+      fail("E_SCHEDULER_DEPLOY_PRUNE", `${resource} ${JSON.stringify(oldName)} is not a scheduler object name`);
+    }
+  }
+  const present = [];
+  for (const item of stale) {
+    let label;
+    try {
+      label = (await adminKubectl(["get", item.resource, item.oldName, "--namespace", NAMESPACE, "-o", "jsonpath={.metadata.labels.app\\.kubernetes\\.io/name}"])).stdout.trim();
+    } catch (error) {
+      if (String(error.message).includes("NotFound")) continue;
+      throw error;
+    }
+    if (label !== OWNER_LABEL) fail("E_SCHEDULER_DEPLOY_PRUNE", `${item.resource} ${item.oldName} is not owned by the scheduler`);
+    present.push(item);
+  }
+  const pruned = [];
+  for (const { resource, oldName } of present) {
+    await adminKubectl(["delete", resource, oldName, "--namespace", NAMESPACE, "--ignore-not-found=true"]);
     mutations += 1;
-    pruned.push(`${kind}/${oldName}`);
+    pruned.push(`${resource}/${oldName}`);
   }
   return result(rendered, { kubernetesMutationCount: mutations, pruned });
 }
 
 class HostCommandError extends Error {}
 
-function runCommand(command, args, { input, timeoutMs = 120_000 } = {}) {
+// 자식에는 PATH만 넘긴다: 이 프로세스 환경의 App key·client id가 sudo·kubectl로 상속되지 않는다.
+export function runCommand(command, args, { input, timeoutMs = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { env: { PATH: SAFE_PATH }, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
     const stdout = [];
     const stderr = [];
     let size = 0;

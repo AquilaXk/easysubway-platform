@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -18,10 +18,11 @@ const render = (overrides = {}) => renderDataWorkflowScheduler({ contract, scrip
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 
 test("계약은 닫힌 형식이고 data 레포 main에 actions:write만 쓴다", () => {
-  assert.deepEqual(Object.keys(contract), ["schemaVersion", "artifactKind", "issueRef", "target", "app", "cronJob", "runtime", "deployer", "workflows", "excluded", "failureVisibility"]);
+  assert.deepEqual(Object.keys(contract), ["schemaVersion", "artifactKind", "issueRef", "target", "app", "cronJob", "runtime", "deployer", "workflows", "excluded", "failureVisibility", "postDeployVerification"]);
   assert.equal(contract.schemaVersion, "PLATFORM_DATA_WORKFLOW_SCHEDULER_CONTRACT_V1");
-  assert.deepEqual(contract.target, { repository: "AquilaXk/easysubway-data", ref: "main", permissions: { actions: "write" }, githubScheduleRole: "BACKUP_PATH" });
+  assert.deepEqual(contract.target, { repository: "AquilaXk/easysubway-data", ref: "main", permissions: { actions: "write" }, githubScheduleRole: "BACKUP_PATH", tokenMaxLifetimeMinutes: 60 });
   assert.deepEqual(contract.app.secretReferences, ["EASYSUBWAY_DISPATCH_APP_CLIENT_ID", "EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY"]);
+  assert.equal(contract.app.secretScope, "ENVIRONMENT:production-deploy");
 });
 
 test("CronJob은 매시 0분 UTC에 한 번, 겹치지 않고, 시간·이력 한도를 가진다", () => {
@@ -189,32 +190,64 @@ test("CLI는 계약과 스크립트를 읽어 같은 렌더를 JSON으로 출력
   assert.equal(bad.stdout, "");
 });
 
-test("배포 RBAC는 이 namespace의 별도 신원이고 전역 권한·와일드카드·secret 읽기가 없다", () => {
+test("배포 RBAC는 이 namespace의 별도 신원이고 전역 권한·와일드카드가 없으며 create는 secret·ConfigMap에만 있다", () => {
   const rbac = json("infra/k3s/data-workflow-scheduler-rbac.json");
-  const kinds = rbac.items.map(({ kind }) => kind);
-  assert.deepEqual(kinds, ["ServiceAccount", "Role", "RoleBinding"]);
-  const [account, role, binding] = rbac.items;
+  assert.deepEqual(rbac.items.map(({ kind }) => kind), ["ServiceAccount", "Role", "RoleBinding", "ServiceAccount", "NetworkPolicy", "CronJob"]);
+  const [account, role, binding, workloadAccount, networkPolicy, cronJob] = rbac.items;
   assert.deepEqual([account.metadata.name, account.metadata.namespace, account.automountServiceAccountToken], ["data-scheduler-deployer", "easysubway-journey", false]);
   assert.equal(contract.deployer.serviceAccount, account.metadata.name);
+  assert.equal(contract.deployer.bootstrap, "ADMIN_APPLIED_FIXED_NAME_OBJECTS");
   assert.equal(role.metadata.namespace, "easysubway-journey");
   assert.equal(JSON.stringify(role.rules).includes("*"), false);
   assert.equal(JSON.stringify(role.rules).includes("nodes"), false);
   assert.equal(JSON.stringify(rbac).includes("ClusterRole"), false);
-  const verbsOf = (group, resource) => role.rules.filter((rule) => rule.apiGroups.includes(group) && rule.resources.includes(resource)).flatMap((rule) => rule.verbs);
-  for (const verb of ["get", "list", "watch", "update", "patch"]) assert.equal(verbsOf("", "secrets").includes(verb), false, `secrets ${verb}`);
-  assert.deepEqual([...new Set(verbsOf("", "secrets"))].sort(), ["create", "delete"]);
-  assert.deepEqual([...new Set(verbsOf("batch", "jobs"))].sort(), ["get", "list", "watch"]);
-  assert.ok(verbsOf("batch", "cronjobs").includes("patch"));
-  // 이름이 고정된 객체는 resourceNames로 한정한다.
-  for (const [group, resource, name] of [["batch", "cronjobs", "data-workflow-scheduler"], ["", "serviceaccounts", "data-workflow-scheduler"], ["networking.k8s.io", "networkpolicies", "data-workflow-scheduler-boundary"]]) {
-    const named = role.rules.filter((rule) => rule.apiGroups.includes(group) && rule.resources.includes(resource) && rule.resourceNames);
-    assert.deepEqual(named.map((rule) => rule.resourceNames), [[name]], `${resource} resourceNames`);
-    assert.equal(named[0].verbs.includes("create"), false);
-  }
+  // 규칙 전체를 고정한다: 이 밖의 자원·verb는 없다.
+  assert.deepEqual(role.rules, [
+    { apiGroups: ["batch"], resources: ["cronjobs"], resourceNames: ["data-workflow-scheduler"], verbs: ["get", "update", "patch"] },
+    { apiGroups: [""], resources: ["serviceaccounts"], resourceNames: ["data-workflow-scheduler"], verbs: ["get", "update", "patch"] },
+    { apiGroups: ["networking.k8s.io"], resources: ["networkpolicies"], resourceNames: ["data-workflow-scheduler-boundary"], verbs: ["get", "update", "patch"] },
+    { apiGroups: [""], resources: ["configmaps"], verbs: ["create"] },
+    { apiGroups: [""], resources: ["secrets"], verbs: ["create"] },
+  ]);
   assert.deepEqual(binding.subjects, [{ kind: "ServiceAccount", name: "data-scheduler-deployer", namespace: "easysubway-journey" }]);
   assert.deepEqual(binding.roleRef, { apiGroup: "rbac.authorization.k8s.io", kind: "Role", name: role.metadata.name });
+  // 관리자가 미리 만드는 고정 이름 객체는 렌더러가 만드는 객체와 같고(ServiceAccount·NetworkPolicy), CronJob은 중지된 자리표시자다.
+  const { objects } = render();
+  assert.deepEqual(workloadAccount, objects.serviceAccount);
+  assert.deepEqual(networkPolicy, objects.networkPolicy);
+  assert.equal(cronJob.metadata.name, objects.cronJob.metadata.name);
+  assert.equal(cronJob.spec.suspend, true);
+  assert.equal(cronJob.spec.jobTemplate.spec.template.spec.containers[0].image, contract.runtime.image);
+  assert.deepEqual(cronJob.spec.jobTemplate.spec.template.spec.containers[0].command, ["node", "--version"]);
   // hub 번들에 핀된 journey-deployer 계약과 RBAC는 건드리지 않는다.
   assert.equal(JSON.stringify(json("infra/k3s/deployer-rbac.json")).includes("batch"), false);
+});
+
+test("App 시크릿은 production-deploy 환경 범위에서만 읽고 환경 밖 job·다른 workflow는 참조하지 않는다", () => {
+  const directory = new URL(".github/workflows/", root);
+  const offenders = [];
+  for (const file of readdirSync(directory).filter((name) => name.endsWith(".yml"))) {
+    const yml = readFileSync(new URL(file, directory), "utf8");
+    if (!/EASYSUBWAY_DISPATCH_APP_/u.test(yml)) continue;
+    // job 블록 단위로 본다: 2칸 들여쓰기 job 이름으로 나눈다.
+    const jobsIndex = yml.indexOf("\njobs:\n");
+    const jobs = yml.slice(jobsIndex).split(/\n  (?=[A-Za-z0-9_-]+:\n)/u).slice(1);
+    for (const job of jobs) {
+      if (/EASYSUBWAY_DISPATCH_APP_/u.test(job) && !/\n    environment: production-deploy\n/u.test(job)) offenders.push(`${file}: ${job.split("\n")[0]}`);
+    }
+    if (file !== "data-workflow-scheduler-deploy.yml") offenders.push(`${file}: unexpected reference`);
+  }
+  assert.deepEqual(offenders, []);
+  assert.equal(contract.app.secretScope, "ENVIRONMENT:production-deploy");
+});
+
+test("배포 후 확인 절차에 NetworkPolicy 실제 적용 시험(차단 대상 접속)이 있다", () => {
+  assert.deepEqual(contract.postDeployVerification.map(({ id }) => id), [
+    "NETWORK_POLICY_ENFORCED_NON_GITHUB_HOST_BLOCKED",
+    "NETWORK_POLICY_NODE_SERVICES_BLOCKED",
+    "NETWORK_POLICY_GITHUB_API_ALLOWED",
+  ]);
+  for (const { description } of contract.postDeployVerification) assert.ok(description.length > 20);
 });
 
 test("배포 workflow는 main·승인 환경에서만, DEPLOY만 self-hosted runner에서 돌고 secret은 DEPLOY 단계 env로만 받는다", () => {

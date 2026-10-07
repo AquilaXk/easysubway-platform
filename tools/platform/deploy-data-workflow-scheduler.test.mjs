@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
-import { deployDataWorkflowScheduler } from "./deploy-data-workflow-scheduler.mjs";
+import { deployDataWorkflowScheduler, runCommand } from "./deploy-data-workflow-scheduler.mjs";
 import { readSchedulerContract, readSchedulerScript, renderDataWorkflowScheduler } from "./render-data-workflow-scheduler.mjs";
 
-// AquilaXk/easysubway-platform#237: PREVIEW는 렌더만 하고, DEPLOY는 별도 deployer 신원으로 secret(내용 digest 이름)·ConfigMap을 만들고
-// CronJob을 적용한 뒤 읽어서 대조하고 직전 객체 한 세트만 지운다. 실패는 숨기지 않는다.
+// AquilaXk/easysubway-platform#237: PREVIEW는 렌더만 하고, DEPLOY는 App 자격 확인 뒤 별도 deployer 신원으로 secret(내용 digest 이름)·ConfigMap을 만들고
+// 관리자가 미리 만든 CronJob·ServiceAccount·NetworkPolicy를 apply한 뒤 실제 객체를 읽어 대조하고 직전 한 세트만 지운다. 실패는 숨기지 않는다.
 const NAMESPACE = "easysubway-journey";
 const DEPLOYER = "system:serviceaccount:easysubway-journey:data-scheduler-deployer";
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -18,27 +18,42 @@ const scriptBytes = readSchedulerScript();
 const canonicalSecret = ["client-id", CLIENT_ID, "private-key.pem", PEM, ""].join("\n");
 const secretIdentity = `sha256:${createHash("sha256").update(canonicalSecret).digest("hex")}`;
 const expected = renderDataWorkflowScheduler({ contract, scriptBytes, secretIdentity });
+const OWNER_LABEL = "data-workflow-scheduler";
 
-function fakeCluster({ previous = null, createError = {}, liveOverride } = {}) {
+// 클러스터가 채우는 기본값(실제 객체에는 렌더에 없는 필드가 더 있다)을 흉내 낸다.
+const withDefaults = (object) => {
+  const live = structuredClone(object);
+  if (live.kind === "CronJob") {
+    live.spec.jobTemplate.spec.template.spec.dnsPolicy = "ClusterFirst";
+    live.spec.jobTemplate.spec.template.spec.containers[0].terminationMessagePath = "/dev/termination-log";
+    live.metadata.uid = "00000000-0000-0000-0000-000000000000";
+  }
+  return live;
+};
+
+function fakeCluster({ previous = null, createError = {}, live = {}, ownerLabel = OWNER_LABEL } = {}) {
   const calls = [];
   const commandRunner = async (command, args, { input } = {}) => {
     calls.push({ command, args, input: input === undefined ? undefined : input.toString("utf8") });
-    const kubectl = args.slice(args.indexOf("kubectl") + 1);
     assert.equal(command, "sudo");
     assert.deepEqual(args.slice(0, 3), ["--non-interactive", "k3s", "kubectl"]);
-    assert.equal(kubectl[0], `--as=${DEPLOYER}`);
-    const [verb, ...rest] = kubectl.slice(1);
+    const admin = !args[3].startsWith("--as=");
+    if (!admin) assert.equal(args[3], `--as=${DEPLOYER}`);
+    const [verb, kind] = args.slice(admin ? 3 : 4);
+    const applied = calls.some((call) => call.args.includes("apply"));
+    if (verb === "get" && admin) return { stdout: ownerLabel, stderr: "" };
     if (verb === "get") {
-      const live = calls.some((call) => call.args.includes("apply")) ? (liveOverride ?? expected.objects.cronJob) : previous;
-      return { stdout: live ? JSON.stringify(live) : "", stderr: "" };
+      const map = { cronjob: expected.objects.cronJob, serviceaccount: expected.objects.serviceAccount, networkpolicy: expected.objects.networkPolicy };
+      const object = applied ? (live[kind] ?? withDefaults(map[kind])) : (kind === "cronjob" ? previous : null);
+      return { stdout: object ? JSON.stringify(object) : "", stderr: "" };
     }
     if (verb === "create") {
-      const kind = JSON.parse(input).kind;
-      if (createError[kind]) throw new Error(createError[kind]);
+      const objectKind = JSON.parse(input).kind;
+      if (createError[objectKind]) throw new Error(createError[objectKind]);
       return { stdout: "", stderr: "" };
     }
     if (verb === "apply" || verb === "delete") return { stdout: "", stderr: "" };
-    assert.fail(`unexpected kubectl verb ${verb} ${rest.join(" ")}`);
+    assert.fail(`unexpected kubectl verb ${verb}`);
     return null;
   };
   return { calls, commandRunner };
@@ -54,7 +69,13 @@ const previousCronJob = (secretName, configName) => {
 const accessChecks = [];
 const verifyAccess = async (options) => { accessChecks.push(options); };
 const deploy = (options) => deployDataWorkflowScheduler({ verifyAccess, ...options });
-const verbs = (cluster) => cluster.calls.map(({ args }) => args.slice(args.indexOf("kubectl") + 2).filter((value) => !value.startsWith("--"))[0]);
+const trail = (cluster) => cluster.calls.map(({ args }) => {
+  const admin = !args[3].startsWith("--as=");
+  const [verb, kind] = args.slice(admin ? 3 : 4);
+  return `${admin ? "admin:" : ""}${verb}${["get", "delete"].includes(verb) ? `:${kind}` : ""}`;
+});
+const OLD_SECRET = `data-workflow-scheduler-secret-${"1".repeat(20)}`;
+const OLD_CONFIG = `data-workflow-scheduler-config-${"2".repeat(20)}`;
 
 test("PREVIEW는 secret도 클러스터도 없이 객체 이름만 렌더하고 0 digest를 쓴다", async () => {
   const cluster = fakeCluster();
@@ -63,18 +84,18 @@ test("PREVIEW는 secret도 클러스터도 없이 객체 이름만 렌더하고 
   assert.equal(result.mode, "PREVIEW");
   assert.equal(result.names.secret, `data-workflow-scheduler-secret-${"0".repeat(20)}`);
   assert.equal(result.names.configMap, expected.names.configMap);
-  assert.equal(result.secretValueSerializedCount, 0);
   assert.equal(result.kubernetesMutationCount, 0);
+  assert.equal(Object.hasOwn(result, "secretValueSerializedCount"), false, "상수로 고정한 보고 값은 두지 않는다");
 });
 
-test("DEPLOY는 secret과 ConfigMap을 만든 뒤 나머지를 apply하고 읽어서 대조한다", async () => {
+test("DEPLOY는 secret과 ConfigMap을 만든 뒤 apply하고 CronJob·ServiceAccount·NetworkPolicy를 읽어 대조한다", async () => {
   const cluster = fakeCluster();
   const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
-  assert.deepEqual(verbs(cluster), ["get", "create", "create", "apply", "get"]);
+  assert.deepEqual(trail(cluster), ["get:cronjob", "create", "create", "apply", "get:cronjob", "get:serviceaccount", "get:networkpolicy"]);
   const [, createSecret, createConfig, apply] = cluster.calls;
   const secret = JSON.parse(createSecret.input);
   assert.deepEqual({ ...secret, stringData: Object.keys(secret.stringData) }, {
-    apiVersion: "v1", kind: "Secret", metadata: { name: expected.names.secret, namespace: NAMESPACE, labels: { "app.kubernetes.io/name": "data-workflow-scheduler", "app.kubernetes.io/part-of": "easysubway" } },
+    apiVersion: "v1", kind: "Secret", metadata: { name: expected.names.secret, namespace: NAMESPACE, labels: { "app.kubernetes.io/name": OWNER_LABEL, "app.kubernetes.io/part-of": "easysubway" } },
     immutable: true, type: "Opaque", stringData: ["client-id", "private-key.pem"],
   });
   assert.equal(secret.stringData["client-id"], CLIENT_ID);
@@ -84,7 +105,6 @@ test("DEPLOY는 secret과 ConfigMap을 만든 뒤 나머지를 apply하고 읽�
   assert.equal(applied.kind, "List");
   assert.deepEqual(applied.items, [expected.objects.serviceAccount, expected.objects.networkPolicy, expected.objects.cronJob]);
   assert.equal(result.names.secret, expected.names.secret);
-  assert.equal(result.secretValueSerializedCount, 0);
   assert.equal(result.kubernetesMutationCount, 5);
   assert.deepEqual(result.pruned, []);
 });
@@ -104,18 +124,35 @@ test("secret 값은 명령행 인자·apply 입력·결과 어디에도 나오�
   assert.equal(JSON.stringify(result).includes(CLIENT_ID), false);
 });
 
-test("이전 CronJob이 다른 secret·ConfigMap을 쓰면 새 CronJob을 확인한 뒤 그 한 세트만 지운다", async () => {
-  const oldSecret = `data-workflow-scheduler-secret-${"1".repeat(20)}`;
-  const oldConfig = `data-workflow-scheduler-config-${"2".repeat(20)}`;
-  const cluster = fakeCluster({ previous: previousCronJob(oldSecret, oldConfig) });
+test("이전 CronJob이 다른 secret·ConfigMap을 쓰면 새 CronJob을 확인한 뒤 이 스케줄러 이름·소유 label을 검증하고 그 한 세트만 관리자 권한으로 지운다", async () => {
+  const cluster = fakeCluster({ previous: previousCronJob(OLD_SECRET, OLD_CONFIG) });
   const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
-  assert.deepEqual(verbs(cluster), ["get", "create", "create", "apply", "get", "delete", "delete"]);
-  const deletes = cluster.calls.slice(-2).map(({ args }) => args.slice(args.indexOf("kubectl") + 2));
-  assert.deepEqual(deletes, [
-    ["delete", "secret", oldSecret, "--namespace", NAMESPACE, "--ignore-not-found=true"],
-    ["delete", "configmap", oldConfig, "--namespace", NAMESPACE, "--ignore-not-found=true"],
+  assert.deepEqual(trail(cluster), [
+    "get:cronjob", "create", "create", "apply", "get:cronjob", "get:serviceaccount", "get:networkpolicy",
+    "admin:get:secret", "admin:get:configmap", "admin:delete:secret", "admin:delete:configmap",
   ]);
-  assert.deepEqual(result.pruned, [`secret/${oldSecret}`, `configmap/${oldConfig}`]);
+  const prune = cluster.calls.slice(-4).map(({ args }) => args.slice(args.indexOf("kubectl") + 1));
+  assert.deepEqual(prune, [
+    ["get", "secret", OLD_SECRET, "--namespace", NAMESPACE, "-o", "jsonpath={.metadata.labels.app\\.kubernetes\\.io/name}"],
+    ["get", "configmap", OLD_CONFIG, "--namespace", NAMESPACE, "-o", "jsonpath={.metadata.labels.app\\.kubernetes\\.io/name}"],
+    ["delete", "secret", OLD_SECRET, "--namespace", NAMESPACE, "--ignore-not-found=true"],
+    ["delete", "configmap", OLD_CONFIG, "--namespace", NAMESPACE, "--ignore-not-found=true"],
+  ]);
+  assert.deepEqual(result.pruned, [`secret/${OLD_SECRET}`, `configmap/${OLD_CONFIG}`]);
+});
+
+test("직전 이름이 이 스케줄러 접두사가 아니거나 소유 label이 다르면 아무것도 지우지 않고 실패한다", async () => {
+  for (const [previous, ownerLabel] of [
+    [previousCronJob("journey-secret-0123456789abcdef0123", OLD_CONFIG), OWNER_LABEL],
+    [previousCronJob(OLD_SECRET, "journey-config"), OWNER_LABEL],
+    [previousCronJob(OLD_SECRET, `data-workflow-scheduler-config-${"2".repeat(19)}`), OWNER_LABEL],
+    [previousCronJob(OLD_SECRET, OLD_CONFIG), "easysubway-journey"],
+    [previousCronJob(OLD_SECRET, OLD_CONFIG), ""],
+  ]) {
+    const cluster = fakeCluster({ previous, ownerLabel });
+    await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_PRUNE/u);
+    assert.equal(trail(cluster).some((step) => step.startsWith("admin:delete")), false);
+  }
 });
 
 test("같은 secret·ConfigMap이면 아무것도 지우지 않고 AlreadyExists는 같은 내용이라 통과한다", async () => {
@@ -124,7 +161,7 @@ test("같은 secret·ConfigMap이면 아무것도 지우지 않고 AlreadyExists
     createError: { Secret: 'Error from server (AlreadyExists): secrets "x" already exists', ConfigMap: 'Error from server (AlreadyExists): configmaps "x" already exists' },
   });
   const result = await deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner });
-  assert.equal(verbs(cluster).includes("delete"), false);
+  assert.equal(trail(cluster).some((step) => step.includes("delete")), false);
   assert.deepEqual(result.pruned, []);
   assert.equal(result.kubernetesMutationCount, 3);
 });
@@ -132,19 +169,30 @@ test("같은 secret·ConfigMap이면 아무것도 지우지 않고 AlreadyExists
 test("create가 AlreadyExists 말고 실패하면 apply 없이 실패한다", async () => {
   const cluster = fakeCluster({ createError: { Secret: "Error from server (Forbidden): secrets is forbidden" } });
   await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_KUBECTL/u);
-  assert.equal(verbs(cluster).includes("apply"), false);
+  assert.equal(trail(cluster).includes("apply"), false);
 });
 
-test("적용한 CronJob을 읽어 대조해 다르면 실패하고 이전 객체를 지우지 않는다", async () => {
-  const drifted = structuredClone(expected.objects.cronJob);
-  drifted.spec.suspend = true;
-  const oldSecret = `data-workflow-scheduler-secret-${"1".repeat(20)}`;
-  const cluster = fakeCluster({ previous: previousCronJob(oldSecret, expected.names.configMap), liveOverride: drifted });
-  await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
-  assert.equal(verbs(cluster).includes("delete"), false);
-  const wrongImage = structuredClone(expected.objects.cronJob);
-  wrongImage.spec.jobTemplate.spec.template.spec.containers[0].image = "docker.io/library/node:latest";
-  await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: fakeCluster({ liveOverride: wrongImage }).commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
+test("읽기 대조는 실제 객체의 보안 필드·볼륨·NetworkPolicy까지 비교하고 어긋나면 실패하며 이전 객체를 지우지 않는다", async () => {
+  const mutate = (change) => {
+    const cronJob = withDefaults(expected.objects.cronJob);
+    change(cronJob);
+    return cronJob;
+  };
+  const pod = (cronJob) => cronJob.spec.jobTemplate.spec.template.spec;
+  const drifted = [
+    ["suspend", { cronjob: mutate((cronJob) => { cronJob.spec.suspend = true; }) }],
+    ["image", { cronjob: mutate((cronJob) => { pod(cronJob).containers[0].image = "docker.io/library/node:latest"; }) }],
+    ["readOnlyRootFilesystem", { cronjob: mutate((cronJob) => { pod(cronJob).containers[0].securityContext.readOnlyRootFilesystem = false; }) }],
+    ["secret volume mode", { cronjob: mutate((cronJob) => { pod(cronJob).volumes[1].secret.defaultMode = 0o644; }) }],
+    ["env", { cronjob: mutate((cronJob) => { pod(cronJob).containers[0].env.push({ name: "EXTRA", value: "1" }); }) }],
+    ["serviceaccount token", { serviceaccount: { ...expected.objects.serviceAccount, automountServiceAccountToken: true } }],
+    ["network policy egress", { networkpolicy: { ...expected.objects.networkPolicy, spec: { ...expected.objects.networkPolicy.spec, egress: [] } } }],
+  ];
+  for (const [label, live] of drifted) {
+    const cluster = fakeCluster({ previous: previousCronJob(OLD_SECRET, expected.names.configMap), live });
+    await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u, label);
+    assert.equal(trail(cluster).some((step) => step.includes("delete")), false, label);
+  }
 });
 
 test("secret이 없거나 RSA가 아니거나 PEM이 아니면 클러스터를 부르기 전에 실패한다", async () => {
@@ -184,6 +232,19 @@ test("DEPLOY는 클러스터를 건드리기 전에 App 자격을 확인하고 �
   accessChecks.length = 0;
   await deployDataWorkflowScheduler({ mode: "PREVIEW", env: {}, commandRunner: fakeCluster().commandRunner, verifyAccess });
   assert.equal(accessChecks.length, 0, "PREVIEW는 GitHub를 부르지 않는다");
+});
+
+test("자식 프로세스는 최소 환경(PATH)만 받아 환경 변수의 App key가 상속되지 않는다", async () => {
+  process.env.EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY = "inherited-key-must-not-leak";
+  process.env.EASYSUBWAY_DISPATCH_APP_CLIENT_ID = "Iv23liInheritedClientId";
+  try {
+    const { stdout } = await runCommand("env", []);
+    assert.deepEqual(stdout.trim().split("\n").map((line) => line.split("=")[0]).filter((name) => name !== "PWD" && name !== "_" && name !== "SHLVL").sort(), ["PATH"]);
+    assert.equal(stdout.includes("inherited-key-must-not-leak"), false);
+  } finally {
+    delete process.env.EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY;
+    delete process.env.EASYSUBWAY_DISPATCH_APP_CLIENT_ID;
+  }
 });
 
 test("mode는 PREVIEW와 DEPLOY만 받는다", async () => {

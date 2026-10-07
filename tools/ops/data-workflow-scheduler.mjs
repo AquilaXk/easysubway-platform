@@ -7,6 +7,8 @@
 // 실패는 숨기지 않는다: 발급·범위 검증·dispatch 중 하나라도 실패하면 나머지 dispatch를 시도한 뒤 비0으로 끝난다.
 // 이전 결과로 대신하거나 재시도로 덮지 않는다. GitHub `schedule`은 data 레포에 백업으로 남아 있다.
 // token·JWT·private key는 로그와 오류에 남기지 않는다.
+// token 수명은 최대 1시간이다. 폐기(DELETE /installation/token)에 실패하면 그 시간 동안 actions:write token이 살아 있으므로
+// 폐기 실패는 비0 종료로 드러내고, SIGTERM(activeDeadlineSeconds 초과·노드 종료)을 받으면 폐기한 뒤 143으로 끝난다.
 import { createPrivateKey, createSign } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -147,7 +149,7 @@ function createEmitter(log, now) {
  * App JWT -> 설치 조회 -> 범위를 줄인 installation token 발급·검증 -> useToken 실행 -> token 폐기.
  * 요청보다 넓게 발급된 token은 쓰지 않고 바로 폐기한다.
  */
-async function withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, useToken) {
+async function withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit, signals, exit }, useToken) {
   const jwt = createAppJwt({ clientId, privateKeyPem, now: now() });
   const secrets = [jwt];
   const redact = redactor(secrets);
@@ -169,6 +171,21 @@ async function withScopedInstallationToken({ config, clientId, privateKeyPem, no
   }
   secrets.push(token);
 
+  // 폐기는 한 번만 시도한다. token 수명은 최대 1시간이라 폐기에 실패하면 그 시간 동안 actions:write token이 살아 있다.
+  let revocation = null;
+  const revoke = () => {
+    revocation ??= call(fetchImpl, redact, "DELETE", "/installation/token", { bearer: token }).then((result) => result.status, () => 0);
+    return revocation;
+  };
+  // SIGTERM(activeDeadlineSeconds 초과, 노드 종료)은 대기 중이어도 token을 폐기한 뒤 끝낸다.
+  const onTerminate = async () => {
+    emit("terminated");
+    const status = await revoke();
+    emit(status === 204 ? "token_revoked" : "token_revoke_failed", status === 204 ? {} : { status });
+    exit(143);
+  };
+  signals.once("SIGTERM", onTerminate);
+  let primary = null;
   try {
     const granted = minted.json.permissions;
     const names = isObject(granted) ? Object.keys(granted) : [];
@@ -179,26 +196,35 @@ async function withScopedInstallationToken({ config, clientId, privateKeyPem, no
       fail("SCHEDULER_TOKEN_SCOPE", "installation token is broader than actions:write on the data repository only");
     }
     emit("token_minted");
-    return await useToken({ token, redact });
-  } finally {
-    const revoked = await call(fetchImpl, redact, "DELETE", "/installation/token", { bearer: token }).catch(() => ({ status: 0 }));
-    if (revoked.status === 204) emit("token_revoked");
-    else emit("token_revoke_failed", { status: revoked.status });
+    await useToken({ token, redact });
+  } catch (error) {
+    primary = error;
   }
+  signals.removeListener("SIGTERM", onTerminate);
+  const status = await revoke();
+  emit(status === 204 ? "token_revoked" : "token_revoke_failed", status === 204 ? {} : { status });
+  if (status !== 204) {
+    const detail = `SCHEDULER_TOKEN_REVOKE_FAILED: HTTP ${status} (the installation token stays valid until it expires, at most 1 hour)`;
+    if (primary) primary.message = `${primary.message}; ${detail}`;
+    else primary = new SchedulerError("SCHEDULER_TOKEN_REVOKE_FAILED", detail.slice(detail.indexOf(": ") + 2));
+  }
+  if (primary) throw primary;
 }
 
 /** 배포 전에 App 자격이 실제로 동작하는지 확인한다: token을 범위 검증까지 발급하고 dispatch 없이 폐기한다. */
-export async function verifyAppAccess({ config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch, log = console.log }) {
+export async function verifyAppAccess({
+  config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch, log = console.log, signals = process, exit = (code) => process.exit(code),
+}) {
   validateScheduleConfig(config);
   const emit = createEmitter(log, now);
-  await withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, async () => {});
+  await withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit, signals, exit }, async () => {});
   emit("app_access_verified");
   return { verified: true };
 }
 
 export async function runScheduler({
   config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch,
-  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }), log = console.log,
+  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }), log = console.log, signals = process, exit = (code) => process.exit(code),
 }) {
   validateScheduleConfig(config);
   const emit = createEmitter(log, now);
@@ -212,7 +238,7 @@ export async function runScheduler({
 
   const failures = [];
   const dispatched = [];
-  await withScopedInstallationToken({ config, clientId, privateKeyPem, now: () => started, fetchImpl, emit }, async ({ token, redact }) => {
+  await withScopedInstallationToken({ config, clientId, privateKeyPem, now: () => started, fetchImpl, emit, signals, exit }, async ({ token, redact }) => {
     const hourStart = Date.UTC(started.getUTCFullYear(), started.getUTCMonth(), started.getUTCDate(), started.getUTCHours());
     for (const entry of due) {
       const wait = hourStart + entry.minute * 60_000 - now().getTime();
@@ -229,8 +255,8 @@ export async function runScheduler({
         emit("dispatch_failed", { id: entry.id, workflow: entry.workflow, status: result.status });
       }
     }
+    if (failures.length > 0) fail("SCHEDULER_DISPATCH_FAILED", failures.join(", "));
   });
-  if (failures.length > 0) fail("SCHEDULER_DISPATCH_FAILED", failures.join(", "));
   emit("done", { dispatched });
   return { dispatched };
 }

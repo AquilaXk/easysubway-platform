@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { createAppJwt, dueEntries, runScheduler, validateScheduleConfig, verifyAppAccess } from "./data-workflow-scheduler.mjs";
@@ -174,11 +175,38 @@ test("설치 조회가 깨진 응답이면 실패한다", async () => {
   assert.equal(github.calls.length, 1);
 });
 
-test("token 폐기가 실패해도 dispatch 결과를 바꾸지 않고 경고만 남긴다", async () => {
-  const github = fakeGitHub({ now: at("2026-10-07T04:00:00Z"), revokeStatus: 500 });
-  const result = await run(github);
-  assert.equal(result.dispatched.length, 3);
-  assert.ok(github.logs.some((line) => JSON.parse(line).event === "token_revoke_failed"));
+test("token 폐기가 실패하면 dispatch가 끝났어도 비0으로 끝나고 dispatch 실패와 함께 보고한다", async () => {
+  const revokeFails = fakeGitHub({ now: at("2026-10-07T04:00:00Z"), revokeStatus: 500 });
+  await assert.rejects(run(revokeFails), /^Error: SCHEDULER_TOKEN_REVOKE_FAILED: HTTP 500 \(the installation token stays valid until it expires, at most 1 hour\)$/u);
+  assert.equal(dispatches(revokeFails).length, 3);
+  assert.ok(revokeFails.logs.some((line) => JSON.parse(line).event === "token_revoke_failed"));
+  const both = fakeGitHub({ now: at("2026-10-07T04:00:00Z"), revokeStatus: 500, dispatchStatus: { "source-reverification.yml": 422 } });
+  await assert.rejects(run(both), /SCHEDULER_DISPATCH_FAILED: source-reverification .*; SCHEDULER_TOKEN_REVOKE_FAILED: HTTP 500/u);
+  const verify = fakeGitHub({ now: at("2026-10-07T03:00:00Z"), revokeStatus: 500 });
+  await assert.rejects(verifyAppAccess({ config, clientId: CLIENT_ID, privateKeyPem, now: verify.now, fetchImpl: verify.fetchImpl, log: verify.log }), /SCHEDULER_TOKEN_REVOKE_FAILED/u);
+});
+
+test("SIGTERM(activeDeadlineSeconds 초과, 노드 종료)을 받으면 대기 중에도 token을 폐기하고 143으로 끝난다", async () => {
+  const github = fakeGitHub({ now: at("2026-10-07T04:00:00Z") });
+  const signals = new EventEmitter();
+  const exits = [];
+  const pending = run(github, { sleep: () => new Promise(() => {}), signals, exit: (code) => exits.push(code) });
+  for (let attempt = 0; attempt < 50 && github.calls.length < 2; attempt += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  assert.equal(signals.listenerCount("SIGTERM"), 1);
+  signals.emit("SIGTERM");
+  for (let attempt = 0; attempt < 50 && exits.length === 0; attempt += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  assert.deepEqual(exits, [143]);
+  assert.equal(github.calls.at(-1).method, "DELETE");
+  assert.equal(github.calls.at(-1).headers.authorization, `Bearer ${INSTALLATION_TOKEN}`);
+  assert.ok(github.logs.some((line) => JSON.parse(line).event === "terminated"));
+  void pending;
+});
+
+test("정상 종료 뒤에는 SIGTERM 처리기를 남기지 않는다", async () => {
+  const github = fakeGitHub({ now: at("2026-10-07T04:00:00Z") });
+  const signals = new EventEmitter();
+  await run(github, { signals, exit: () => assert.fail("exit must not be called") });
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
 });
 
 test("로그와 오류 어디에도 token·JWT·private key가 남지 않는다", async () => {
