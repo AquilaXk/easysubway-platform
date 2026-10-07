@@ -243,9 +243,10 @@ test("App 시크릿은 production-deploy 환경 범위에서만 읽고 환경 �
 
 test("배포 후 확인 절차에 NetworkPolicy 실제 적용 시험(차단 대상 접속)이 있다", () => {
   assert.deepEqual(contract.postDeployVerification.map(({ id }) => id), [
-    "NETWORK_POLICY_ENFORCED_NON_GITHUB_HOST_BLOCKED",
+    "NETWORK_POLICY_ENFORCED_PUBLIC_HTTP_BLOCKED",
     "NETWORK_POLICY_NODE_SERVICES_BLOCKED",
     "NETWORK_POLICY_GITHUB_API_ALLOWED",
+    "NETWORK_POLICY_LIMIT_ANY_PUBLIC_443",
   ]);
   for (const { description } of contract.postDeployVerification) assert.ok(description.length > 20);
 });
