@@ -399,6 +399,32 @@ test("적용 뒤 라이브 설정이 기대와 다르면 직전 release로 되�
   }
 });
 
+test("복원에서 compose up이 컨테이너를 그대로 두면 current를 되돌린 뒤 정확히 한 번 재시작하고, 재생성하면 재시작하지 않는다", async () => {
+  const keep = sandbox();
+  try {
+    seedPreviousRelease(keep);
+    const host = createHost({ recreateOnUp: false, restartFixesLive: false });
+    await assert.rejects(deployObservabilityConfig(base(keep, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY.*restored previous release/su);
+    const trail = verbs(host);
+    const secondUp = trail.lastIndexOf("compose:up");
+    assert.notEqual(secondUp, trail.indexOf("compose:up"), "복원도 compose up을 거친다");
+    assert.equal(trail.slice(0, secondUp).filter((verb) => verb === "restart").length, 1, "적용 단계의 재시작");
+    assert.equal(trail.slice(secondUp).filter((verb) => verb === "restart").length, 1, "복원 단계의 재시작은 정확히 한 번");
+    assert.equal(readlinkSync(join(keep.observability, "current")), join("releases", PREVIOUS));
+  } finally {
+    keep.cleanup();
+  }
+  const recreate = sandbox();
+  try {
+    seedPreviousRelease(recreate);
+    const host = createHost({ recreateOnUp: true, liveAfter: snapshot({ revision: "old" }) });
+    await assert.rejects(deployObservabilityConfig(base(recreate, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY.*restored previous release/su);
+    assert.equal(verbs(host).filter((verb) => verb === "restart").length, 0, "재생성된 컨테이너는 재시작하지 않는다");
+  } finally {
+    recreate.cleanup();
+  }
+});
+
 test("처음 배포가 검증에서 실패하면 자동 복원하지 않고 수동 rollback 절차를 알리며 실패한다", async () => {
   const box = sandbox();
   try {
