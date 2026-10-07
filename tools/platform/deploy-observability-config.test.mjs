@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,10 +80,10 @@ function createHost({
   existingContainerId = "1".repeat(64), recreateOnUp = true, restartFixesLive = true, promtoolFails = null,
   liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
-  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null,
+  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale",
 } = {}) {
   const calls = [];
-  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
+  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, mounted: mountedBefore, dirs: {}, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
     { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
@@ -105,6 +106,7 @@ function createHost({
         if (recreateOnUp) {
           state.generation += 1;
           state.containerId = String(8 + state.generation).repeat(64);
+          state.mounted = "current";
           state.live = liveAfter ?? expected;
           if (networksAfterUp) state.networks = networksAfterUp;
           if (extraHostsAfterUp) state.extraHosts = extraHostsAfterUp;
@@ -129,6 +131,12 @@ function createHost({
     }
     if (verb === "exec") {
       const [, target, tool, , url] = args;
+      if (tool === "sha256sum") {
+        assert.equal(target, "easysubway-prometheus");
+        const mountedDir = state.mounted === "stale" ? null : realpathSync(state.mounted === "current" ? state.dirs.current : state.mounted === "commit" ? state.dirs.commit : state.mounted);
+        const digestOf = (file) => (mountedDir === null ? "0".repeat(64) : sha256(readFileSync(join(mountedDir, "prometheus", file))));
+        return { stdout: args.slice(3).map((path) => `${digestOf(path.split("/").at(-1))}  ${path}`).join("\n") + "\n", stderr: "" };
+      }
       assert.equal(tool, "wget");
       const path = url.replace("http://127.0.0.1:9090", "");
       if (target === reference) return { stdout: httpBody(path, { ...expected, targets: expected.targets.map((item) => ({ ...item, health: "down" })) }), stderr: "" };
@@ -142,6 +150,7 @@ function createHost({
     if (verb === "restart") {
       assert.equal(args[1], "easysubway-prometheus");
       if (restartFixesLive) state.live = liveAfter ?? expected;
+      state.mounted = "current";
       return { stdout: "", stderr: "" };
     }
     if (verb === "inspect") {
@@ -172,7 +181,7 @@ function createHost({
     assert.fail(`unexpected docker command: ${line}`);
     return null;
   };
-  return { calls, runner, state, volume };
+  return { calls, runner, state, volume, others };
 }
 
 function sandbox() {
@@ -184,6 +193,7 @@ function sandbox() {
 }
 
 const base = (box, host, overrides = {}) => ({
+  ...(Object.assign(host.state.dirs, { current: join(box.observability, "current"), commit: join(box.observability, "releases", COMMIT) }), {}),
   commit: COMMIT, sourceRoot: box.sourceRoot, deployRoot: box.deployRoot, stagingRoot: box.stagingRoot,
   composeEnvFile: "/opt/easysubway/shared/current-env/compose.env", runUrl: RUN_URL, runId: "123",
   commandRunner: host.runner, sleep: async () => {}, now: () => new Date("2026-10-08T01:02:03.000Z"), ...overrides,
@@ -381,7 +391,7 @@ test("같은 커밋을 다시 배포하면 이미 맞는 컨테이너를 재시�
   try {
     const first = createHost();
     await deployObservabilityConfig(base(box, first, { mode: "DEPLOY" }));
-    const again = createHost({ recreateOnUp: false, liveBefore: snapshot(), existingContainerId: "9".repeat(64) });
+    const again = createHost({ recreateOnUp: false, liveBefore: snapshot(), existingContainerId: "9".repeat(64), mountedBefore: "current" });
     const result = await deployObservabilityConfig(base(box, again, { mode: "DEPLOY", runId: "124" }));
     assert.equal(verbs(again).includes("restart"), false);
     assert.equal(result.container.action, "unchanged");
@@ -619,6 +629,140 @@ test("컨테이너의 /prometheus 마운트가 지정 volume이 아니면 compos
     } finally {
       box.cleanup();
     }
+  }
+});
+
+// 재시작 여부는 symlink 이력이 아니라 컨테이너가 실제로 마운트한 파일 내용으로 정한다(F1).
+function seedCurrentRelease(box, commit = COMMIT) {
+  const release = join(box.observability, "releases", commit);
+  mkdirSync(join(box.observability, "releases"), { recursive: true });
+  cpSync(join(box.sourceRoot, "infra"), release, { recursive: true });
+  symlinkSync(join("releases", commit), join(box.observability, "current"));
+}
+
+test("중단된 적용을 같은 커밋으로 재시도하면 current가 이미 그 release여도 컨테이너가 옛 파일을 마운트하고 있으면 재시작해 수렴한다", async () => {
+  const box = sandbox();
+  try {
+    seedCurrentRelease(box);
+    const host = createHost({ recreateOnUp: false, mountedBefore: "stale" });
+    const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
+    assert.equal(verbs(host).filter((verb) => verb === "restart").length, 1);
+    assert.equal(result.container.action, "restarted");
+    assert.equal(result.verification.statusConfigSha256, result.verification.expectedStatusConfigSha256);
+    assert.equal(result.previousCommit, COMMIT);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("컨테이너가 이미 새 release 내용을 마운트하고 있으면 current가 직전 release였어도 재시작하지 않는다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const host = createHost({ recreateOnUp: false, liveBefore: snapshot(), mountedBefore: "commit" });
+    const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
+    assert.equal(verbs(host).includes("restart"), false);
+    assert.equal(result.container.action, "unchanged");
+    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", COMMIT));
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("컨테이너 마운트 내용을 읽을 수 없거나 재시작 뒤에도 release와 다르면 실패하고 복원한다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const host = createHost({ recreateOnUp: false, restartFixesLive: false });
+    const original = host.runner;
+    const runner = async (command, args, options) => {
+      if (command === "docker" && args[0] === "exec" && args[2] === "sha256sum") return { stdout: `${"0".repeat(64)}  /etc/prometheus/prometheus.yml\n${"0".repeat(64)}  /etc/prometheus/alerts.yml\n`, stderr: "" };
+      return original(command, args, options);
+    };
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", commandRunner: runner })), /E_OBS_DEPLOY_VERIFY.*mounted/su);
+    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
+  } finally {
+    box.cleanup();
+  }
+});
+
+function withSignals(host, box, { emitOnUp = true } = {}) {
+  const signals = new EventEmitter();
+  const exits = [];
+  const original = host.runner;
+  const runner = async (command, args, options) => {
+    if (emitOnUp && command === "docker" && args[0] === "compose" && args.includes("up")) {
+      signals.emit("SIGTERM", "SIGTERM");
+      throw new Error("killed while compose up was running");
+    }
+    return original(command, args, options);
+  };
+  return { signals, exits, runner, options: { signalSource: signals, exit: (code) => { exits.push(code); }, commandRunner: runner } };
+}
+
+test("적용 중 SIGTERM을 받으면 current를 직전 release로 되돌리고 INTERRUPTED 실패 receipt를 남기며 143으로 종료한다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const host = createHost();
+    const hooked = withSignals(host, box);
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", ...hooked.options })), /killed/u);
+    assert.deepEqual(hooked.exits, [143]);
+    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
+    const failure = failureReceipt(box);
+    assert.equal(failure.outcome, "INTERRUPTED");
+    assert.equal(failure.error.code, "E_OBS_DEPLOY_INTERRUPTED");
+    assert.match(failure.error.detail, /SIGTERM.*container state is unknown.*rerun/su);
+    assert.equal(failure.restore, "LINK_RESTORED");
+    assert.equal(verbs(host).filter((verb) => verb === "compose:up").length, 0, "시그널 이후 추가 compose를 실행하지 않는다(runner가 up을 막았다)");
+    assert.equal(existsSync(receiptPath(box)), false);
+    assert.equal(hooked.signals.listenerCount("SIGTERM"), 0, "핸들러는 정리된다");
+    assert.equal(hooked.signals.listenerCount("SIGINT"), 0);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("첫 배포 중 SIGINT는 되돌릴 관리 release가 없음을 receipt에 남기고 130으로 종료한다", async () => {
+  const box = sandbox();
+  try {
+    const host = createHost();
+    const signals = new EventEmitter();
+    const exits = [];
+    const original = host.runner;
+    const runner = async (command, args, options) => {
+      if (command === "docker" && args[0] === "compose" && args.includes("up")) {
+        signals.emit("SIGINT", "SIGINT");
+        throw new Error("interrupted");
+      }
+      return original(command, args, options);
+    };
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", signalSource: signals, exit: (code) => { exits.push(code); }, commandRunner: runner })), /interrupted/u);
+    assert.deepEqual(exits, [130]);
+    const failure = failureReceipt(box);
+    assert.equal(failure.outcome, "INTERRUPTED");
+    assert.equal(failure.restore, "NO_MANAGED_PREVIOUS");
+    assert.equal(failure.previousCommit, null);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("중단된 뒤 같은 커밋을 재시도하면 컨테이너가 어떤 상태여도 수렴한다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const interrupted = createHost();
+    const hooked = withSignals(interrupted, box);
+    await assert.rejects(deployObservabilityConfig(base(box, interrupted, { mode: "DEPLOY", ...hooked.options })), /killed/u);
+    // 컨테이너는 옛 파일을 마운트한 채 살아 있다(재생성되지 않음).
+    const retry = createHost({ recreateOnUp: false, mountedBefore: "stale" });
+    const result = await deployObservabilityConfig(base(box, retry, { mode: "DEPLOY", runId: "124" }));
+    assert.equal(result.container.action, "restarted");
+    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", COMMIT));
+    assert.equal(result.previousCommit, PREVIOUS);
+  } finally {
+    box.cleanup();
   }
 });
 
