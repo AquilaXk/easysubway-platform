@@ -47,7 +47,7 @@ const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/+-]+$/u;
 const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const WAIT_ATTEMPTS = 60;
-const VERIFY_ATTEMPTS = 10;
+const VERIFY_ATTEMPTS = 20;
 
 class DeployError extends Error {
   constructor(code, detail = "") {
@@ -248,6 +248,8 @@ async function readSnapshot(docker, target) {
   const [build, flags, config, rules] = [
     await data("/api/v1/status/buildinfo"), await data("/api/v1/status/flags"), await data("/api/v1/status/config"), await data("/api/v1/rules"),
   ];
+  const targets = (await data("/api/v1/targets?state=active")).activeTargets.map((target) => ({ job: target.scrapePool, health: target.health })).sort((a, b) => codepointCompare(a.job, b.job) || codepointCompare(a.health, b.health));
+  const allRules = rules.groups.flatMap((group) => (group.rules ?? []).map((rule) => ({ name: rule.name, health: rule.health })));
   // Prometheus가 자기 자신을 scrape하지 않으므로(prometheus.yml에 self job 없음) PromQL이 아니라 /metrics 본문에서 읽는다.
   const metrics = await promGet(docker, target, "/metrics");
   const projected = rulesProjection(rules.groups);
@@ -258,6 +260,9 @@ async function readSnapshot(docker, target) {
     statusConfigSha256: sha256(config.yaml),
     rulesSha256: sha256(JSON.stringify(projected)),
     jobs: jobsOf(config.yaml),
+    targets,
+    ruleHealth: { total: allRules.length, ok: allRules.filter((rule) => rule.health === "ok").length },
+    unhealthyRules: allRules.filter((rule) => rule.health !== "ok").map((rule) => `${rule.name}=${rule.health}`),
     reloadSuccessful: metricToken(metrics, "prometheus_config_last_reload_successful"),
     lowestTimestamp: metricToken(metrics, "prometheus_tsdb_lowest_timestamp"),
   };
@@ -343,7 +348,11 @@ async function readHostState(docker) {
   if (mount?.Type !== "volume" || mount.Name !== DATA_VOLUME) fail("E_OBS_DEPLOY_VOLUME", `${CONTAINER} does not mount ${DATA_VOLUME} at ${DATA_MOUNT}`);
   const [volume] = await docker.json(["volume", "inspect", DATA_VOLUME]);
   const projectContainers = await readProjectContainers(docker);
-  return { containerId: container.Id, volume: { mountpoint: volume.Mountpoint, createdAt: volume.CreatedAt }, projectContainers };
+  const network = {
+    networks: Object.keys(container.NetworkSettings?.Networks ?? {}).sort(codepointCompare),
+    extraHosts: [...(container.HostConfig?.ExtraHosts ?? [])].sort(codepointCompare),
+  };
+  return { containerId: container.Id, volume: { mountpoint: volume.Mountpoint, createdAt: volume.CreatedAt }, projectContainers, network };
 }
 
 async function readProjectContainers(docker) {
@@ -386,6 +395,13 @@ function compareSnapshots(expected, live, flagKeys) {
   if (live.rulesSha256 !== expected.rulesSha256) problems.push("/api/v1/rules differs from the deployed commit");
   if (JSON.stringify(live.jobs) !== JSON.stringify(expected.jobs)) problems.push(`jobs [${live.jobs.join(",")}] != [${expected.jobs.join(",")}]`);
   for (const job of REMOVED_JOBS) if (live.jobs.includes(job)) problems.push(`removed job ${job} is still configured`);
+  // reference는 네트워크가 없어 scrape할 수 없으므로 target·규칙 health는 라이브만 본다. 첫 scrape·첫 평가는 검증 반복이 기다린다.
+  for (const job of expected.jobs) {
+    const own = live.targets.filter((target) => target.job === job);
+    if (own.length === 0) problems.push(`job ${job} has no active target`);
+    else if (own.some((target) => target.health !== "up")) problems.push(`job ${job} target is not up (${own.map((target) => target.health).join(",")})`);
+  }
+  if (live.unhealthyRules.length > 0) problems.push(`rule health is not ok: ${live.unhealthyRules.join(",")}`);
   if (live.reloadSuccessful !== "1") problems.push("prometheus_config_last_reload_successful is not 1");
   return problems;
 }
@@ -523,6 +539,7 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       await waitHealthy(docker, sleep);
       verified = await verifyLive({ docker, sleep, expected: preview.expected, flagKeys: preview.flagKeys });
       assertScopeAndVolume(before, verified.hostAfter);
+      assertRuntimeWiring(before, verified.hostAfter);
     } catch (error) {
       const outcome = await restorePrevious({ docker, sleep, root, composeEnvFile, previousCommit, commit, error });
       writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, error: outcome.error, restore: outcome.restore, configDigest: result.configDigest });
@@ -584,6 +601,12 @@ function assertScopeAndVolume(before, hostAfter) {
   }
 }
 
+/** 재생성된 컨테이너가 기존 컨테이너와 같은 네트워크·extra_hosts를 쓰는지(scrape 경로가 같은지) 확인한다. */
+function assertRuntimeWiring(before, hostAfter) {
+  if (JSON.stringify(hostAfter.network.networks) !== JSON.stringify(before.network.networks)) fail("E_OBS_DEPLOY_VERIFY", `network changed (${before.network.networks.join(",")} -> ${hostAfter.network.networks.join(",")})`);
+  if (JSON.stringify(hostAfter.network.extraHosts) !== JSON.stringify(before.network.extraHosts)) fail("E_OBS_DEPLOY_VERIFY", `extra_hosts changed (${before.network.extraHosts.join(",")} -> ${hostAfter.network.extraHosts.join(",")})`);
+}
+
 function finishVerification({ before, verified, lowestBefore, preview }) {
   const afterOthers = Object.keys(verified.hostAfter.projectContainers).filter((name) => name !== CONTAINER);
   return {
@@ -595,6 +618,8 @@ function finishVerification({ before, verified, lowestBefore, preview }) {
     expectedRulesSha256: preview.expected.rulesSha256,
     jobs: verified.live.jobs,
     absentJobs: [...REMOVED_JOBS],
+    targets: verified.live.targets,
+    ruleHealth: verified.live.ruleHealth,
     configReloadSuccessful: verified.live.reloadSuccessful,
     untouchedContainers: afterOthers.sort(codepointCompare),
     volume: {
@@ -606,6 +631,7 @@ function finishVerification({ before, verified, lowestBefore, preview }) {
       tsdbLowestTimestampBefore: lowestBefore,
       tsdbLowestTimestampAfter: verified.live.lowestTimestamp,
     },
+    network: verified.hostAfter.network,
   };
 }
 
