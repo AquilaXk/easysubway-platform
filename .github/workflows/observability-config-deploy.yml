@@ -1,0 +1,117 @@
+name: Observability Config Deploy
+
+# AquilaXk/easysubway-platform#227: platform 레포 커밋의 infra/ 관측 설정을 운영 호스트의 Prometheus에 배포하는 영구 경로.
+# PREVIEW는 GitHub-hosted runner에서 promtool 검증과 격리 reference Prometheus의 기대 상태만 만든다(호스트 접근·secret 없음).
+# DEPLOY는 승인 환경(production-deploy)의 self-hosted runner에서만 돌고, 검증을 통과한 설정만 current로 전환해 prometheus
+# compose 서비스 하나를 맞춘 뒤 라이브 /api/v1/status/config·rules·flags를 커밋 기준과 대조하고 receipt를 남긴다. PR 병합만으로 배포되지 않는다.
+# 롤백은 직전 배포 커밋을 commit 입력으로 다시 DEPLOY하는 것이다(같은 검증·대조·receipt 경로).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Closed execution mode"
+        required: true
+        type: choice
+        options:
+          - PREVIEW
+          - DEPLOY
+      commit:
+        description: "Platform main commit to deploy (40-hex SHA). Empty uses this run's commit. Use the previous release commit to roll back."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: observability-config-production
+  cancel-in-progress: false
+
+jobs:
+  observability:
+    name: ${{ inputs.mode == 'DEPLOY' && 'Deploy Prometheus config to production' || 'Preview Prometheus config deploy' }}
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    environment: production-deploy
+    runs-on: ${{ fromJSON(inputs.mode == 'DEPLOY' && '["self-hosted","Linux","ARM64","easysubway-production"]' || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Platform tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Verify production-deploy admission
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
+            --repository "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${RUNNER_TEMP}/admission-receipt.json"
+
+      - name: Validate commit input
+        shell: bash
+        env:
+          COMMIT_INPUT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ -z "${COMMIT_INPUT}" || "${COMMIT_INPUT}" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout configuration commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit != '' && inputs.commit || github.sha }}
+          path: config-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the configuration commit to be on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C config-source merge-base --is-ancestor HEAD origin/main
+
+      - name: Preview or deploy Prometheus config
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+        run: |
+          set -euo pipefail
+          OBSERVABILITY_COMMIT="$(git -C config-source rev-parse HEAD)"
+          OBSERVABILITY_SOURCE_ROOT="${GITHUB_WORKSPACE}/config-source"
+          export OBSERVABILITY_COMMIT OBSERVABILITY_SOURCE_ROOT
+          if [[ "${MODE}" == "DEPLOY" ]]; then
+            [[ -n "${DEPLOY_ROOT}" ]]
+            OBSERVABILITY_DEPLOY_ROOT="${DEPLOY_ROOT}"
+            OBSERVABILITY_COMPOSE_ENV="${DEPLOY_ROOT}/shared/current-env/compose.env"
+            OBSERVABILITY_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            OBSERVABILITY_RUN_ID="${GITHUB_RUN_ID}"
+            export OBSERVABILITY_DEPLOY_ROOT OBSERVABILITY_COMPOSE_ENV OBSERVABILITY_RUN_URL OBSERVABILITY_RUN_ID
+          fi
+          node tools/platform/deploy-observability-config.mjs --mode "${MODE}" > "${RUNNER_TEMP}/observability-result.json"
+          {
+            echo '```json'
+            cat "${RUNNER_TEMP}/observability-result.json"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload observability result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: observability-config-${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/observability-result.json
+          if-no-files-found: ignore
+          retention-days: 90
