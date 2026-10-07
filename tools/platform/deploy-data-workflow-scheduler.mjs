@@ -34,7 +34,8 @@ function readSecrets(env, minimumKeyBits) {
   if (typeof clientId !== "string" || typeof privateKeyPem !== "string" || clientId === "" || privateKeyPem === "") fail("E_SCHEDULER_DEPLOY_SECRET", "app client id and private key are required");
   try {
     createAppJwt({ clientId, privateKeyPem, now: new Date() });
-    if (!(createPrivateKey(privateKeyPem).asymmetricKeyDetails?.modulusLength >= minimumKeyBits)) throw new Error("small key");
+    const bits = createPrivateKey(privateKeyPem).asymmetricKeyDetails?.modulusLength;
+    if (!Number.isInteger(bits) || bits < minimumKeyBits) throw new Error("small key");
   } catch {
     fail("E_SCHEDULER_DEPLOY_SECRET", `app client id or private key is invalid (RSA ${minimumKeyBits}+ PEM required)`);
   }

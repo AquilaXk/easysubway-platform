@@ -136,15 +136,17 @@ async function call(fetchImpl, redact, method, path, { bearer, body } = {}) {
 }
 
 /**
+ * 로그 한 줄은 JSON이다. 원격(GitHub) 응답 본문은 로그에 싣지 않는다: 상태 코드와 설정에서 온 id·workflow만 남긴다.
+ * 원격 메시지는 한 줄로 정제해 실패 오류 메시지에만 넣는다.
+ */
+function createEmitter(log, now) {
+  return (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }));
+}
+
+/**
  * App JWT -> 설치 조회 -> 범위를 줄인 installation token 발급·검증 -> useToken 실행 -> token 폐기.
  * 요청보다 넓게 발급된 token은 쓰지 않고 바로 폐기한다.
  */
-/** 로그 한 줄은 JSON이다. 값에 든 줄바꿈·제어 문자는 공백으로 바꿔 로그 줄을 위조하지 못하게 한다. */
-function createEmitter(log, now) {
-  const clean = (_key, value) => (typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/gu, " ") : value);
-  return (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }, clean));
-}
-
 async function withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, useToken) {
   const jwt = createAppJwt({ clientId, privateKeyPem, now: now() });
   const secrets = [jwt];
@@ -176,7 +178,8 @@ async function withScopedInstallationToken({ config, clientId, privateKeyPem, no
       || minted.json.repository_selection !== "selected" || repositories.length !== 1 || repositories[0] !== TARGET_REPOSITORY) {
       fail("SCHEDULER_TOKEN_SCOPE", "installation token is broader than actions:write on the data repository only");
     }
-    emit("token_minted", { expiresAt: typeof minted.json.expires_at === "string" ? minted.json.expires_at : null });
+    const expiresAt = new Date(minted.json.expires_at);
+    emit("token_minted", { expiresAt: Number.isNaN(expiresAt.getTime()) ? null : expiresAt.toISOString() });
     return await useToken({ token, redact });
   } finally {
     const revoked = await call(fetchImpl, redact, "DELETE", "/installation/token", { bearer: token }).catch(() => ({ status: 0 }));
@@ -223,8 +226,8 @@ export async function runScheduler({
         dispatched.push(entry.id);
         emit("dispatched", { id: entry.id, workflow: entry.workflow });
       } else {
-        failures.push(`${entry.id} (HTTP ${result.status})`);
-        emit("dispatch_failed", { id: entry.id, workflow: entry.workflow, status: result.status, message: result.message });
+        failures.push(`${entry.id} (HTTP ${result.status}${result.message ? ` ${result.message}` : ""})`);
+        emit("dispatch_failed", { id: entry.id, workflow: entry.workflow, status: result.status });
       }
     }
   });
