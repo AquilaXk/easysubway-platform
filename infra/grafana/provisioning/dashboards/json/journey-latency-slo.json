@@ -23,7 +23,7 @@
       "id": 1,
       "type": "stat",
       "title": "SLI 달성률 (선택 기간, 모드별)",
-      "description": "임계 시간 안에 끝난 ok·no_route 검색 비율. 목표 99%. 임계: depart_at 25 ms, arrive_by·last_connection 250 ms, depart_between 500 ms. 계산 가능한 기간은 Prometheus 보존 기간까지다.",
+      "description": "임계 시간 안에 끝난 ok·no_route 검색 비율. 목표 99%. 임계: depart_at 25 ms, arrive_by·last_connection 250 ms, depart_between 500 ms. 계산 가능한 기간은 Prometheus 보존 기간(compose에서 30일, 디스크 상한 3GB)까지다.",
       "gridPos": {
         "h": 6,
         "w": 24,

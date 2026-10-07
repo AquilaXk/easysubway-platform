@@ -190,6 +190,10 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+      # Journey 지연 SLO가 28일 창이라 기본 15일 보존으로는 준수율을 계산할 수 없다(Platform Issue #235). 운영 호스트 실측
+      # (2026-10-07) TSDB 약 0.8 GB/15일, 디스크 여유 14 GB. 30일 약 1.8 GB의 약 1.7배인 3GB를 상한으로 둔다.
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=3GB"
       - "--web.enable-lifecycle"
       - "--web.external-url=${EASYSUBWAY_PROMETHEUS_EXTERNAL_URL:-http://localhost:9090}"
     ports:

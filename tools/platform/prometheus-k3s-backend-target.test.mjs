@@ -173,6 +173,17 @@ test("backend scrape down alerts still fire and no longer describe the drained c
   assert.match(alertTests, /alertname: AquilaBackendReadinessProbeFailed\n\s+exp_alerts:\n\s+- exp_labels:/);
 });
 
+test("Prometheus retains 30 days with a disk cap so the 28-day latency SLO window stays computable", () => {
+  // Platform Issue #235: 28일 지연 SLO 준수율은 TSDB가 28일을 보존해야 계산된다. 기본 보존 15일이면 계산할 수 없다.
+  // 운영 호스트 실측(2026-10-07): TSDB 약 0.8 GB/15일(약 56 MB/일), 디스크 여유 14 GB. 30일 약 1.8 GB의 약 1.7배인 3GB를
+  // 상한으로 둬 디스크를 채우지 못하게 한다.
+  const compose = readText("infra/docker-compose.yml");
+  const start = compose.indexOf("\n  prometheus:\n");
+  const prometheus = compose.slice(start, compose.indexOf("\n  loki", start));
+  assert.match(prometheus, /- "--storage\.tsdb\.retention\.time=30d"/);
+  assert.match(prometheus, /- "--storage\.tsdb\.retention\.size=3GB"/);
+});
+
 test("CI runs this contract exactly once", () => {
   const ci = readText(".github/workflows/ci.yml");
   assert.equal(ci.split("node --test tools/platform/prometheus-k3s-backend-target.test.mjs").length - 1, 1);
