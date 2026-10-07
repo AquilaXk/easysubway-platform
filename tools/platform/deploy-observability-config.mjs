@@ -172,6 +172,37 @@ function atomicSymlink(root, name, target) {
   renameSync(temporary, join(root, name));
 }
 
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+/**
+ * 강제 종료된 이전 실행이 남긴 `.staging-<sha12>-<pid>` 디렉터리와 `.current|previous.tmp-<pid>` symlink를 지운다.
+ * pid가 살아 있으면 다른 실행이 쓰는 중으로 보고 건드리지 않는다. 같은 호스트에서 한 번에 한 DEPLOY만 돈다는 전제(workflow concurrency group
+ * observability-config-production, cancel-in-progress false)에 기대며, pid 재사용으로 못 지우는 경우는 남겨 두는 쪽(무해)으로 실패한다.
+ */
+function reapStaleArtifacts(root, isProcessAlive) {
+  const candidates = [
+    [join(root, "releases"), /^\.staging-[0-9a-f]{12}-([0-9]+)$/u],
+    [root, /^\.(?:current|previous)\.tmp-([0-9]+)$/u],
+  ];
+  const reaped = [];
+  for (const [directory, pattern] of candidates) {
+    for (const entry of readdirSync(directory)) {
+      const match = pattern.exec(entry);
+      if (!match || isProcessAlive(Number(match[1]))) continue;
+      rmSync(join(directory, entry), { recursive: true, force: true });
+      reaped.push(entry);
+    }
+  }
+  return reaped;
+}
+
 function readManagedLink(root, name) {
   const path = join(root, name);
   let stat;
@@ -427,7 +458,7 @@ function readOptions(options) {
 
 export async function deployObservabilityConfig(options = {}) {
   const { mode, commit, sourceRoot, deployRoot, composeEnvFile, runUrl, runId } = readOptions(options);
-  const { commandRunner = runCommand, sleep = defaultSleep, now = () => new Date(), stagingRoot } = options;
+  const { commandRunner = runCommand, sleep = defaultSleep, now = () => new Date(), stagingRoot, isProcessAlive = processIsAlive } = options;
   if (typeof commandRunner !== "function") fail("E_OBS_DEPLOY_USAGE", "commandRunner must be a function");
   const docker = createDocker(commandRunner);
 
@@ -436,7 +467,10 @@ export async function deployObservabilityConfig(options = {}) {
 
   const deploying = mode === "DEPLOY";
   const root = deploying ? join(deployRoot, "observability") : null;
-  if (deploying) mkdirSync(join(root, "releases"), { recursive: true, mode: 0o755 });
+  if (deploying) {
+    mkdirSync(join(root, "releases"), { recursive: true, mode: 0o755 });
+    reapStaleArtifacts(root, isProcessAlive);
+  }
   const ownedStagingBase = !deploying && stagingRoot === undefined ? mkdtempSync(join(tmpdir(), "obs-deploy-")) : null;
   const stagingBase = deploying ? join(root, "releases") : (stagingRoot ?? ownedStagingBase);
   mkdirSync(stagingBase, { recursive: true });
