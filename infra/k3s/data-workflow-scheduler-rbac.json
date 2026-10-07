@@ -1,0 +1,229 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "data-scheduler-deployer",
+        "namespace": "easysubway-journey"
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "data-scheduler-deployer",
+        "namespace": "easysubway-journey"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "batch"
+          ],
+          "resources": [
+            "cronjobs"
+          ],
+          "resourceNames": [
+            "data-workflow-scheduler"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "serviceaccounts"
+          ],
+          "resourceNames": [
+            "data-workflow-scheduler"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "networking.k8s.io"
+          ],
+          "resources": [
+            "networkpolicies"
+          ],
+          "resourceNames": [
+            "data-workflow-scheduler-boundary"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps"
+          ],
+          "verbs": [
+            "create"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "create"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "data-scheduler-deployer",
+        "namespace": "easysubway-journey"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "data-scheduler-deployer",
+          "namespace": "easysubway-journey"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "data-scheduler-deployer"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "data-workflow-scheduler",
+        "namespace": "easysubway-journey",
+        "labels": {
+          "app.kubernetes.io/name": "data-workflow-scheduler",
+          "app.kubernetes.io/part-of": "easysubway"
+        }
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "metadata": {
+        "name": "data-workflow-scheduler-boundary",
+        "namespace": "easysubway-journey"
+      },
+      "spec": {
+        "podSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "data-workflow-scheduler"
+          }
+        },
+        "policyTypes": [
+          "Ingress",
+          "Egress"
+        ],
+        "egress": [
+          {
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "kube-system"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "UDP",
+                "port": 53
+              },
+              {
+                "protocol": "TCP",
+                "port": 53
+              }
+            ]
+          },
+          {
+            "to": [
+              {
+                "ipBlock": {
+                  "cidr": "0.0.0.0/0",
+                  "except": [
+                    "10.0.0.0/8",
+                    "100.64.0.0/10",
+                    "169.254.0.0/16",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16"
+                  ]
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 443
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "metadata": {
+        "name": "data-workflow-scheduler",
+        "namespace": "easysubway-journey",
+        "labels": {
+          "app.kubernetes.io/name": "data-workflow-scheduler",
+          "app.kubernetes.io/part-of": "easysubway"
+        }
+      },
+      "spec": {
+        "schedule": "0 0 1 1 *",
+        "timeZone": "Etc/UTC",
+        "suspend": true,
+        "concurrencyPolicy": "Forbid",
+        "jobTemplate": {
+          "spec": {
+            "template": {
+              "spec": {
+                "restartPolicy": "Never",
+                "containers": [
+                  {
+                    "name": "scheduler",
+                    "image": "docker.io/library/node:24.19.0-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43",
+                    "command": [
+                      "node",
+                      "--version"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

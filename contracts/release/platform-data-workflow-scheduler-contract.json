@@ -1,0 +1,195 @@
+{
+  "schemaVersion": "PLATFORM_DATA_WORKFLOW_SCHEDULER_CONTRACT_V1",
+  "artifactKind": "platform-data-workflow-scheduler-contract",
+  "issueRef": {
+    "repository": "AquilaXk/easysubway-platform",
+    "issueNumber": 237,
+    "dataIssue": "AquilaXk/easysubway-data#1001"
+  },
+  "target": {
+    "repository": "AquilaXk/easysubway-data",
+    "ref": "main",
+    "permissions": {
+      "actions": "write"
+    },
+    "githubScheduleRole": "BACKUP_PATH",
+    "tokenMaxLifetimeMinutes": 60
+  },
+  "app": {
+    "name": "easysubway-release-chain",
+    "secretReferences": [
+      "EASYSUBWAY_DISPATCH_APP_CLIENT_ID",
+      "EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY"
+    ],
+    "secretScope": "ENVIRONMENT:production-deploy"
+  },
+  "cronJob": {
+    "name": "data-workflow-scheduler",
+    "namespace": "easysubway-journey",
+    "schedule": "0 * * * *",
+    "timeZone": "Etc/UTC",
+    "concurrencyPolicy": "Forbid",
+    "startingDeadlineSeconds": 600,
+    "activeDeadlineSeconds": 3300,
+    "backoffLimit": 0,
+    "successfulJobsHistoryLimit": 1,
+    "failedJobsHistoryLimit": 3
+  },
+  "runtime": {
+    "image": "docker.io/library/node:24.19.0-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43",
+    "runAsUser": 10001,
+    "runAsGroup": 10001,
+    "resources": {
+      "requests": {
+        "cpu": "20m",
+        "memory": "48Mi",
+        "ephemeral-storage": "16Mi"
+      },
+      "limits": {
+        "cpu": "200m",
+        "memory": "128Mi",
+        "ephemeral-storage": "64Mi"
+      }
+    }
+  },
+  "deployer": {
+    "serviceAccount": "data-scheduler-deployer",
+    "rbacFile": "infra/k3s/data-workflow-scheduler-rbac.json",
+    "bootstrap": "ADMIN_APPLIED_FIXED_NAME_OBJECTS"
+  },
+  "workflows": [
+    {
+      "id": "itx-current-promotion",
+      "workflow": "itx-current-promotion.yml",
+      "everyHours": 24,
+      "offsetHour": 18,
+      "minute": 0,
+      "githubCron": "0 18 * * *"
+    },
+    {
+      "id": "current-capital-topology-registration",
+      "workflow": "current-capital-topology-registration.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 5,
+      "githubCron": "5 */2 * * *"
+    },
+    {
+      "id": "kric-current-facility-refresh",
+      "workflow": "kric-current-facility-refresh.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 17,
+      "githubCron": "17 */2 * * *"
+    },
+    {
+      "id": "datapack-expiry-alert-datapack-expiry",
+      "workflow": "datapack-expiry-alert.yml",
+      "everyHours": 4,
+      "offsetHour": 0,
+      "minute": 23,
+      "githubCron": "23 */4 * * *",
+      "inputs": {
+        "target": "datapack-expiry"
+      }
+    },
+    {
+      "id": "source-reverification",
+      "workflow": "source-reverification.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 23,
+      "githubCron": "23 */2 * * *"
+    },
+    {
+      "id": "seoul-current-accessibility-refresh",
+      "workflow": "seoul-current-accessibility-refresh.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 31,
+      "githubCron": "31 */2 * * *"
+    },
+    {
+      "id": "datapack-expiry-alert-provider-approval",
+      "workflow": "datapack-expiry-alert.yml",
+      "everyHours": 24,
+      "offsetHour": 0,
+      "minute": 41,
+      "githubCron": "41 0 * * *",
+      "inputs": {
+        "target": "provider-approval"
+      }
+    },
+    {
+      "id": "source-derivative-rebinding",
+      "workflow": "source-derivative-rebinding.yml",
+      "everyHours": 6,
+      "offsetHour": 0,
+      "minute": 41,
+      "githubCron": "41 */6 * * *"
+    },
+    {
+      "id": "retained-gwangju-timetable-refresh",
+      "workflow": "retained-gwangju-timetable-refresh.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 43,
+      "githubCron": "43 */2 * * *"
+    },
+    {
+      "id": "current-capital-topology-refresh",
+      "workflow": "current-capital-topology-refresh.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 47,
+      "githubCron": "47 */2 * * *"
+    }
+  ],
+  "excluded": [
+    {
+      "workflow": "nationwide-candidate-refresh.yml",
+      "reason": "정기 고정 역할(datapack-scheduled-refresh)이 schedule 이벤트 전용이고 dispatch는 2인 역할 입력을 요구한다. dispatch 허용은 릴리스 권한 게이트 변경이라 QA 결정 전까지 GitHub schedule만 쓴다."
+    },
+    {
+      "workflow": "datapack-release.yml",
+      "reason": "릴리스 권한 경로다. dispatch 기본 mode가 exploratory라 정기 실행과 의미가 다르다."
+    },
+    {
+      "workflow": "osv-scheduled.yml",
+      "reason": "주 1회 의존성 점검이며 데이터 신선도 경로가 아니다."
+    }
+  ],
+  "failureVisibility": {
+    "chosen": "DATA_REPO_HEARTBEAT_WATCHDOG",
+    "failureIssuePath": "AquilaXk/easysubway-data#926",
+    "watchdogWorkflow": "data-workflow-scheduler-watchdog.yml",
+    "rejected": [
+      {
+        "option": "KUBE_STATE_METRICS_PROMETHEUS_ALERT",
+        "reason": "k3s에 kube-state-metrics가 없고 Prometheus는 호스트 compose에서 k3s Job 상태를 수집하지 않으며 운영 Prometheus 설정의 영구 배포 경로도 없다(platform#227)."
+      },
+      {
+        "option": "APP_ISSUES_WRITE_FROM_JOB",
+        "reason": "App에 issues: write가 없고 키 탈취 시 권한이 넓어진다. 토큰 발급 실패가 가장 흔한 실패인데 그때는 보고도 못 한다."
+      }
+    ]
+  },
+  "postDeployVerification": [
+    {
+      "id": "NETWORK_POLICY_ENFORCED_PUBLIC_HTTP_BLOCKED",
+      "description": "스케줄러 label을 붙인 임시 pod에서 공개 호스트의 80번 포트(http://example.com) 접속이 막혀야 한다. NetworkPolicy가 클러스터에서 실제로 적용되는지 확인하는 시험이다(허용은 DNS와 공개 443뿐)."
+    },
+    {
+      "id": "NETWORK_POLICY_NODE_SERVICES_BLOCKED",
+      "description": "같은 임시 pod에서 노드 내부 IP의 Postgres(15432)·object storage(9000) 접속이 막혀야 한다."
+    },
+    {
+      "id": "NETWORK_POLICY_GITHUB_API_ALLOWED",
+      "description": "같은 임시 pod에서 https://api.github.com 접속은 되어야 한다(차단 시험이 정책이 아닌 네트워크 문제로 통과하는 것을 가린다)."
+    },
+    {
+      "id": "NETWORK_POLICY_LIMIT_ANY_PUBLIC_443",
+      "description": "알려진 한계: 공개 443은 대상 호스트를 가리지 않고 허용한다(GitHub meta CIDR은 바뀌어 고정하지 않았다). 키가 탈취된 컨테이너는 임의 공개 HTTPS 호스트로 보낼 수 있다. 마운트된 key는 이 Job에만 있고 Job은 읽기 전용 루트·비루트·capability 제거로 실행된다."
+    }
+  ]
+}
