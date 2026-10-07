@@ -10,11 +10,14 @@
 //
 // 마운트 원천 경로는 `current/...` 문자열 그대로 컨테이너에 저장된다. Docker는 컨테이너를 (재)시작할 때 symlink를 다시 해석하므로
 // current를 바꾸고 컨테이너를 재시작하면 새 파일을 읽는다. 컨테이너가 이미 떠 있는 동안에는 symlink 전환이 반영되지 않으므로
-// compose 수준 변경(이미지·flag)은 `compose up`이, 설정 파일만 바뀐 경우는 `docker restart`가 반영한다.
+// compose 수준 변경(이미지·flag)은 `compose up`이 반영하고, 설정 파일만 바뀐 경우는 컨테이너가 실제로 마운트한 파일 내용(sha256sum)이
+// release와 다를 때 `docker restart`가 반영한다. 재시작 판단이 symlink 이력이 아니라 컨테이너 내용이라 중단 후 재시도도 수렴한다.
+// 호스트에서 한 번에 한 DEPLOY만 돈다는 전제(workflow concurrency group)에 기댄다. 수동 절차는 contracts/release/platform-observability-config-deploy-runbook.json.
 //
 // 순서: 입력 검증 → release 스테이징 → promtool check config·test rules(실패하면 여기서 종료, 아무것도 바꾸지 않음) →
 // 같은 이미지의 격리 reference Prometheus로 기대 상태 수집 → release 설치 → current 전환 → prometheus 서비스 하나만 compose up
-// → 필요하면 재시작 → 라이브 상태를 기대와 대조 → receipt. 적용 뒤 대조가 실패하면 직전 release로 되돌리고 실패로 끝난다.
+// → 마운트 내용 확인·필요하면 재시작 → 라이브 상태(설정·규칙·target·네트워크·다른 컨테이너·volume)를 기대와 대조 → receipt.
+// 적용 뒤 대조가 실패하면 직전 release로 되돌리고 같은 기준으로 다시 대조한 뒤 실패로 끝난다(실패 receipt를 남김).
 // Alertmanager·Grafana·Loki·Alloy는 release에 담기지만 이 도구는 컨테이너를 건드리지 않는다(이슈 #227 범위 밖).
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -728,20 +731,23 @@ async function restorePrevious({ docker, sleep, root, composeEnvFile, previousCo
   const cause = message(error);
   const code = error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY";
   if (previousCommit === null) {
-    return { error: new DeployError(code, `${cause}; no managed previous release to restore (first rollout): follow the manual rollback runbook`), restore: "NO_MANAGED_PREVIOUS" };
+    return { error: new DeployError(code, `${cause}; no managed previous release to restore (first rollout): follow firstRolloutRollback in ${RUNBOOK_PATH}`), restore: "NO_MANAGED_PREVIOUS" };
   }
   if (previousCommit === commit) {
     return { error: new DeployError(code, `${cause}; current already was this commit, nothing to restore`), restore: "SAME_COMMIT" };
   }
   try {
     atomicSymlink(root, "current", join("releases", previousCommit));
-    const [before] = await docker.json(["inspect", "--type", "container", CONTAINER]);
-    await docker.composeUp(join(root, "current"), composeEnvFile);
-    const [after] = await docker.json(["inspect", "--type", "container", CONTAINER]);
-    if (after.Id === before.Id) await docker.docker(["restart", CONTAINER]);
-    await waitHealthy(docker, sleep);
+    const previousDir = join(root, "releases", previousCommit);
+    const previousTree = describeTree(previousDir);
+    const { image, command } = await docker.composeConfig(join(root, "current"), composeEnvFile);
+    // 복원도 처음 배포와 같은 기준으로 확인한다: 직전 release의 reference와 라이브를 대조하고 마운트 내용을 맞춘다.
+    const expected = await collectReference({ docker, image, command, stagedPrometheus: join(previousDir, "prometheus"), commit: previousCommit, sleep });
+    const idBefore = (await docker.json(["inspect", "--type", "container", CONTAINER]))[0].Id;
+    await convergeContainer({ docker, sleep, root, composeEnvFile, wantedDigests: releaseDigests(previousTree.files), idBefore });
+    await verifyLive({ docker, sleep, expected, flagKeys: expectedFlagKeys(command) });
   } catch (restoreError) {
-    return { error: new DeployError("E_OBS_DEPLOY_RESTORE", `${cause}; restoring previous release ${previousCommit} also failed: ${message(restoreError)}`), restore: "FAILED" };
+    return { error: new DeployError("E_OBS_DEPLOY_RESTORE", `${cause}; restore verification failed for previous release ${previousCommit}: ${message(restoreError)} (runbook: ${RUNBOOK_PATH})`), restore: "FAILED" };
   }
   return { error: new DeployError(code, `${cause}; restored previous release ${previousCommit}`), restore: "RESTORED" };
 }

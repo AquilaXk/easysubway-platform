@@ -107,7 +107,7 @@ function createHost({
         if (recreateOnUp) {
           state.generation += 1;
           state.containerId = String(8 + state.generation).repeat(64);
-          state.mounted = "current";
+          state.mounted = realpathSync(state.dirs.current);
           state.live = state.upCount >= 2 ? (liveAfterRestore ?? expected) : (liveAfter ?? expected);
           if (networksAfterUp && state.upCount === 1) state.networks = networksAfterUp;
           if (extraHostsAfterUp && state.upCount === 1) state.extraHosts = extraHostsAfterUp;
@@ -152,7 +152,7 @@ function createHost({
       assert.equal(args[1], "easysubway-prometheus");
       if (state.upCount >= 2) state.live = liveAfterRestore ?? expected;
       else if (restartFixesLive) state.live = liveAfter ?? expected;
-      state.mounted = "current";
+      state.mounted = realpathSync(state.dirs.current);
       return { stdout: "", stderr: "" };
     }
     if (verb === "inspect") {
@@ -677,8 +677,10 @@ test("컨테이너 마운트 내용을 읽을 수 없거나 재시작 뒤에도 
     seedPreviousRelease(box);
     const host = createHost({ recreateOnUp: false, restartFixesLive: false });
     const original = host.runner;
+    let restoreStarted = false;
     const runner = async (command, args, options) => {
-      if (command === "docker" && args[0] === "exec" && args[2] === "sha256sum") return { stdout: `${"0".repeat(64)}  /etc/prometheus/prometheus.yml\n${"0".repeat(64)}  /etc/prometheus/alerts.yml\n`, stderr: "" };
+      if (command === "docker" && args[0] === "compose" && args.includes("up") && host.calls.filter((call) => call.args.includes("up")).length >= 1) restoreStarted = true;
+      if (command === "docker" && args[0] === "exec" && args[2] === "sha256sum" && !restoreStarted) return { stdout: `${"0".repeat(64)}  /etc/prometheus/prometheus.yml\n${"0".repeat(64)}  /etc/prometheus/alerts.yml\n`, stderr: "" };
       return original(command, args, options);
     };
     await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", commandRunner: runner })), /E_OBS_DEPLOY_VERIFY.*mounted/su);

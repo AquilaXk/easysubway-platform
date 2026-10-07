@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RUNBOOK_V1",
+  "artifactKind": "platform-observability-config-deploy-runbook",
+  "issueRef": {
+    "repository": "AquilaXk/easysubway-platform",
+    "issueNumber": 227
+  },
+  "workflow": ".github/workflows/observability-config-deploy.yml",
+  "tool": "tools/platform/deploy-observability-config.mjs",
+  "scope": "compose 프로젝트 easysubway의 prometheus 서비스 하나. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
+  "hostLayout": {
+    "root": "/opt/easysubway/observability",
+    "releases": "releases/<40자 커밋 SHA> (읽기 전용 복사본, 내용이 다르면 덮어쓰지 않음)",
+    "current": "마지막으로 적용·검증한 release를 가리키는 symlink. compose project directory이자 컨테이너 마운트 원천 문자열",
+    "previous": "직전 release symlink (자동 복원 대상)",
+    "receipts": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/{receipt.json,failure-receipt.json}"
+  },
+  "concurrencyAssumption": "호스트에서 한 번에 한 DEPLOY만 실행된다(workflow concurrency group observability-config-production, cancel-in-progress false). 오래된 .staging-*·.*.tmp-* 정리는 pid 생존 여부만 보므로 이 전제에 기댄다.",
+  "neverRun": [
+    "docker compose down",
+    "--remove-orphans",
+    "--force-recreate",
+    "docker volume rm",
+    "docker volume prune",
+    "rm -rf /opt/easysubway/repository"
+  ],
+  "preview": [
+    {
+      "title": "main에서 PREVIEW 실행(호스트 접근 없음, 환경 승인 필요)",
+      "run": "gh workflow run observability-config-deploy.yml -R AquilaXk/easysubway-platform --ref main -f mode=PREVIEW"
+    },
+    {
+      "title": "결과 JSON 확인",
+      "check": "validation이 passed, expected.jobs에 back_worker가 없음, expected.flags의 보존 flag가 30d와 3GiB"
+    }
+  ],
+  "backup": {
+    "when": "첫 DEPLOY 전(Prometheus v3.5.4에서 v3.15.0으로 같은 TSDB volume을 열기 전) 권장. 수집 공백은 정지 시간만큼, 크기 약 0.85GB",
+    "steps": [
+      {
+        "title": "읽기 전용 사전 기록",
+        "run": "sudo docker ps -a --filter label=com.docker.compose.project=easysubway --format '{{.Names}} {{.ID}}' | sort > /tmp/obs-before.txt"
+      },
+      {
+        "title": "콜드 백업",
+        "run": "sudo docker stop easysubway-prometheus && sudo tar -C /var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data -czf /opt/easysubway/backups/prometheus-data-pre-227-$(date -u +%Y%m%dT%H%M%SZ).tar.gz _data && sudo docker start easysubway-prometheus"
+      }
+    ]
+  },
+  "deploy": [
+    {
+      "title": "QA 승인 뒤 DEPLOY (기본값은 이 run의 main 커밋)",
+      "run": "gh workflow run observability-config-deploy.yml -R AquilaXk/easysubway-platform --ref main -f mode=DEPLOY"
+    }
+  ],
+  "verify": [
+    {
+      "title": "receipt 확인",
+      "check": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/receipt.json에서 statusConfigSha256 == expectedStatusConfigSha256, rulesSha256 일치, absentJobs == [back_worker], targets가 모든 job up, ruleHealth ok == total, untouchedContainers, volume before/after 동일"
+    },
+    {
+      "title": "보조 명령",
+      "run": "sudo docker inspect easysubway-prometheus --format '{{.Config.Image}}{{range .Mounts}} {{.Source}}->{{.Destination}}{{end}}'"
+    },
+    {
+      "title": "프로젝트 컨테이너 변화는 prometheus 한 줄뿐이어야 한다",
+      "run": "sudo docker ps -a --filter label=com.docker.compose.project=easysubway --format '{{.Names}} {{.ID}}' | sort | diff /tmp/obs-before.txt -"
+    }
+  ],
+  "rollback": {
+    "laterDeploys": {
+      "when": "첫 배포 이후(관리 release가 둘 이상). 자동 복원은 도구가 적용 뒤 검증 실패 시 직전 release로 이미 수행한다",
+      "workflowSteps": [
+        "workflow DEPLOY의 commit 입력에 직전 배포 커밋(receipt의 previousCommit)을 넣어 실행한다. 같은 검증·대조·receipt 경로를 탄다"
+      ],
+      "manualSteps": [
+        {
+          "title": "workflow를 쓸 수 없을 때 current를 직전 release로 되돌린다",
+          "run": "cd /opt/easysubway/observability && ln -sfn \"$(readlink previous)\" current.new && mv -Tf current.new current"
+        },
+        {
+          "title": "prometheus 서비스 하나만 맞춘다 (compose 해석용 값은 backend를 건드리지 않는다)",
+          "run": "EASYSUBWAY_BACKEND_ENV_FILE=/dev/null EASYSUBWAY_BACKEND_IMAGE=ghcr.io/aquilaxk/easysubway-backend@sha256:0000000000000000000000000000000000000000000000000000000000000000 sudo -E docker compose -p easysubway --project-directory /opt/easysubway/observability/current -f /opt/easysubway/observability/current/docker-compose.yml --env-file /opt/easysubway/shared/current-env/compose.env --profile observability up -d --no-deps --no-build --pull never --wait prometheus"
+        },
+        {
+          "title": "컨테이너가 재생성되지 않았으면 재시작해 새 current를 다시 읽게 한다",
+          "run": "sudo docker restart easysubway-prometheus"
+        }
+      ]
+    },
+    "firstRolloutRollback": {
+      "when": "첫 DEPLOY가 E_OBS_DEPLOY_VERIFY·E_OBS_DEPLOY_RESTORE로 실패했거나, 첫 배포 뒤 v3.5.4와 구 hub 체크아웃 설정으로 돌아가야 할 때. 도구는 관리 대상 직전 release가 없어 이 경우 자동 복원하지 않는다",
+      "preconditions": [
+        "구 hub 체크아웃 /opt/easysubway/repository를 지우거나 clean·checkout하지 않고 보존한다",
+        "이미지 prom/prometheus:v3.5.4가 호스트에 남아 있다(docker images로 확인)",
+        "권장 콜드 백업(backup 절)을 만들어 두었다"
+      ],
+      "steps": [
+        {
+          "title": "구 compose로 prometheus 서비스 하나만 재생성한다(--no-deps, --remove-orphans·down 금지)",
+          "run": "cd /opt/easysubway/repository/infra && sudo docker compose -p easysubway --env-file /opt/easysubway/shared/current-env/compose.env --profile observability up -d --no-deps --no-build --pull never prometheus"
+        },
+        {
+          "title": "v3.5.4가 TSDB를 열지 못하면 정지하고 콜드 백업으로 _data를 복원한 뒤 시작한다",
+          "run": "sudo docker stop easysubway-prometheus && sudo tar -C /var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data -xzf /opt/easysubway/backups/<백업 파일>.tar.gz && sudo docker start easysubway-prometheus"
+        },
+        {
+          "title": "상태 확인",
+          "run": "sudo docker inspect easysubway-prometheus --format '{{.Config.Image}} {{.State.Health.Status}}'"
+        }
+      ],
+      "dataSafety": "어떤 단계에서도 volume easysubway_prometheus-data를 삭제하지 않는다. 관리 디렉터리 /opt/easysubway/observability는 지우지 않고 둔다(크기 수십 KB)."
+    }
+  },
+  "interruptedDeploy": {
+    "what": "workflow 취소·타임아웃으로 DEPLOY가 적용 도중 끊긴 경우. 도구는 SIGTERM·SIGINT를 받으면 current를 마지막으로 검증된 직전 release로 되돌리고(있을 때) failure-receipt.json에 outcome INTERRUPTED를 남긴다. 컨테이너 상태는 알 수 없다",
+    "steps": [
+      "failure-receipt.json의 restore 값(LINK_RESTORED·NO_MANAGED_PREVIOUS·SAME_COMMIT)을 읽는다",
+      "같은 커밋으로 DEPLOY를 다시 실행한다. 재시작 여부를 current symlink가 아니라 컨테이너가 실제로 마운트한 파일 내용으로 판단하므로 어느 상태에서 끊겼든 수렴한다"
+    ]
+  }
+}
