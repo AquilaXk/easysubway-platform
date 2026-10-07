@@ -1,0 +1,93 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "data-scheduler-deployer",
+        "namespace": "easysubway-journey"
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "data-scheduler-deployer",
+        "namespace": "easysubway-journey"
+      },
+      "rules": [
+        {
+          "apiGroups": ["batch"],
+          "resources": ["cronjobs"],
+          "verbs": ["create", "list", "watch"]
+        },
+        {
+          "apiGroups": ["batch"],
+          "resources": ["cronjobs"],
+          "resourceNames": ["data-workflow-scheduler"],
+          "verbs": ["get", "update", "patch", "delete"]
+        },
+        {
+          "apiGroups": ["batch"],
+          "resources": ["jobs"],
+          "verbs": ["get", "list", "watch"]
+        },
+        {
+          "apiGroups": [""],
+          "resources": ["serviceaccounts"],
+          "verbs": ["create", "list", "watch"]
+        },
+        {
+          "apiGroups": [""],
+          "resources": ["serviceaccounts"],
+          "resourceNames": ["data-workflow-scheduler"],
+          "verbs": ["get", "update", "patch"]
+        },
+        {
+          "apiGroups": ["networking.k8s.io"],
+          "resources": ["networkpolicies"],
+          "verbs": ["create", "list", "watch"]
+        },
+        {
+          "apiGroups": ["networking.k8s.io"],
+          "resources": ["networkpolicies"],
+          "resourceNames": ["data-workflow-scheduler-boundary"],
+          "verbs": ["get", "update", "patch"]
+        },
+        {
+          "apiGroups": [""],
+          "resources": ["configmaps"],
+          "verbs": ["get", "list", "watch", "create", "delete"]
+        },
+        {
+          "apiGroups": [""],
+          "resources": ["secrets"],
+          "verbs": ["create", "delete"]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "data-scheduler-deployer",
+        "namespace": "easysubway-journey"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "data-scheduler-deployer",
+          "namespace": "easysubway-journey"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "data-scheduler-deployer"
+      }
+    }
+  ]
+}
