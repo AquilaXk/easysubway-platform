@@ -987,3 +987,20 @@ test("실제 compose 해석: 프로젝트 easysubway에서 prometheus 서비스�
     box.cleanup();
   }
 });
+
+test("CLI는 --mode 인자 하나만 받고 나머지 입력은 환경 변수로만 받으며 잘못된 입력은 종료 코드 1로 실패한다", () => {
+  const tool = join(repoRoot, "tools", "platform", "deploy-observability-config.mjs");
+  const run = (args, env) => spawnSync(process.execPath, [tool, ...args], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } });
+  const noMode = run([], {});
+  assert.equal(noMode.status, 1);
+  assert.match(noMode.stderr, /E_OBS_DEPLOY_USAGE.*--mode/u);
+  const legacyFlags = run(["--mode", "PREVIEW", "--commit", COMMIT], {});
+  assert.equal(legacyFlags.status, 1);
+  assert.match(legacyFlags.stderr, /E_OBS_DEPLOY_USAGE/u);
+  const badCommit = run(["--mode", "PREVIEW"], { OBSERVABILITY_COMMIT: "main", OBSERVABILITY_SOURCE_ROOT: repoRoot });
+  assert.equal(badCommit.status, 1);
+  assert.match(badCommit.stderr, /E_OBS_DEPLOY_USAGE.*commit/u);
+  const badRoot = run(["--mode", "DEPLOY"], { OBSERVABILITY_COMMIT: COMMIT, OBSERVABILITY_SOURCE_ROOT: repoRoot, OBSERVABILITY_DEPLOY_ROOT: "relative", OBSERVABILITY_COMPOSE_ENV: "/x.env", OBSERVABILITY_RUN_ID: "1", OBSERVABILITY_RUN_URL: RUN_URL });
+  assert.equal(badRoot.status, 1);
+  assert.match(badRoot.stderr, /E_OBS_DEPLOY_USAGE.*deploy root/u);
+});

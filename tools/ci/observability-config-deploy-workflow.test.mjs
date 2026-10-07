@@ -72,7 +72,7 @@ test("승인 receipt 검증 → 커밋 입력 검증 → 설정 커밋 checkout 
     "COMMIT_INPUT: ${{ inputs.commit }}",
     "path: config-source",
     "merge-base --is-ancestor HEAD origin/main",
-    "tools/platform/deploy-observability-config.mjs \\\n              --mode DEPLOY",
+    "node tools/platform/deploy-observability-config.mjs --mode",
   ].map((needle) => workflow.indexOf(needle));
   for (const index of order) assert.notEqual(index, -1);
   assert.deepEqual([...order].sort((a, b) => a - b), order);
@@ -80,14 +80,20 @@ test("승인 receipt 검증 → 커밋 입력 검증 → 설정 커밋 checkout 
   assert.match(workflow, /\[\[ -z "\$\{COMMIT_INPUT\}" \|\| "\$\{COMMIT_INPUT\}" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
 });
 
-test("DEPLOY는 커밋·source·deploy root·compose env·run 정보를 모두 넘기고 PREVIEW는 호스트 입력을 넘기지 않는다", () => {
-  const deploy = workflow.slice(workflow.indexOf("--mode DEPLOY"), workflow.indexOf("else\n"));
-  for (const flag of ["--commit \"${commit}\"", "--source-root \"${source_root}\"", "--deploy-root \"${DEPLOY_ROOT}\"", "--compose-env \"${DEPLOY_ROOT}/shared/current-env/compose.env\"", "--run-url", "--run-id \"${GITHUB_RUN_ID}\""]) {
-    assert.ok(deploy.includes(flag), flag);
-  }
-  const preview = workflow.slice(workflow.indexOf("--mode PREVIEW"), workflow.indexOf("fi\n          {"));
-  for (const hostFlag of ["--deploy-root", "--compose-env", "--run-id", "--run-url"]) assert.equal(preview.includes(hostFlag), false, hostFlag);
-  assert.equal(count(workflow, "deploy-observability-config.mjs"), 2);
+test("경로·커밋·run 정보는 인자가 아니라 env로 넘기고, DEPLOY일 때만 호스트 입력을 내보낸다", () => {
+  assert.equal(count(workflow, "deploy-observability-config.mjs"), 1);
+  assert.match(workflow, /node tools\/platform\/deploy-observability-config\.mjs --mode "\$\{MODE\}"/u);
+  assert.doesNotMatch(workflow.slice(workflow.indexOf("Preview or deploy Prometheus config")), /--(commit|source-root|deploy-root|compose-env|run-url|run-id)/u);
+  const deployBranch = workflow.slice(workflow.indexOf('if [[ "${MODE}" == "DEPLOY" ]]; then'), workflow.indexOf("fi\n          node tools/platform/deploy-observability-config.mjs"));
+  for (const assignment of [
+    'OBSERVABILITY_DEPLOY_ROOT="${DEPLOY_ROOT}"',
+    'OBSERVABILITY_COMPOSE_ENV="${DEPLOY_ROOT}/shared/current-env/compose.env"',
+    "OBSERVABILITY_RUN_URL=",
+    'OBSERVABILITY_RUN_ID="${GITHUB_RUN_ID}"',
+  ]) assert.ok(deployBranch.includes(assignment), assignment);
+  const beforeBranch = workflow.slice(0, workflow.indexOf('if [[ "${MODE}" == "DEPLOY" ]]; then'));
+  for (const hostVariable of ["DEPLOY_ROOT=", "COMPOSE_ENV", "RUN_ID", "RUN_URL"]) assert.equal(beforeBranch.includes(`OBSERVABILITY_${hostVariable}`), false, hostVariable);
+  assert.match(beforeBranch, /OBSERVABILITY_COMMIT="\$\(git -C config-source rev-parse HEAD\)"/u);
   assert.match(workflow, /\[\[ -n "\$\{DEPLOY_ROOT\}" \]\]/u);
 });
 

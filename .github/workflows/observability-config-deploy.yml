@@ -89,26 +89,18 @@ jobs:
           DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
         run: |
           set -euo pipefail
-          commit="$(git -C config-source rev-parse HEAD)"
-          source_root="${GITHUB_WORKSPACE}/config-source"
+          OBSERVABILITY_COMMIT="$(git -C config-source rev-parse HEAD)"
+          OBSERVABILITY_SOURCE_ROOT="${GITHUB_WORKSPACE}/config-source"
+          export OBSERVABILITY_COMMIT OBSERVABILITY_SOURCE_ROOT
           if [[ "${MODE}" == "DEPLOY" ]]; then
             [[ -n "${DEPLOY_ROOT}" ]]
-            node tools/platform/deploy-observability-config.mjs \
-              --mode DEPLOY \
-              --commit "${commit}" \
-              --source-root "${source_root}" \
-              --deploy-root "${DEPLOY_ROOT}" \
-              --compose-env "${DEPLOY_ROOT}/shared/current-env/compose.env" \
-              --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-              --run-id "${GITHUB_RUN_ID}" \
-              > "${RUNNER_TEMP}/observability-result.json"
-          else
-            node tools/platform/deploy-observability-config.mjs \
-              --mode PREVIEW \
-              --commit "${commit}" \
-              --source-root "${source_root}" \
-              > "${RUNNER_TEMP}/observability-result.json"
+            OBSERVABILITY_DEPLOY_ROOT="${DEPLOY_ROOT}"
+            OBSERVABILITY_COMPOSE_ENV="${DEPLOY_ROOT}/shared/current-env/compose.env"
+            OBSERVABILITY_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            OBSERVABILITY_RUN_ID="${GITHUB_RUN_ID}"
+            export OBSERVABILITY_DEPLOY_ROOT OBSERVABILITY_COMPOSE_ENV OBSERVABILITY_RUN_URL OBSERVABILITY_RUN_ID
           fi
+          node tools/platform/deploy-observability-config.mjs --mode "${MODE}" > "${RUNNER_TEMP}/observability-result.json"
           {
             echo '```json'
             cat "${RUNNER_TEMP}/observability-result.json"

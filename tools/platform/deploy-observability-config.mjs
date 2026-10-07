@@ -25,7 +25,6 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
 
 import { codepointCompare } from "../lib/codepoint-compare.mjs";
 
@@ -194,8 +193,8 @@ function processIsAlive(pid) {
  */
 function reapStaleArtifacts(root, isProcessAlive) {
   const candidates = [
-    [join(root, "releases"), /^\.staging-[0-9a-f]{12}-([0-9]+)$/u],
-    [root, /^\.(?:current|previous)\.tmp-([0-9]+)$/u],
+    [join(root, "releases"), /^\.staging-[0-9a-f]{12}-(\d+)$/u],
+    [root, /^\.(?:current|previous)\.tmp-(\d+)$/u],
   ];
   const reaped = [];
   for (const [directory, pattern] of candidates) {
@@ -272,7 +271,11 @@ const rulesProjection = (groups) => groups.map((group) => ({
   })),
 }));
 
-const jobsOf = (yaml) => [...yaml.matchAll(/^- job_name: ["']?([^"'\n]+?)["']?\s*$/gmu)].map((match) => match[1]).sort(codepointCompare);
+const JOB_PREFIX = "- job_name: ";
+const jobsOf = (yaml) => yaml.split("\n")
+  .filter((line) => line.startsWith(JOB_PREFIX))
+  .map((line) => line.slice(JOB_PREFIX.length).trim().replace(/^["']|["']$/gu, ""))
+  .toSorted(codepointCompare);
 
 async function readSnapshot(docker, target) {
   const data = async (path) => {
@@ -305,20 +308,27 @@ async function readSnapshot(docker, target) {
   };
 }
 
-const metricToken = (text, name) => new RegExp(`^${name} (\\S+)$`, "mu").exec(text)?.[1] ?? null;
+const metricToken = (text, name) => text.split("\n").find((line) => line.startsWith(`${name} `))?.slice(name.length + 1).trim() ?? null;
+
+/** step()이 {done: true}를 돌려줄 때까지 attempts번 반복한다. 마지막 결과를 그대로 돌려준다. */
+async function poll(sleep, attempts, interval, step) {
+  const result = await step();
+  if (result.done || attempts <= 1) return result;
+  await sleep(interval);
+  return poll(sleep, attempts - 1, interval, step);
+}
 
 async function waitFor(sleep, attempts, check, interval = 2000) {
-  let last;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  const result = await poll(sleep, attempts, interval, async () => {
     try {
       const value = await check();
-      if (value) return value;
+      return value ? { done: true, value } : { done: false, error: null };
     } catch (error) {
-      last = error;
+      return { done: false, error };
     }
-    await sleep(interval);
-  }
-  throw last ?? new Error("condition was not met in time");
+  });
+  if (result.done) return result.value;
+  throw result.error ?? new Error("condition was not met in time");
 }
 
 function expectedFlagKeys(command) {
@@ -437,24 +447,23 @@ async function convergeContainer({ docker, sleep, root, composeEnvFile, wantedDi
     stale = mountMismatch(await readMountedDigests(docker), wantedDigests);
     if (stale.length > 0) fail("E_OBS_DEPLOY_VERIFY", `mounted config files differ from the release after restart (${stale.join(",")})`);
   }
-  return { containerId, action: restarted ? "restarted" : containerId === idBefore ? "unchanged" : "recreated" };
+  let action = containerId === idBefore ? "unchanged" : "recreated";
+  if (restarted) action = "restarted";
+  return { containerId, action };
 }
 
 async function verifyLive({ docker, sleep, expected, flagKeys }) {
-  let problems = ["live prometheus was not readable"];
-  let live;
-  for (let attempt = 0; attempt < VERIFY_ATTEMPTS; attempt += 1) {
+  const result = await poll(sleep, VERIFY_ATTEMPTS, 3000, async () => {
     try {
-      live = await readSnapshot(docker, CONTAINER);
-      problems = compareSnapshots(expected, live, flagKeys);
-      if (problems.length === 0) break;
+      const live = await readSnapshot(docker, CONTAINER);
+      const problems = compareSnapshots(expected, live, flagKeys);
+      return { done: problems.length === 0, live, problems };
     } catch (error) {
-      problems = [`live prometheus was not readable: ${message(error)}`];
+      return { done: false, live: null, problems: [`live prometheus was not readable: ${message(error)}`] };
     }
-    await sleep(3000);
-  }
-  if (problems.length > 0) fail("E_OBS_DEPLOY_VERIFY", problems.join("; "));
-  return { live, hostAfter: await readHostState(docker) };
+  });
+  if (!result.done) fail("E_OBS_DEPLOY_VERIFY", result.problems.join("; "));
+  return { live: result.live, hostAfter: await readHostState(docker) };
 }
 
 function compareSnapshots(expected, live, flagKeys) {
@@ -465,15 +474,22 @@ function compareSnapshots(expected, live, flagKeys) {
   if (live.rulesSha256 !== expected.rulesSha256) problems.push("/api/v1/rules differs from the deployed commit");
   if (JSON.stringify(live.jobs) !== JSON.stringify(expected.jobs)) problems.push(`jobs [${live.jobs.join(",")}] != [${expected.jobs.join(",")}]`);
   for (const job of REMOVED_JOBS) if (live.jobs.includes(job)) problems.push(`removed job ${job} is still configured`);
-  // reference는 네트워크가 없어 scrape할 수 없으므로 target·규칙 health는 라이브만 본다. 첫 scrape·첫 평가는 검증 반복이 기다린다.
-  for (const job of expected.jobs) {
-    const own = live.targets.filter((target) => target.job === job);
-    if (own.length === 0) problems.push(`job ${job} has no active target`);
-    else if (own.some((target) => target.health !== "up")) problems.push(`job ${job} target is not up (${own.map((target) => target.health).join(",")})`);
-  }
+  problems.push(...runtimeProblems(expected, live));
+  return problems;
+}
+
+// reference는 네트워크가 없어 scrape할 수 없으므로 target·규칙 health는 라이브만 본다. 첫 scrape·첫 평가는 검증 반복이 기다린다.
+function runtimeProblems(expected, live) {
+  const problems = expected.jobs.map((job) => targetProblem(job, live.targets.filter((target) => target.job === job))).filter(Boolean);
   if (live.unhealthyRules.length > 0) problems.push(`rule health is not ok: ${live.unhealthyRules.join(",")}`);
   if (live.reloadSuccessful !== "1") problems.push("prometheus_config_last_reload_successful is not 1");
   return problems;
+}
+
+function targetProblem(job, own) {
+  if (own.length === 0) return `job ${job} has no active target`;
+  if (own.some((target) => target.health !== "up")) return `job ${job} target is not up (${own.map((target) => target.health).join(",")})`;
+  return null;
 }
 
 /* ------------------------------------------------------------------ 입력 */
@@ -487,8 +503,8 @@ function readOptions(options) {
     for (const [label, value] of [["deploy root", deployRoot], ["compose env file", composeEnvFile]]) {
       if (typeof value !== "string" || !SAFE_ABSOLUTE_PATH.test(value) || value.includes("..")) fail("E_OBS_DEPLOY_USAGE", `${label} must be a safe absolute path`);
     }
-    if (typeof runId !== "string" || !/^[0-9]+$/u.test(runId)) fail("E_OBS_DEPLOY_USAGE", "run id must be digits");
-    if (typeof runUrl !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/actions\/runs\/[0-9]+$/u.test(runUrl)) fail("E_OBS_DEPLOY_USAGE", "run url must be a GitHub Actions run URL");
+    if (typeof runId !== "string" || !/^\d+$/u.test(runId)) fail("E_OBS_DEPLOY_USAGE", "run id must be digits");
+    if (typeof runUrl !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/actions\/runs\/\d+$/u.test(runUrl)) fail("E_OBS_DEPLOY_USAGE", "run url must be a GitHub Actions run URL");
   }
   return { mode, commit, sourceRoot, deployRoot, composeEnvFile, runUrl, runId };
 }
@@ -573,6 +589,11 @@ async function preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFil
  * 적용 도중 SIGTERM·SIGINT(workflow 취소·타임아웃)를 받으면, current를 마지막으로 검증된 직전 release로 되돌리고(가능할 때)
  * 중단 receipt를 동기적으로 남긴 뒤 종료한다. 컨테이너 상태는 알 수 없으므로 같은 DEPLOY를 다시 실행해 수렴시키라고 알린다.
  */
+function interruptRestoreLabel(canRestore, previousCommit) {
+  if (canRestore) return "LINK_RESTORED";
+  return previousCommit === null ? "NO_MANAGED_PREVIOUS" : "SAME_COMMIT";
+}
+
 function installInterruptGuard({ signalSource, exit, onInterrupt }) {
   const state = { handled: false };
   const listeners = Object.keys(SIGNAL_EXIT_CODES).map((signal) => [signal, () => {
@@ -622,7 +643,7 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
         writeFailureReceipt({
           deployRoot, runId, runUrl, commit, previousCommit, now, outcome: "INTERRUPTED", configDigest: result.configDigest,
           error: new DeployError("E_OBS_DEPLOY_INTERRUPTED", `${signal} received while applying; container state is unknown; rerun the same DEPLOY to converge (runbook: ${RUNBOOK_PATH})`),
-          restore: canRestore ? "LINK_RESTORED" : previousCommit === null ? "NO_MANAGED_PREVIOUS" : "SAME_COMMIT",
+          restore: interruptRestoreLabel(canRestore, previousCommit),
         });
       },
     });
@@ -713,7 +734,7 @@ function finishVerification({ before, verified, lowestBefore, preview }) {
     targets: verified.live.targets,
     ruleHealth: verified.live.ruleHealth,
     configReloadSuccessful: verified.live.reloadSuccessful,
-    untouchedContainers: afterOthers.sort(codepointCompare),
+    untouchedContainers: afterOthers.toSorted(codepointCompare),
     volume: {
       name: DATA_VOLUME,
       mountpointBefore: before.volume.mountpoint,
@@ -776,27 +797,31 @@ function writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit
 
 /* ------------------------------------------------------------------ CLI */
 
-async function main(argv) {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      mode: { type: "string" }, commit: { type: "string" }, "source-root": { type: "string" }, "deploy-root": { type: "string" },
-      "compose-env": { type: "string" }, "run-url": { type: "string" }, "run-id": { type: "string" }, "staging-root": { type: "string" },
-    },
-    strict: true,
-  });
+// 경로·커밋·run 정보는 인자가 아니라 환경 변수로 받는다(workflow가 env로 넘긴다). 인자는 `--mode PREVIEW|DEPLOY` 하나뿐이다.
+async function main(argv, env) {
+  if (argv.length !== 2 || argv[0] !== "--mode") fail("E_OBS_DEPLOY_USAGE", "expected exactly --mode PREVIEW|DEPLOY");
   const result = await deployObservabilityConfig({
-    mode: values.mode, commit: values.commit, sourceRoot: values["source-root"], deployRoot: values["deploy-root"],
-    composeEnvFile: values["compose-env"], runUrl: values["run-url"], runId: values["run-id"], stagingRoot: values["staging-root"],
+    mode: argv[1],
+    commit: env.OBSERVABILITY_COMMIT,
+    sourceRoot: env.OBSERVABILITY_SOURCE_ROOT,
+    deployRoot: env.OBSERVABILITY_DEPLOY_ROOT,
+    composeEnvFile: env.OBSERVABILITY_COMPOSE_ENV,
+    runUrl: env.OBSERVABILITY_RUN_URL,
+    runId: env.OBSERVABILITY_RUN_ID,
+    stagingRoot: env.OBSERVABILITY_STAGING_ROOT,
   });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
+function describeFailure(error) {
+  return error instanceof DeployError ? error.message : `E_OBS_DEPLOY_FAILED: ${message(error)}`;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    await main(process.argv.slice(2));
+    await main(process.argv.slice(2), process.env);
   } catch (error) {
-    process.stderr.write(`${error instanceof DeployError ? error.message : `E_OBS_DEPLOY_FAILED: ${message(error)}`}\n`);
+    process.stderr.write(`${describeFailure(error)}\n`);
     process.exitCode = 1;
   }
 }
