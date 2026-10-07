@@ -92,6 +92,8 @@ jobs:
           node --test tools/ops/data-workflow-scheduler.test.mjs
           node --test tools/platform/data-workflow-scheduler-contract.test.mjs
           node --test tools/platform/deploy-data-workflow-scheduler.test.mjs
+          node --test tools/platform/deploy-observability-config.test.mjs
+          node --test tools/ci/observability-config-deploy-workflow.test.mjs
 
       - name: Validate Compose configurations
         env:
