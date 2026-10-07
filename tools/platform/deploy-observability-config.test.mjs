@@ -405,7 +405,8 @@ test("적용 뒤 라이브 설정이 기대와 다르면 직전 release로 되�
     await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY.*restored previous release/su);
     assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
     assert.equal(verbs(host).filter((verb) => verb === "compose:up").length, 2, "복원도 compose를 거친다");
-    assert.equal(existsSync(join(box.deployRoot, "release-receipts", `observability-config-${COMMIT.slice(0, 12)}-123`)), false);
+    assert.equal(existsSync(receiptPath(box)), false, "성공 receipt는 없다");
+    assert.equal(failureReceipt(box).restore, "RESTORED");
   } finally {
     box.cleanup();
   }

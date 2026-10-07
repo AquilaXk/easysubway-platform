@@ -347,8 +347,11 @@ async function readHostState(docker) {
 }
 
 async function readProjectContainers(docker) {
-  const { stdout } = await docker.docker(["ps", "-a", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`, "--format", "{{.Names}}\t{{.ID}}"]);
-  return Object.fromEntries(stdout.split("\n").filter((line) => line.trim() !== "").map((line) => line.split("\t")));
+  const { stdout } = await docker.docker(["ps", "-a", "-q", "--no-trunc", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`]);
+  const ids = stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  if (ids.length === 0) return {};
+  const records = await docker.json(["inspect", "--type", "container", ...ids]);
+  return Object.fromEntries(records.map((record) => [String(record.Name).replace(/^\//u, ""), { id: record.Id, image: record.Image, startedAt: record.State?.StartedAt ?? null }]));
 }
 
 async function waitHealthy(docker, sleep) {
@@ -519,8 +522,11 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       }
       await waitHealthy(docker, sleep);
       verified = await verifyLive({ docker, sleep, expected: preview.expected, flagKeys: preview.flagKeys });
+      assertScopeAndVolume(before, verified.hostAfter);
     } catch (error) {
-      throw await restorePrevious({ docker, sleep, root, composeEnvFile, previousCommit, commit, error });
+      const outcome = await restorePrevious({ docker, sleep, root, composeEnvFile, previousCommit, commit, error });
+      writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, error: outcome.error, restore: outcome.restore, configDigest: result.configDigest });
+      throw outcome.error;
     }
 
     const verification = finishVerification({ before, verified, lowestBefore, preview });
@@ -542,9 +548,7 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       container: { name: CONTAINER, idBefore: before.containerId, idAfter: containerIdAfter, action },
       verification,
     };
-    const receiptDirectory = join(deployRoot, "release-receipts", `observability-config-${commit.slice(0, 12)}-${runId}`);
-    mkdirSync(receiptDirectory, { recursive: true, mode: 0o700 });
-    writeFileSync(join(receiptDirectory, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(join(receiptDirectory(deployRoot, commit, runId), "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
     return receipt;
   } catch (error) {
     rmSync(stagingDir, { recursive: true, force: true });
@@ -562,17 +566,26 @@ function describePrometheusDirectory(root, commit) {
   }
 }
 
-function finishVerification({ before, verified, lowestBefore, preview }) {
+/** prometheus 서비스 하나만 바뀌었는지 확인한다: 다른 프로젝트 컨테이너(ID·이미지·시작 시각)와 데이터 volume 정체. */
+function assertScopeAndVolume(before, hostAfter) {
   const others = (state) => Object.fromEntries(Object.entries(state.projectContainers).filter(([name]) => name !== CONTAINER));
   const beforeOthers = others(before);
-  const afterOthers = others(verified.hostAfter);
-  for (const name of Object.keys(beforeOthers)) {
-    if (afterOthers[name] !== beforeOthers[name]) fail("E_OBS_DEPLOY_SCOPE", `${name} changed during the prometheus-only deploy (${beforeOthers[name]} -> ${afterOthers[name] ?? "missing"})`);
+  const afterOthers = others(hostAfter);
+  for (const [name, expected] of Object.entries(beforeOthers)) {
+    const actual = afterOthers[name];
+    if (!actual) fail("E_OBS_DEPLOY_SCOPE", `${name} disappeared during the prometheus-only deploy`);
+    for (const field of ["id", "image", "startedAt"]) {
+      if (actual[field] !== expected[field]) fail("E_OBS_DEPLOY_SCOPE", `${name} ${field} changed during the prometheus-only deploy (${expected[field]} -> ${actual[field]})`);
+    }
   }
   for (const name of Object.keys(afterOthers)) if (!(name in beforeOthers)) fail("E_OBS_DEPLOY_SCOPE", `${name} appeared during the prometheus-only deploy`);
-  if (verified.hostAfter.volume.mountpoint !== before.volume.mountpoint || verified.hostAfter.volume.createdAt !== before.volume.createdAt) {
-    fail("E_OBS_DEPLOY_VOLUME", `${DATA_VOLUME} identity changed (${before.volume.mountpoint} ${before.volume.createdAt} -> ${verified.hostAfter.volume.mountpoint} ${verified.hostAfter.volume.createdAt})`);
+  if (hostAfter.volume.mountpoint !== before.volume.mountpoint || hostAfter.volume.createdAt !== before.volume.createdAt) {
+    fail("E_OBS_DEPLOY_VOLUME", `${DATA_VOLUME} identity changed (${before.volume.mountpoint} ${before.volume.createdAt} -> ${hostAfter.volume.mountpoint} ${hostAfter.volume.createdAt})`);
   }
+}
+
+function finishVerification({ before, verified, lowestBefore, preview }) {
+  const afterOthers = Object.keys(verified.hostAfter.projectContainers).filter((name) => name !== CONTAINER);
   return {
     version: verified.live.version,
     flags: Object.fromEntries(preview.flagKeys.map((key) => [key, verified.live.flags[key]])),
@@ -583,7 +596,7 @@ function finishVerification({ before, verified, lowestBefore, preview }) {
     jobs: verified.live.jobs,
     absentJobs: [...REMOVED_JOBS],
     configReloadSuccessful: verified.live.reloadSuccessful,
-    untouchedContainers: Object.keys(afterOthers).sort(codepointCompare),
+    untouchedContainers: afterOthers.sort(codepointCompare),
     volume: {
       name: DATA_VOLUME,
       mountpointBefore: before.volume.mountpoint,
@@ -598,11 +611,12 @@ function finishVerification({ before, verified, lowestBefore, preview }) {
 
 async function restorePrevious({ docker, sleep, root, composeEnvFile, previousCommit, commit, error }) {
   const cause = message(error);
+  const code = error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY";
   if (previousCommit === null) {
-    return new DeployError(error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY", `${cause}; no managed previous release to restore (first rollout): follow the manual rollback runbook`);
+    return { error: new DeployError(code, `${cause}; no managed previous release to restore (first rollout): follow the manual rollback runbook`), restore: "NO_MANAGED_PREVIOUS" };
   }
   if (previousCommit === commit) {
-    return new DeployError(error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY", `${cause}; current already was this commit, nothing to restore`);
+    return { error: new DeployError(code, `${cause}; current already was this commit, nothing to restore`), restore: "SAME_COMMIT" };
   }
   try {
     atomicSymlink(root, "current", join("releases", previousCommit));
@@ -612,9 +626,31 @@ async function restorePrevious({ docker, sleep, root, composeEnvFile, previousCo
     if (after.Id === before.Id) await docker.docker(["restart", CONTAINER]);
     await waitHealthy(docker, sleep);
   } catch (restoreError) {
-    return new DeployError("E_OBS_DEPLOY_RESTORE", `${cause}; restoring previous release ${previousCommit} also failed: ${message(restoreError)}`);
+    return { error: new DeployError("E_OBS_DEPLOY_RESTORE", `${cause}; restoring previous release ${previousCommit} also failed: ${message(restoreError)}`), restore: "FAILED" };
   }
-  return new DeployError(error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY", `${cause}; restored previous release ${previousCommit}`);
+  return { error: new DeployError(code, `${cause}; restored previous release ${previousCommit}`), restore: "RESTORED" };
+}
+
+function receiptDirectory(deployRoot, commit, runId) {
+  const directory = join(deployRoot, "release-receipts", `observability-config-${commit.slice(0, 12)}-${runId}`);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
+function writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, error, restore, configDigest }) {
+  const receipt = {
+    schemaVersion: "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V1",
+    mode: "DEPLOY",
+    outcome: "FAILED",
+    commit,
+    previousCommit,
+    runUrl,
+    recordedAt: now().toISOString(),
+    error: { code: error.code ?? "E_OBS_DEPLOY_FAILED", detail: message(error) },
+    restore,
+    configDigest,
+  };
+  writeFileSync(join(receiptDirectory(deployRoot, commit, runId), "failure-receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
 }
 
 /* ------------------------------------------------------------------ CLI */
