@@ -15,7 +15,8 @@ const CLIENT_ID = "Iv23liTestClientId0001";
 const env = { EASYSUBWAY_DISPATCH_APP_CLIENT_ID: CLIENT_ID, EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: PEM };
 const contract = readSchedulerContract();
 const scriptBytes = readSchedulerScript();
-const secretIdentity = `sha256:${createHash("sha256").update(`client-id\n${CLIENT_ID}\nprivate-key.pem\n${PEM}\n`).digest("hex")}`;
+const canonicalSecret = ["client-id", CLIENT_ID, "private-key.pem", PEM, ""].join("\n");
+const secretIdentity = `sha256:${createHash("sha256").update(canonicalSecret).digest("hex")}`;
 const expected = renderDataWorkflowScheduler({ contract, scriptBytes, secretIdentity });
 
 function fakeCluster({ previous = null, createError = {}, liveOverride } = {}) {
@@ -146,8 +147,7 @@ test("적용한 CronJob을 읽어 대조해 다르면 실패하고 이전 객체
   await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: fakeCluster({ liveOverride: wrongImage }).commandRunner }), /E_SCHEDULER_DEPLOY_READBACK/u);
 });
 
-test("secret이 없거나 RSA 2048 미만이거나 PEM이 아니면 클러스터를 부르기 전에 실패한다", async () => {
-  const small = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs8", format: "pem" });
+test("secret이 없거나 RSA가 아니거나 PEM이 아니면 클러스터를 부르기 전에 실패한다", async () => {
   const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "pkcs8", format: "pem" });
   for (const bad of [
     {},
@@ -155,13 +155,18 @@ test("secret이 없거나 RSA 2048 미만이거나 PEM이 아니면 클러스터
     { ...env, EASYSUBWAY_DISPATCH_APP_CLIENT_ID: "not valid!" },
     { ...env, EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: "" },
     { ...env, EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: "garbage" },
-    { ...env, EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: small },
     { ...env, EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY: ec },
   ]) {
     const cluster = fakeCluster();
     await assert.rejects(deploy({ mode: "DEPLOY", env: bad, commandRunner: cluster.commandRunner }), /E_SCHEDULER_DEPLOY_SECRET/u);
     assert.equal(cluster.calls.length, 0);
   }
+});
+
+test("키 길이가 최소값에 못 미치면 클러스터를 부르기 전에 실패한다", async () => {
+  const cluster = fakeCluster();
+  await assert.rejects(deploy({ mode: "DEPLOY", env, commandRunner: cluster.commandRunner, minimumKeyBits: 4096 }), /E_SCHEDULER_DEPLOY_SECRET: app client id or private key is invalid \(RSA 4096\+ PEM required\)/u);
+  assert.equal(cluster.calls.length, 0);
 });
 
 test("DEPLOY는 클러스터를 건드리기 전에 App 자격을 확인하고 실패하면 아무것도 만들지 않는다", async () => {

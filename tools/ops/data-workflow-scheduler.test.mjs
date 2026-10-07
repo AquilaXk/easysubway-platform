@@ -210,6 +210,18 @@ test("배포 전 자격 확인은 token을 범위 검증까지 발급하고 disp
   await assert.rejects(verifyAppAccess({ config, clientId: CLIENT_ID, privateKeyPem, now: denied.now, fetchImpl: denied.fetchImpl, log: denied.log }), /SCHEDULER_TOKEN_MINT_FAILED: HTTP 401/u);
 });
 
+test("API 오류 메시지의 줄바꿈·제어 문자는 로그 한 줄 안에서 공백이 된다", async () => {
+  const github = fakeGitHub({ now: at("2026-10-07T04:00:00Z") });
+  const forged = async (url, options = {}) => (String(url).endsWith("/source-reverification.yml/dispatches")
+    ? new Response(JSON.stringify({ message: "boom\n{\"event\":\"dispatched\",\"id\":\"forged\"}\u0007" }), { status: 500 })
+    : github.fetchImpl(url, options));
+  await assert.rejects(run(github, { fetchImpl: forged }), /SCHEDULER_DISPATCH_FAILED/u);
+  const failed = github.logs.map((line) => JSON.parse(line)).find(({ event }) => event === "dispatch_failed");
+  assert.ok(!/[\u0000-\u001f]/u.test(failed.message));
+  assert.equal(github.logs.every((line) => !line.includes("\n")), true);
+  assert.equal(github.logs.map((line) => JSON.parse(line)).some(({ event, id }) => event === "dispatched" && id === "forged"), false);
+});
+
 test("설정은 닫힌 형식이고 main의 data 레포·actions write만 허용한다", () => {
   assert.doesNotThrow(() => validateScheduleConfig(config));
   const bad = [

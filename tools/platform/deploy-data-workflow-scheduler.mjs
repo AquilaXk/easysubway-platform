@@ -26,20 +26,25 @@ class DeployError extends Error {
 
 const fail = (code, detail) => { throw new DeployError(code, detail); };
 
-function readSecrets(env) {
+const MINIMUM_APP_KEY_BITS = 2048;
+
+function readSecrets(env, minimumKeyBits) {
   const clientId = env.EASYSUBWAY_DISPATCH_APP_CLIENT_ID;
   const privateKeyPem = env.EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY;
   if (typeof clientId !== "string" || typeof privateKeyPem !== "string" || clientId === "" || privateKeyPem === "") fail("E_SCHEDULER_DEPLOY_SECRET", "app client id and private key are required");
   try {
     createAppJwt({ clientId, privateKeyPem, now: new Date() });
-    if (createPrivateKey(privateKeyPem).asymmetricKeyDetails?.modulusLength < 2048) throw new Error("small key");
+    if (!(createPrivateKey(privateKeyPem).asymmetricKeyDetails?.modulusLength >= minimumKeyBits)) throw new Error("small key");
   } catch {
-    fail("E_SCHEDULER_DEPLOY_SECRET", "app client id or private key is invalid (RSA 2048+ PEM required)");
+    fail("E_SCHEDULER_DEPLOY_SECRET", `app client id or private key is invalid (RSA ${minimumKeyBits}+ PEM required)`);
   }
   return { clientId, privateKeyPem };
 }
 
-const secretIdentity = ({ clientId, privateKeyPem }) => `sha256:${createHash("sha256").update(`client-id\n${clientId}\nprivate-key.pem\n${privateKeyPem}\n`).digest("hex")}`;
+function secretIdentity({ clientId, privateKeyPem }) {
+  const canonical = ["client-id", clientId, "private-key.pem", privateKeyPem, ""].join("\n");
+  return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+}
 
 function summarize(cronJob) {
   const pod = cronJob?.spec?.jobTemplate?.spec?.template?.spec;
@@ -61,7 +66,9 @@ function summarize(cronJob) {
   };
 }
 
-export async function deployDataWorkflowScheduler({ mode, env = process.env, commandRunner = runCommand, verifyAccess = verifyAppAccess } = {}) {
+export async function deployDataWorkflowScheduler({
+  mode, env = process.env, commandRunner = runCommand, verifyAccess = verifyAppAccess, minimumKeyBits = MINIMUM_APP_KEY_BITS,
+} = {}) {
   if (!MODES.includes(mode) || typeof commandRunner !== "function") fail("E_SCHEDULER_DEPLOY_USAGE", "mode must be PREVIEW or DEPLOY");
   const contract = readSchedulerContract();
   const scriptBytes = readSchedulerScript();
@@ -81,7 +88,7 @@ export async function deployDataWorkflowScheduler({ mode, env = process.env, com
     return result(rendered, { kubernetesMutationCount: 0, pruned: [] });
   }
 
-  const secrets = readSecrets(env);
+  const secrets = readSecrets(env, minimumKeyBits);
   const rendered = renderDataWorkflowScheduler({ contract, scriptBytes, secretIdentity: secretIdentity(secrets) });
   // 클러스터를 건드리기 전에 App 자격이 실제로 동작하는지 확인한다(범위를 줄인 token 발급·검증·폐기, dispatch 없음).
   try {

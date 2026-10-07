@@ -41,9 +41,11 @@ export function renderDataWorkflowScheduler({ contract, scriptBytes, secretIdent
 
   const schedule = scheduleText(contract);
   const script = scriptBytes.toString("utf8");
+  const configDigest = sha256([script, "---", schedule].join("\n")).slice(0, 20);
+  const secretDigest = secretIdentity.slice("sha256:".length, "sha256:".length + 20);
   const names = {
-    configMap: `${NAME}-config-${sha256(`${script}\n---\n${schedule}`).slice(0, 20)}`,
-    secret: `${NAME}-secret-${secretIdentity.slice("sha256:".length, "sha256:".length + 20)}`,
+    configMap: `${NAME}-config-${configDigest}`,
+    secret: `${NAME}-secret-${secretDigest}`,
     cronJob: NAME,
     serviceAccount: NAME,
     networkPolicy: `${NAME}-boundary`,

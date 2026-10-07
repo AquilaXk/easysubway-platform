@@ -23,7 +23,7 @@ const HOUR_DIVISORS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24]);
 export const MAX_DISPATCH_MINUTE = 50;
 const ID = /^[a-z0-9][a-z0-9-]{0,79}$/u;
 const WORKFLOW_FILE = /^[a-z0-9][a-z0-9-]*\.yml$/u;
-const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_]{0,39}$/u;
+const INPUT_NAME = /^[A-Za-z]\w{0,39}$/u;
 const CLIENT_ID = /^[A-Za-z0-9]{10,64}$/u;
 
 class SchedulerError extends Error {
@@ -38,29 +38,37 @@ const exactKeys = (value, required, optional = []) => isObject(value)
   && required.every((key) => Object.hasOwn(value, key))
   && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
 
-export function validateScheduleConfig(config) {
-  const bad = (detail) => fail("SCHEDULER_CONFIG", detail);
-  if (!exactKeys(config, ["target", "workflows"]) || Object.keys(config).length !== 2) bad("shape");
-  const { target, workflows } = config;
+const badConfig = (detail) => fail("SCHEDULER_CONFIG", detail);
+
+function validateTarget(target) {
   if (!exactKeys(target, ["repository", "ref", "permissions"]) || target.repository !== TARGET_REPOSITORY || target.ref !== TARGET_REF
     || !isObject(target.permissions) || Object.keys(target.permissions).length !== 1 || target.permissions.actions !== "write") {
-    bad(`target must be ${TARGET_REPOSITORY}@${TARGET_REF} with actions:write only`);
+    badConfig(`target must be ${TARGET_REPOSITORY}@${TARGET_REF} with actions:write only`);
   }
-  if (!Array.isArray(workflows) || workflows.length === 0) bad("workflows");
+}
+
+function validateInputs(entry) {
+  const names = isObject(entry.inputs) ? Object.keys(entry.inputs) : null;
+  if (!names || names.length > 10 || names.some((name) => !INPUT_NAME.test(name) || typeof entry.inputs[name] !== "string")) badConfig(`${entry.id} inputs`);
+}
+
+function validateEntry(entry, ids) {
+  if (!exactKeys(entry, ["id", "workflow", "everyHours", "offsetHour", "minute"], ["inputs"])) badConfig("workflow entry shape");
+  if (typeof entry.id !== "string" || !ID.test(entry.id) || ids.has(entry.id)) badConfig(`id ${JSON.stringify(entry.id)}`);
+  ids.add(entry.id);
+  if (typeof entry.workflow !== "string" || !WORKFLOW_FILE.test(entry.workflow)) badConfig(`workflow ${JSON.stringify(entry.workflow)}`);
+  if (!HOUR_DIVISORS.includes(entry.everyHours)) badConfig(`${entry.id} everyHours`);
+  if (!Number.isInteger(entry.offsetHour) || entry.offsetHour < 0 || entry.offsetHour >= entry.everyHours) badConfig(`${entry.id} offsetHour`);
+  if (!Number.isInteger(entry.minute) || entry.minute < 0 || entry.minute > MAX_DISPATCH_MINUTE) badConfig(`${entry.id} minute`);
+  if (entry.inputs !== undefined) validateInputs(entry);
+}
+
+export function validateScheduleConfig(config) {
+  if (!exactKeys(config, ["target", "workflows"]) || Object.keys(config).length !== 2) badConfig("shape");
+  validateTarget(config.target);
+  if (!Array.isArray(config.workflows) || config.workflows.length === 0) badConfig("workflows");
   const ids = new Set();
-  for (const entry of workflows) {
-    if (!exactKeys(entry, ["id", "workflow", "everyHours", "offsetHour", "minute"], ["inputs"])) bad("workflow entry shape");
-    if (typeof entry.id !== "string" || !ID.test(entry.id) || ids.has(entry.id)) bad(`id ${JSON.stringify(entry.id)}`);
-    ids.add(entry.id);
-    if (typeof entry.workflow !== "string" || !WORKFLOW_FILE.test(entry.workflow)) bad(`workflow ${JSON.stringify(entry.workflow)}`);
-    if (!HOUR_DIVISORS.includes(entry.everyHours)) bad(`${entry.id} everyHours`);
-    if (!Number.isInteger(entry.offsetHour) || entry.offsetHour < 0 || entry.offsetHour >= entry.everyHours) bad(`${entry.id} offsetHour`);
-    if (!Number.isInteger(entry.minute) || entry.minute < 0 || entry.minute > MAX_DISPATCH_MINUTE) bad(`${entry.id} minute`);
-    if (entry.inputs !== undefined) {
-      const names = isObject(entry.inputs) ? Object.keys(entry.inputs) : null;
-      if (!names || names.length > 10 || names.some((name) => !INPUT_NAME.test(name) || typeof entry.inputs[name] !== "string")) bad(`${entry.id} inputs`);
-    }
-  }
+  for (const entry of config.workflows) validateEntry(entry, ids);
   return config;
 }
 
@@ -69,7 +77,7 @@ export function dueEntries(workflows, date) {
   const hour = date.getUTCHours();
   return workflows
     .filter(({ everyHours, offsetHour }) => (((hour - offsetHour) % everyHours) + everyHours) % everyHours === 0)
-    .sort((left, right) => left.minute - right.minute || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+    .sort((left, right) => left.minute - right.minute || Number(left.id > right.id) - Number(left.id < right.id));
 }
 
 export function createAppJwt({ clientId, privateKeyPem, now }) {
@@ -92,8 +100,18 @@ function redactor(secrets) {
     .reduce((current, secret) => current.split(secret).join("[redacted]"), String(text));
 }
 
+// 경로의 가변 조각은 검증된 값(정수 id, 정규식을 통과한 workflow 파일명)만 인코딩해서 넣는다.
+const installationPath = () => `/repos/${TARGET_REPOSITORY}/installation`;
+const accessTokensPath = (installationId) => `/app/installations/${encodeURIComponent(String(installationId))}/access_tokens`;
+const dispatchPath = (workflow) => {
+  if (!WORKFLOW_FILE.test(workflow)) fail("SCHEDULER_CONFIG", "workflow file name");
+  return `/repos/${TARGET_REPOSITORY}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`;
+};
+
 async function call(fetchImpl, redact, method, path, { bearer, body } = {}) {
-  const response = await fetchImpl(`${API}${path}`, {
+  const url = new URL(path, API);
+  if (url.origin !== API) fail("SCHEDULER_REQUEST", "request must stay on the GitHub API origin");
+  const response = await fetchImpl(url.href, {
     method,
     headers: {
       accept: "application/vnd.github+json",
@@ -121,19 +139,25 @@ async function call(fetchImpl, redact, method, path, { bearer, body } = {}) {
  * App JWT -> 설치 조회 -> 범위를 줄인 installation token 발급·검증 -> useToken 실행 -> token 폐기.
  * 요청보다 넓게 발급된 token은 쓰지 않고 바로 폐기한다.
  */
+/** 로그 한 줄은 JSON이다. 값에 든 줄바꿈·제어 문자는 공백으로 바꿔 로그 줄을 위조하지 못하게 한다. */
+function createEmitter(log, now) {
+  const clean = (_key, value) => (typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/gu, " ") : value);
+  return (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }, clean));
+}
+
 async function withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, useToken) {
   const jwt = createAppJwt({ clientId, privateKeyPem, now: now() });
   const secrets = [jwt];
   const redact = redactor(secrets);
   const repositoryName = TARGET_REPOSITORY.split("/")[1];
 
-  const installation = await call(fetchImpl, redact, "GET", `/repos/${TARGET_REPOSITORY}/installation`, { bearer: jwt });
+  const installation = await call(fetchImpl, redact, "GET", installationPath(), { bearer: jwt });
   if (installation.status !== 200 || !Number.isSafeInteger(installation.json?.id) || installation.json.id < 1) {
     fail("SCHEDULER_INSTALLATION_LOOKUP_FAILED", `HTTP ${installation.status} ${installation.message}`.trim());
   }
   emit("installation_resolved", { installationId: installation.json.id });
 
-  const minted = await call(fetchImpl, redact, "POST", `/app/installations/${installation.json.id}/access_tokens`, {
+  const minted = await call(fetchImpl, redact, "POST", accessTokensPath(installation.json.id), {
     bearer: jwt,
     body: { repositories: [repositoryName], permissions: config.target.permissions },
   });
@@ -164,7 +188,7 @@ async function withScopedInstallationToken({ config, clientId, privateKeyPem, no
 /** 배포 전에 App 자격이 실제로 동작하는지 확인한다: token을 범위 검증까지 발급하고 dispatch 없이 폐기한다. */
 export async function verifyAppAccess({ config, clientId, privateKeyPem, now = () => new Date(), fetchImpl = fetch, log = console.log }) {
   validateScheduleConfig(config);
-  const emit = (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }));
+  const emit = createEmitter(log, now);
   await withScopedInstallationToken({ config, clientId, privateKeyPem, now, fetchImpl, emit }, async () => {});
   emit("app_access_verified");
   return { verified: true };
@@ -175,7 +199,7 @@ export async function runScheduler({
   sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }), log = console.log,
 }) {
   validateScheduleConfig(config);
-  const emit = (event, fields = {}) => log(JSON.stringify({ event, at: now().toISOString(), ...fields }));
+  const emit = createEmitter(log, now);
   const started = now();
   const due = dueEntries(config.workflows, started);
   if (due.length === 0) {
@@ -191,7 +215,7 @@ export async function runScheduler({
     for (const entry of due) {
       const wait = hourStart + entry.minute * 60_000 - now().getTime();
       if (wait > 0) await sleep(wait);
-      const result = await call(fetchImpl, redact, "POST", `/repos/${TARGET_REPOSITORY}/actions/workflows/${entry.workflow}/dispatches`, {
+      const result = await call(fetchImpl, redact, "POST", dispatchPath(entry.workflow), {
         bearer: token,
         body: { ref: config.target.ref, ...(entry.inputs ? { inputs: entry.inputs } : {}) },
       });
