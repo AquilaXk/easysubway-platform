@@ -59,7 +59,7 @@ test("대상 workflow는 기존 정기 cron의 주기·분을 그대로 옮기�
   for (const entry of contract.workflows) assert.equal(entry.githubCron, cronOf(entry), entry.id);
   assert.equal(new Set(contract.workflows.map(({ id }) => id)).size, contract.workflows.length);
   const excluded = contract.excluded.map(({ workflow }) => workflow);
-  assert.deepEqual(excluded, ["nationwide-candidate-refresh.yml", "datapack-release.yml", "osv-scheduled.yml"]);
+  assert.deepEqual(excluded, ["datapack-release.yml", "osv-scheduled.yml"]);
   for (const { workflow } of contract.workflows) assert.equal(excluded.includes(workflow), false);
   for (const { reason } of contract.excluded) assert.ok(reason.length > 20);
   assert.deepEqual(
@@ -71,6 +71,13 @@ test("대상 workflow는 기존 정기 cron의 주기·분을 그대로 옮기�
   validateScheduleConfig(config);
 });
 
+test("전국 후보 갱신은 data workflow의 정기 cron(29 */2 * * *)과 같은 주기·분으로 깨운다(#240)", () => {
+  const entry = contract.workflows.find(({ workflow }) => workflow === "nationwide-candidate-refresh.yml");
+  assert.deepEqual(entry, { id: "nationwide-candidate-refresh", workflow: "nationwide-candidate-refresh.yml", everyHours: 2, offsetHour: 0, minute: 29, githubCron: "29 */2 * * *" });
+  assert.equal(entry.inputs, undefined, "정기 역할은 입력 없는 dispatch로만 인정된다. 2인 역할 입력을 보내면 사람 dispatch 경로가 된다");
+  assert.equal(contract.excluded.some(({ workflow }) => workflow === "nationwide-candidate-refresh.yml"), false);
+});
+
 test("정기 대상은 하루 동안 원래 주기대로 때가 된다", () => {
   const counts = new Map();
   for (let hour = 0; hour < 24; hour += 1) {
@@ -80,6 +87,8 @@ test("정기 대상은 하루 동안 원래 주기대로 때가 된다", () => {
   assert.equal(counts.get("kric-current-facility-refresh"), 12);
   assert.equal(counts.get("datapack-expiry-alert-datapack-expiry"), 6);
   assert.equal(counts.get("source-derivative-rebinding"), 4);
+  // #240: data#1035가 스케줄러 App의 입력 없는 dispatch를 정기 역할로 인정한 뒤 후보 갱신도 원래 2시간 주기로 깨운다.
+  assert.equal(counts.get("nationwide-candidate-refresh"), 12);
   assert.equal(counts.get("datapack-expiry-alert-provider-approval"), 1);
   assert.equal(counts.get("itx-current-promotion"), 1);
   assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 18))).map(({ id }) => id).slice(0, 1), ["itx-current-promotion"]);
