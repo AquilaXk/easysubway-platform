@@ -102,6 +102,14 @@
       "githubCron": "23 */2 * * *"
     },
     {
+      "id": "nationwide-candidate-refresh",
+      "workflow": "nationwide-candidate-refresh.yml",
+      "everyHours": 2,
+      "offsetHour": 0,
+      "minute": 29,
+      "githubCron": "29 */2 * * *"
+    },
+    {
       "id": "seoul-current-accessibility-refresh",
       "workflow": "seoul-current-accessibility-refresh.yml",
       "everyHours": 2,
@@ -146,10 +154,6 @@
     }
   ],
   "excluded": [
-    {
-      "workflow": "nationwide-candidate-refresh.yml",
-      "reason": "정기 고정 역할(datapack-scheduled-refresh)이 schedule 이벤트 전용이고 dispatch는 2인 역할 입력을 요구한다. dispatch 허용은 릴리스 권한 게이트 변경이라 QA 결정 전까지 GitHub schedule만 쓴다."
-    },
     {
       "workflow": "datapack-release.yml",
       "reason": "릴리스 권한 경로다. dispatch 기본 mode가 exploratory라 정기 실행과 의미가 다르다."
