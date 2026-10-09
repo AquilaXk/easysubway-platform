@@ -128,7 +128,7 @@ test("schema and receipt workflow remain closed, least-privilege contracts", () 
   assert.equal(schema.properties.branchPolicy.properties.allowedRefs.items.additionalProperties, false);
   const workflow = readFileSync(new URL("../../.github/workflows/production-deploy-effective-admission-receipt.yml", import.meta.url), "utf8");
   assert.match(workflow, /^on:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n  actions: read$/m);
-  assert.match(workflow, /^    if: github\.ref == 'refs\/heads\/main'\n    environment: production-deploy$/m);
+  assert.match(workflow, /^    if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk'\n    environment: production-deploy$/m);
   assert.match(workflow, /^    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:$/m);
   assert.match(workflow, /^      - name: Set up Node\.js\n        uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020\n        with:\n          node-version: 24$/m);
   assert.match(workflow, /^          GITHUB_TOKEN: \$\{\{ github\.token \}\}$/m);

@@ -265,8 +265,8 @@ test("배포 workflow는 main·승인 환경에서만, DEPLOY만 self-hosted run
   assert.match(workflow, /^on:\n  workflow_dispatch:\n    inputs:\n      mode:\n(?:        .*\n)*?        options:\n          - PREVIEW\n          - DEPLOY\n/mu);
   assert.doesNotMatch(workflow, /\n  push:|\n  schedule:|\n  pull_request/u);
   assert.match(workflow, /\npermissions:\n  contents: read\n  actions: read\n/u);
-  assert.match(workflow, /\nconcurrency:\n  group: data-workflow-scheduler-production\n  cancel-in-progress: false\n/u);
-  assert.match(workflow, /\n    if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1\n/u);
+  assert.match(workflow, /\n    concurrency:\n      group: data-workflow-scheduler-production\n      cancel-in-progress: false\n/u);
+  assert.match(workflow, /\n    if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk'\n/u);
   assert.match(workflow, /\n    environment: production-deploy\n/u);
   assert.match(workflow, /\n    runs-on: \$\{\{ fromJSON\(inputs\.mode == 'DEPLOY' && '\["self-hosted","Linux","ARM64","easysubway-production"\]' \|\| '\["ubuntu-latest"\]'\) \}\}\n/u);
   assert.match(workflow, /EASYSUBWAY_DISPATCH_APP_CLIENT_ID: \$\{\{ inputs\.mode == 'DEPLOY' && secrets\.EASYSUBWAY_DISPATCH_APP_CLIENT_ID \|\| '' \}\}/u);

@@ -35,10 +35,10 @@ test("workflow_dispatch로만 실행되고 mode는 PREVIEW와 DEPLOY만 받는�
 });
 
 test("main의 첫 시도에서만, production-deploy 승인 환경에서만 돈다", () => {
-  assert.match(workflow, /if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1/u);
+  assert.match(workflow, /if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk'/u);
   assert.match(workflow, /environment: production-deploy/u);
   assert.equal(count(workflow, "environment:"), 1);
-  assert.match(workflow, /concurrency:\n  group: observability-config-production\n  cancel-in-progress: false/u);
+  assert.match(workflow, /\n    concurrency:\n      group: observability-config-production\n      cancel-in-progress: false/u);
 });
 
 test("DEPLOY만 self-hosted production runner를 쓰고 PREVIEW는 GitHub-hosted다", () => {

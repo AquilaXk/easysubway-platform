@@ -94,6 +94,7 @@ jobs:
           node --test tools/platform/deploy-data-workflow-scheduler.test.mjs
           node --test tools/platform/deploy-observability-config.test.mjs
           node --test tools/ci/observability-config-deploy-workflow.test.mjs
+          node --test tools/ci/production-deploy-actor-gates.test.mjs
 
       - name: Validate Compose configurations
         env:
