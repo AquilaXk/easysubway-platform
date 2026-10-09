@@ -109,6 +109,35 @@ test("both workflows inject Journey V3 runtime settings before environment prepa
   assert.ok(fixedHostInjectionIndex < fixedHostPrepareIndex);
 });
 
+test("K3s run-name records the activation inputs in the fixed machine-readable form (#242)", () => {
+  const workflow = readFileSync(k3sWorkflowUrl, "utf8");
+  // 소비자(data 체인)가 정규식으로만 해석하는 고정 형식이다. 입력 순서와 구분자를 바꾸면 소비자가 해석 불가로 실패한다.
+  assert.equal(
+    count(workflow,
+      "run-name: ${{ format('{0} backend={1}/{2} data={3}/{4}', inputs.mode, inputs.backend_run_id, inputs.backend_artifact_id, inputs.data_run_id, inputs.data_artifact_id) }}\n"),
+    1);
+  assert.ok(workflow.indexOf("\nrun-name:") < workflow.indexOf("\non:"));
+  const consumer = /^(PREVIEW|DEPLOY) backend=([1-9][0-9]*)\/([1-9][0-9]*) data=([1-9][0-9]*)\/([1-9][0-9]*)$/u;
+  assert.deepEqual(consumer.exec("DEPLOY backend=37912373228/11607367446 data=37930592937/11610000000")?.slice(1),
+    ["DEPLOY", "37912373228", "11607367446", "37930592937", "11610000000"]);
+  assert.equal(consumer.test("DEPLOY backend=1/2 data=3/4 extra"), false);
+});
+
+test("K3s workflow admits only the release chain App or the repository owner before any checkout or secret use (#242)", () => {
+  const workflow = readFileSync(k3sWorkflowUrl, "utf8");
+  const steps = workflow.slice(workflow.indexOf("    steps:\n"));
+  const firstStep = steps.slice(steps.indexOf("      - name:"), steps.indexOf("      - name: Checkout Platform"));
+  assert.match(firstStep, /- name: Require an authorized dispatcher\n/);
+  assert.match(firstStep, /TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}\n/);
+  assert.match(firstStep, /"easysubway-release-chain\[bot\]"\|"AquilaXk"\) ;;/);
+  assert.match(firstStep, /\*\) echo "deploy dispatcher is not authorized: \$\{TRIGGERING_ACTOR\}" >&2; exit 1 ;;/);
+  // 비교 값은 셸 변수로만 쓴다: run 본문에 expression을 직접 쓰지 않는다.
+  assert.equal(firstStep.slice(firstStep.indexOf("run: |")).includes("${{"), false);
+  assert.ok(steps.indexOf("Require an authorized dispatcher") < steps.indexOf("actions/checkout@"));
+  assert.ok(steps.indexOf("Require an authorized dispatcher") < steps.indexOf("secrets."));
+  assert.match(workflow, /if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1\n/);
+});
+
 test("Platform CI owns the exact new focused contracts", () => {
   const ci = readFileSync(ciUrl, "utf8");
   for (const command of [

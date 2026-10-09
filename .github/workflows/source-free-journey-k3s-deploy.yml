@@ -1,5 +1,10 @@
 name: Source-free Journey K3s Deploy
 
+# run 목록 API는 workflow_dispatch 입력을 돌려주지 않는다. 직전 활성 release와 되돌리기 입력을 API로 읽을 수 있도록
+# mode와 backend/data 입력 id를 고정 형식으로 run 이름에 남긴다(data 체인이 정규식으로만 해석한다, platform#242).
+# sha256과 artifact 이름은 소비자가 artifacts API(name, digest)에서 다시 구한다.
+run-name: ${{ format('{0} backend={1}/{2} data={3}/{4}', inputs.mode, inputs.backend_run_id, inputs.backend_artifact_id, inputs.data_run_id, inputs.data_artifact_id) }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -59,6 +64,18 @@ jobs:
     runs-on: ${{ fromJSON(inputs.mode == 'DEPLOY' && '["self-hosted","Linux","ARM64","easysubway-production"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 25
     steps:
+      # 환경의 사람 승인이 없어도 허용된 행위자만 진행한다. 재실행한 사람이 원 dispatch 행위자를 가장하지 못하도록 triggering_actor를 쓴다.
+      - name: Require an authorized dispatcher
+        shell: bash
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          case "${TRIGGERING_ACTOR}" in
+            "easysubway-release-chain[bot]"|"AquilaXk") ;;
+            *) echo "deploy dispatcher is not authorized: ${TRIGGERING_ACTOR}" >&2; exit 1 ;;
+          esac
+
       - name: Checkout Platform
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
