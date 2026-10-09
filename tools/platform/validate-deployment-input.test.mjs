@@ -30,7 +30,7 @@ test("CD preflight is main-only and bound to the protected production environmen
   assert.equal(topLevelPermissions.groups.body, "  contents: read\n", "top-level permissions must be exactly read-only contents access");
   assert.doesNotMatch(workflow, /^ {2,}permissions\s*:/m, "jobs and nested mappings must not introduce permissions");
   assert.notEqual(preflight, null, "CD must retain its preflight job");
-  assert.match(preflight.groups.body, /^    if: github\.ref == 'refs\/heads\/main'$/m);
+  assert.match(preflight.groups.body, /^    if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk'$/m);
   assert.deepEqual([...preflight.groups.body.matchAll(/^    environment: (.+)$/gm)].map((match) => match[1]), ["production-deploy"]);
   assert.equal((workflow.match(/inputs\.backend_image/g) ?? []).length, 1, "preflight may use only the declared backend image input");
   assert.deepEqual([...preflight.groups.body.matchAll(/^          EASYSUBWAY_BACKEND_IMAGE: \$\{\{ inputs\.backend_image \}\}$/gm)].map((match) => match[0]), ["          EASYSUBWAY_BACKEND_IMAGE: ${{ inputs.backend_image }}"]);
