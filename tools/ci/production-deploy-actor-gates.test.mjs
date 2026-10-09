@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 // production-deploy 환경의 사람 승인을 없애도 쓰기 권한이 있는 다른 계정·App이 운영 배포 경로를 열지 못하게 하는 행위자 게이트 계약(platform#244).
@@ -77,6 +77,22 @@ for (const { file, job, concurrency, condition } of targets) {
     assert.notEqual(runGate(script, goodEnv).status, 0);
   });
 }
+
+// production-deploy 환경을 선언한 모든 job은 게이트 대상 목록에 있어야 한다. 새 job이 게이트 없이 환경을 쓰면 이 테스트가 깨진다(#244 F2).
+test("production-deploy 환경을 선언한 모든 job이 게이트 대상 목록에 있다 (#244 F2)", () => {
+  const gated = new Set([...targets.map(({ file, job }) => `${file}#${job}`), "source-free-journey-k3s-deploy.yml#source-free-k3s"]);
+  const found = new Set();
+  for (const file of readdirSync(new URL("../../.github/workflows/", import.meta.url)).filter((name) => /\.ya?ml$/u.test(name))) {
+    const workflow = read(file);
+    const jobsAt = workflow.indexOf("\njobs:\n");
+    if (jobsAt === -1) continue;
+    const jobs = workflow.slice(jobsAt + 1);
+    for (const match of jobs.matchAll(/^  ([A-Za-z0-9_-]+):\n/gmu)) {
+      if (/^    environment:\s*["']?production-deploy["']?\s*$/mu.test(jobBlock(workflow, match[1]))) found.add(`${file}#${match[1]}`);
+    }
+  }
+  assert.deepEqual([...found].sort(), [...gated].sort());
+});
 
 test("Platform CI runs the actor gate contract (#244)", () => {
   assert.ok(read("ci.yml").includes("          node --test tools/ci/production-deploy-actor-gates.test.mjs\n"));
