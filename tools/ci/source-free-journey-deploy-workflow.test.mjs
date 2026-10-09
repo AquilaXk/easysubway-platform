@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
@@ -107,6 +108,58 @@ test("both workflows inject Journey V3 runtime settings before environment prepa
   const fixedHostInjectionIndex = fixedHostWorkflow.indexOf(injection);
   const fixedHostPrepareIndex = fixedHostWorkflow.indexOf("tools/deploy/prepare-deployment-env.sh");
   assert.ok(fixedHostInjectionIndex < fixedHostPrepareIndex);
+});
+
+test("K3s run-name records the activation inputs in the fixed machine-readable form (#242)", () => {
+  const workflow = readFileSync(k3sWorkflowUrl, "utf8");
+  // 소비자(data 체인)가 정규식으로만 해석하는 고정 형식이다. 입력 순서와 구분자를 바꾸면 소비자가 해석 불가로 실패한다.
+  assert.equal(
+    count(workflow,
+      "run-name: ${{ format('{0} backend={1}/{2} data={3}/{4}', inputs.mode, inputs.backend_run_id, inputs.backend_artifact_id, inputs.data_run_id, inputs.data_artifact_id) }}\n"),
+    1);
+  assert.ok(workflow.indexOf("\nrun-name:") < workflow.indexOf("\non:"));
+  const consumer = /^(PREVIEW|DEPLOY) backend=([1-9][0-9]*)\/([1-9][0-9]*) data=([1-9][0-9]*)\/([1-9][0-9]*)$/u;
+  assert.deepEqual(consumer.exec("DEPLOY backend=37912373228/11607367446 data=37930592937/11610000000")?.slice(1),
+    ["DEPLOY", "37912373228", "11607367446", "37930592937", "11610000000"]);
+  assert.equal(consumer.test("DEPLOY backend=1/2 data=3/4 extra"), false);
+});
+
+test("K3s workflow는 job 단계에서 허용 행위자만 통과시키고 건너뛴 job이 concurrency 슬롯을 차지하지 않게 한다 (#242 F2)", () => {
+  const workflow = readFileSync(k3sWorkflowUrl, "utf8");
+  const header = workflow.slice(workflow.indexOf("\njobs:\n"), workflow.indexOf("    environment: production-deploy"));
+  assert.ok(header.includes("    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && (github.triggering_actor == 'easysubway-release-chain[bot]' || github.triggering_actor == 'AquilaXk')\n"));
+  assert.ok(header.includes("    concurrency:\n      group: source-free-journey-k3s-production\n      cancel-in-progress: false\n"));
+  // workflow 수준 concurrency는 없다: 있으면 job이 건너뛰어져도 슬롯을 차지한다.
+  assert.equal(/^concurrency:/mu.test(workflow), false);
+  // 소비자가 run-name만 믿지 않도록 확인할 run 필드를 run-name 위에 명시한다.
+  const comment = workflow.slice(0, workflow.indexOf("\nrun-name:"));
+  for (const field of ["conclusion=success", "event=workflow_dispatch", "head_branch=main", "triggering_actor"]) assert.ok(comment.includes(field), field);
+});
+
+// 행위자 step을 실제 bash로 실행한다. case subject를 상수로 바꾸거나 allow list를 넓히는 변이가 실패해야 한다(#242 F1).
+function authorizedDispatcherScript() {
+  const workflow = readFileSync(k3sWorkflowUrl, "utf8");
+  const steps = workflow.slice(workflow.indexOf("    steps:\n"));
+  const begin = steps.indexOf("      - name: Require an authorized dispatcher\n");
+  const end = steps.indexOf("\n      - name: Checkout Platform");
+  const body = steps.slice(begin, end);
+  assert.match(body, /\n        env:\n          TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}\n/u);
+  assert.ok(body.includes('          case "${TRIGGERING_ACTOR}" in\n'));
+  const marker = "\n        run: |\n";
+  return body.slice(body.indexOf(marker) + marker.length).split("\n").map((line) => line.replace(/^ {10}/u, "")).join("\n");
+}
+
+test("행위자 step은 허용 행위자만 통과시키고 비슷한 이름·빈 값·대소문자 변형은 거부한다 (#242 F1)", () => {
+  const script = authorizedDispatcherScript();
+  const run = (actor) => spawnSync("/bin/bash", ["-c", script], { encoding: "utf8", env: { PATH: process.env.PATH, TRIGGERING_ACTOR: actor } });
+  for (const actor of ["easysubway-release-chain[bot]", "AquilaXk"]) assert.equal(run(actor).status, 0, actor);
+  for (const actor of ["AquilaXk-evil", "aquilaxk", "easysubway-release-chain", "easysubway-release-chain[bot]x", "other-collaborator", "", "*", "AquilaXk\nother"]) {
+    const result = run(actor);
+    assert.notEqual(result.status, 0, JSON.stringify(actor));
+    assert.match(result.stderr, /deploy dispatcher is not authorized/u, JSON.stringify(actor));
+  }
+  // 환경 변수가 없으면(set -u) 통과가 아니라 실패다.
+  assert.notEqual(spawnSync("/bin/bash", ["-c", script], { encoding: "utf8", env: { PATH: process.env.PATH } }).status, 0);
 });
 
 test("Platform CI owns the exact new focused contracts", () => {
