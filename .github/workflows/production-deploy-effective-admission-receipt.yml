@@ -9,11 +9,26 @@ permissions:
 
 jobs:
   receipt:
-    if: github.ref == 'refs/heads/main'
+    # 허용되지 않은 행위자의 dispatch는 환경·러너를 잡기 전에 job 단계에서 건너뛴다(concurrency도 job 단위라 건너뛴 job은 슬롯을 차지하지 않는다).
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'
     environment: production-deploy
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Require an authorized dispatcher
+        shell: bash
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          DEPLOY_REF: ${{ github.ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          case "${TRIGGERING_ACTOR}" in
+            "AquilaXk") ;;
+            *) echo "deploy dispatcher is not authorized: ${TRIGGERING_ACTOR}" >&2; exit 1 ;;
+          esac
+          [[ "${DEPLOY_REF}" == "refs/heads/main" && "${RUN_ATTEMPT}" == "1" ]] || { echo "deploy must start from main on the first attempt" >&2; exit 1; }
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
