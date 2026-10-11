@@ -127,6 +127,74 @@ test("approval receipt is bound to the exact Platform revision", async (t) => {
   );
 });
 
+const ACTOR_GATE_APPROVAL = () => ({
+  mode: "ACTOR_GATE",
+  canAdminsBypass: false,
+  requiredReviewers: [],
+  actorGate: {
+    workflow: ".github/workflows/source-free-journey-k3s-deploy.yml",
+    allowedActors: ["AquilaXk", "easysubway-release-chain[bot]"],
+    triggeringActor: "easysubway-release-chain[bot]",
+    runAttempt: 1,
+  },
+});
+const OWNER_ONLY = ".github/workflows/observability-config-deploy.yml";
+
+test("both approval modes of the V2 receipt assemble, and the receipt digest binds the mode (platform#247)", async (t) => {
+  const reviewer = await createFixture(t);
+  const reviewerEnvelope = await assemblePlatformDeploymentInputEnvelope(reviewer.input);
+  const gated = await createFixture(t);
+  const receipt = JSON.parse(await readFile(gated.input.admissionReceiptPath, "utf8"));
+  receipt.approval = ACTOR_GATE_APPROVAL();
+  await writeCompact(gated.input.admissionReceiptPath, receipt);
+  const gatedEnvelope = await assemblePlatformDeploymentInputEnvelope(gated.input);
+  assert.equal(gatedEnvelope.platform.admissionReceiptSha256, await fileDigest(gated.input.admissionReceiptPath));
+  assert.notEqual(gatedEnvelope.platform.admissionReceiptSha256, reviewerEnvelope.platform.admissionReceiptSha256);
+  // 소유자만 허용된 workflow의 영수증은 소유자 행위자로 받아들인다.
+  const ownerOnly = await createFixture(t);
+  const ownerReceipt = JSON.parse(await readFile(ownerOnly.input.admissionReceiptPath, "utf8"));
+  ownerReceipt.approval = ACTOR_GATE_APPROVAL();
+  ownerReceipt.approval.actorGate = { workflow: OWNER_ONLY, allowedActors: ["AquilaXk"], triggeringActor: "AquilaXk", runAttempt: 1 };
+  await writeCompact(ownerOnly.input.admissionReceiptPath, ownerReceipt);
+  await assemblePlatformDeploymentInputEnvelope(ownerOnly.input);
+});
+
+test("approval receipt rejects the V1 contract and every approval deviation", async (t) => {
+  const cases = [
+    ["V1 schema", (receipt) => { receipt.schemaVersion = "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1"; }],
+    ["V1 kind", (receipt) => { receipt.artifactKind = "production-deploy-effective-admission-receipt-v1"; }],
+    ["no mode", (receipt) => { delete receipt.approval.mode; }],
+    ["unknown mode", (receipt) => { receipt.approval.mode = "NONE"; }],
+    ["reviewer mode with other login", (receipt) => { receipt.approval.requiredReviewers[0].login = "other"; }],
+    ["reviewer mode without reviewers", (receipt) => { receipt.approval.requiredReviewers = []; }],
+    ["reviewer mode with an actor gate", (receipt) => { receipt.approval.actorGate = ACTOR_GATE_APPROVAL().actorGate; }],
+    ["actor gate with a reviewer", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.requiredReviewers = [{ type: "User", login: "AquilaXk" }]; }],
+    ["actor gate with admin bypass", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.canAdminsBypass = true; }],
+    ["actor gate with a wider allow-list", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.allowedActors.push("other"); }],
+    ["release chain app on an owner-only workflow", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = OWNER_ONLY; }],
+    ["owner-only allow-list with the app as actor", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = OWNER_ONLY; receipt.approval.actorGate.allowedActors = ["AquilaXk"]; }],
+    ["unknown workflow", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = ".github/workflows/cd.yml"; }],
+    ["prototype workflow key", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = "constructor"; }],
+    ["missing workflow", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); delete receipt.approval.actorGate.workflow; }],
+    ["actor gate with an unlisted actor", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.triggeringActor = "other"; }],
+    ["actor gate rerun", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.runAttempt = 2; }],
+    ["actor gate extra key", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.extra = true; }],
+    ["actor gate missing gate", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); delete receipt.approval.actorGate; }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const receipt = JSON.parse(await readFile(fixture.input.admissionReceiptPath, "utf8"));
+      mutate(receipt);
+      await writeCompact(fixture.input.admissionReceiptPath, receipt);
+      await assert.rejects(
+        assemblePlatformDeploymentInputEnvelope(fixture.input),
+        matchesError("DEPLOYMENT_ENVELOPE_PLATFORM_MISMATCH", 2),
+      );
+    });
+  }
+});
+
 test("Backend component identity must equal the Journey release tuple", async (t) => {
   const fixture = await createFixture(t);
   const component = JSON.parse(await readFile(fixture.input.backendComponentManifestPath, "utf8"));
@@ -281,8 +349,8 @@ async function createFixture(t) {
   ].join("\n")}\n`));
 
   await writeCompact(paths.admissionReceiptPath, {
-    schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1",
-    artifactKind: "production-deploy-effective-admission-receipt-v1",
+    schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2",
+    artifactKind: "production-deploy-effective-admission-receipt-v2",
     repository: "AquilaXk/easysubway-platform",
     environment: "production-deploy",
     ref: "refs/heads/main",
@@ -290,6 +358,7 @@ async function createFixture(t) {
     runUrl: "https://github.com/AquilaXk/easysubway-platform/actions/runs/123",
     observedAt: "2026-08-13T03:30:00.000Z",
     approval: {
+      mode: "REVIEWER",
       canAdminsBypass: false,
       preventSelfReview: false,
       requiredReviewers: [{ type: "User", login: "AquilaXk" }],

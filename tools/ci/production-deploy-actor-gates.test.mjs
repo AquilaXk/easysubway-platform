@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 
+import { DEPLOY_ACTORS_BY_WORKFLOW } from "../platform/production-deploy-actor-allowlist.mjs";
+
 // production-deploy 환경의 사람 승인을 없애도 쓰기 권한이 있는 다른 계정·App이 운영 배포 경로를 열지 못하게 하는 행위자 게이트 계약(platform#244).
 // 다섯 workflow는 모두 workflow_dispatch만으로 시작하고(schedule·push·App dispatch 없음), 최근 run의 triggering_actor는 저장소 소유자뿐이다.
 // 릴리스 체인 App은 source-free-journey-k3s-deploy만 dispatch하므로 여기서는 허용하지 않는다(최소 권한).
@@ -96,4 +98,29 @@ test("production-deploy 환경을 선언한 모든 job이 게이트 대상 목�
 
 test("Platform CI runs the actor gate contract (#244)", () => {
   assert.ok(read("ci.yml").includes("          node --test tools/ci/production-deploy-actor-gates.test.mjs\n"));
+});
+
+// 영수증 검증기와 assembler가 쓰는 workflow별 허용 행위자 표(단일 출처)는 각 workflow의 실제 게이트와 같아야 한다(platform#247 F2).
+test("영수증 허용 행위자 표는 검증기를 호출하는 모든 workflow의 job if·첫 step 게이트와 일치한다 (#247)", () => {
+  const callers = readdirSync(new URL("../../.github/workflows/", import.meta.url))
+    .filter((name) => /\.ya?ml$/u.test(name) && read(name).includes("verify-production-deploy-effective-admission-receipt.mjs"))
+    .map((name) => `.github/workflows/${name}`).sort();
+  assert.deepEqual(callers, Object.keys(DEPLOY_ACTORS_BY_WORKFLOW).sort());
+  for (const [path, actors] of Object.entries(DEPLOY_ACTORS_BY_WORKFLOW)) {
+    const workflow = read(path.replace(".github/workflows/", ""));
+    const jobIf = workflow.split("\n").find((line) => /^ {4}if: /u.test(line) && line.includes("triggering_actor"));
+    assert.ok(jobIf, path);
+    assert.deepEqual([...jobIf.matchAll(/github\.triggering_actor == '([^']+)'/gu)].map((match) => match[1]).sort(), [...actors].sort(), `${path} job if`);
+    const lines = workflow.split("\n");
+    const caseLine = lines[lines.findIndex((line) => line.includes('case "${TRIGGERING_ACTOR}" in')) + 1];
+    assert.ok(caseLine?.endsWith(") ;;"), `${path} case`);
+    assert.deepEqual([...caseLine.matchAll(/"([^"]+)"/gu)].map((match) => match[1]).sort(), [...actors].sort(), `${path} first step case`);
+  }
+});
+
+// 영수증은 환경 변수가 아니라 run 기록으로 행위자를 판정하지만, 어떤 workflow도 행위자·시도 변수를 덮어쓰지 않음을 함께 고정한다.
+test("어떤 workflow도 GITHUB_ACTOR·GITHUB_RUN_ATTEMPT를 env로 덮어쓰지 않는다 (#247)", () => {
+  for (const file of readdirSync(new URL("../../.github/workflows/", import.meta.url)).filter((name) => /\.ya?ml$/u.test(name))) {
+    assert.doesNotMatch(read(file), /^\s*(GITHUB_ACTOR|GITHUB_TRIGGERING_ACTOR|GITHUB_RUN_ATTEMPT|GITHUB_RUN_ID)\s*:/mu, file);
+  }
 });

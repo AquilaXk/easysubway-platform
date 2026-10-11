@@ -5,8 +5,8 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "artifactKind", "repository", "environment", "ref", "workflowSha", "runUrl", "observedAt", "approval", "branchPolicy"],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1" },
-    "artifactKind": { "type": "string", "const": "production-deploy-effective-admission-receipt-v1" },
+    "schemaVersion": { "type": "string", "const": "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2" },
+    "artifactKind": { "type": "string", "const": "production-deploy-effective-admission-receipt-v2" },
     "repository": { "type": "string", "const": "AquilaXk/easysubway-platform" },
     "environment": { "type": "string", "const": "production-deploy" },
     "ref": { "type": "string", "const": "refs/heads/main" },
@@ -15,23 +15,59 @@
     "observedAt": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$" },
     "approval": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["canAdminsBypass", "preventSelfReview", "requiredReviewers"],
-      "properties": {
-        "canAdminsBypass": { "type": "boolean", "const": false },
-        "preventSelfReview": { "type": "boolean", "const": false },
-        "requiredReviewers": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["type", "login"],
-            "properties": { "type": { "type": "string", "const": "User" }, "login": { "type": "string", "const": "AquilaXk" } }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "canAdminsBypass", "preventSelfReview", "requiredReviewers"],
+          "properties": {
+            "mode": { "type": "string", "const": "REVIEWER" },
+            "canAdminsBypass": { "type": "boolean", "const": false },
+            "preventSelfReview": { "type": "boolean", "const": false },
+            "requiredReviewers": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "login"],
+                "properties": { "type": { "type": "string", "const": "User" }, "login": { "type": "string", "const": "AquilaXk" } }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "canAdminsBypass", "requiredReviewers", "actorGate"],
+          "properties": {
+            "mode": { "type": "string", "const": "ACTOR_GATE" },
+            "canAdminsBypass": { "type": "boolean", "const": false },
+            "requiredReviewers": { "type": "array", "maxItems": 0 },
+            "actorGate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["workflow", "allowedActors", "triggeringActor", "runAttempt"],
+              "properties": {
+                "workflow": {
+                  "type": "string",
+                  "enum": [
+                    ".github/workflows/data-workflow-scheduler-deploy.yml",
+                    ".github/workflows/observability-config-deploy.yml",
+                    ".github/workflows/production-deploy-effective-admission-receipt.yml",
+                    ".github/workflows/source-free-journey-deploy.yml",
+                    ".github/workflows/source-free-journey-k3s-deploy.yml"
+                  ]
+                },
+                "allowedActors": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "type": "string", "enum": ["AquilaXk", "easysubway-release-chain[bot]"] } },
+                "triggeringActor": { "type": "string", "enum": ["AquilaXk", "easysubway-release-chain[bot]"] },
+                "runAttempt": { "type": "integer", "const": 1 }
+              }
+            }
           }
         }
-      }
+      ]
     },
     "branchPolicy": {
       "type": "object",

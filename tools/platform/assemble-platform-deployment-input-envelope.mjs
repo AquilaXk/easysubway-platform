@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { validateJourneyReleaseTupleBytes } from "./bind-journey-release-candidate.mjs";
+import { allowedActorsFor } from "./production-deploy-actor-allowlist.mjs";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const PLATFORM_REPOSITORY = "AquilaXk/easysubway-platform";
@@ -261,22 +262,15 @@ function validatePlatformReceipt(receipt, platformRevision) {
       "schemaVersion", "artifactKind", "repository", "environment", "ref",
       "workflowSha", "runUrl", "observedAt", "approval", "branchPolicy",
     ]) ||
-    receipt.schemaVersion !== "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1" ||
-    receipt.artifactKind !== "production-deploy-effective-admission-receipt-v1" ||
+    receipt.schemaVersion !== "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2" ||
+    receipt.artifactKind !== "production-deploy-effective-admission-receipt-v2" ||
     receipt.repository !== PLATFORM_REPOSITORY ||
     receipt.environment !== PLATFORM_ENVIRONMENT ||
     receipt.ref !== "refs/heads/main" ||
     receipt.workflowSha !== platformRevision ||
     !new RegExp(`^https://github\\.com/${PLATFORM_REPOSITORY}/actions/runs/[1-9][0-9]*$`).test(receipt.runUrl) ||
     !isDateTime(receipt.observedAt) ||
-    !sameKeys(receipt.approval, ["canAdminsBypass", "preventSelfReview", "requiredReviewers"]) ||
-    receipt.approval.canAdminsBypass !== false ||
-    receipt.approval.preventSelfReview !== false ||
-    !Array.isArray(receipt.approval.requiredReviewers) ||
-    receipt.approval.requiredReviewers.length !== 1 ||
-    !sameKeys(receipt.approval.requiredReviewers[0], ["type", "login"]) ||
-    receipt.approval.requiredReviewers[0].type !== "User" ||
-    receipt.approval.requiredReviewers[0].login !== "AquilaXk" ||
+    !isAcceptedApproval(receipt.approval) ||
     !sameKeys(receipt.branchPolicy, ["protectedBranches", "customBranchPolicies", "allowedRefs"]) ||
     receipt.branchPolicy.protectedBranches !== false ||
     receipt.branchPolicy.customBranchPolicies !== true ||
@@ -288,6 +282,35 @@ function validatePlatformReceipt(receipt, platformRevision) {
   ) {
     throw failure("DEPLOYMENT_ENVELOPE_PLATFORM_MISMATCH", 2);
   }
+}
+
+// 영수증의 승인 증거는 닫힌 두 모드뿐이다(verify-production-deploy-effective-admission-receipt.mjs, platform#247).
+// ACTOR_GATE의 허용 행위자는 호출 workflow별 단일 출처 표에서만 온다.
+function isAcceptedApproval(approval) {
+  if (!isObject(approval)) return false;
+  if (approval.mode === "REVIEWER") {
+    return sameKeys(approval, ["mode", "canAdminsBypass", "preventSelfReview", "requiredReviewers"]) &&
+      approval.canAdminsBypass === false &&
+      approval.preventSelfReview === false &&
+      Array.isArray(approval.requiredReviewers) &&
+      approval.requiredReviewers.length === 1 &&
+      sameKeys(approval.requiredReviewers[0], ["type", "login"]) &&
+      approval.requiredReviewers[0].type === "User" &&
+      approval.requiredReviewers[0].login === "AquilaXk";
+  }
+  if (approval.mode === "ACTOR_GATE") {
+    if (!sameKeys(approval, ["mode", "canAdminsBypass", "requiredReviewers", "actorGate"]) ||
+      approval.canAdminsBypass !== false ||
+      !Array.isArray(approval.requiredReviewers) ||
+      approval.requiredReviewers.length !== 0 ||
+      !sameKeys(approval.actorGate, ["workflow", "allowedActors", "triggeringActor", "runAttempt"])) return false;
+    const allowedActors = allowedActorsFor(approval.actorGate.workflow);
+    return allowedActors !== undefined &&
+      sameArray(approval.actorGate.allowedActors, allowedActors) &&
+      allowedActors.includes(approval.actorGate.triggeringActor) &&
+      approval.actorGate.runAttempt === 1;
+  }
+  return false;
 }
 
 function validateBackendComponent(component, tuple) {
