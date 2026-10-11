@@ -48,9 +48,19 @@
             "actorGate": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["allowedActors", "triggeringActor", "runAttempt"],
+              "required": ["workflow", "allowedActors", "triggeringActor", "runAttempt"],
               "properties": {
-                "allowedActors": { "type": "array", "const": ["AquilaXk", "easysubway-release-chain[bot]"] },
+                "workflow": {
+                  "type": "string",
+                  "enum": [
+                    ".github/workflows/data-workflow-scheduler-deploy.yml",
+                    ".github/workflows/observability-config-deploy.yml",
+                    ".github/workflows/production-deploy-effective-admission-receipt.yml",
+                    ".github/workflows/source-free-journey-deploy.yml",
+                    ".github/workflows/source-free-journey-k3s-deploy.yml"
+                  ]
+                },
+                "allowedActors": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "type": "string", "enum": ["AquilaXk", "easysubway-release-chain[bot]"] } },
                 "triggeringActor": { "type": "string", "enum": ["AquilaXk", "easysubway-release-chain[bot]"] },
                 "runAttempt": { "type": "integer", "const": 1 }
               }

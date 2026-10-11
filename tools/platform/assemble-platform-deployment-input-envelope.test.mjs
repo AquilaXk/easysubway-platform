@@ -131,8 +131,14 @@ const ACTOR_GATE_APPROVAL = () => ({
   mode: "ACTOR_GATE",
   canAdminsBypass: false,
   requiredReviewers: [],
-  actorGate: { allowedActors: ["AquilaXk", "easysubway-release-chain[bot]"], triggeringActor: "easysubway-release-chain[bot]", runAttempt: 1 },
+  actorGate: {
+    workflow: ".github/workflows/source-free-journey-k3s-deploy.yml",
+    allowedActors: ["AquilaXk", "easysubway-release-chain[bot]"],
+    triggeringActor: "easysubway-release-chain[bot]",
+    runAttempt: 1,
+  },
 });
+const OWNER_ONLY = ".github/workflows/observability-config-deploy.yml";
 
 test("both approval modes of the V2 receipt assemble, and the receipt digest binds the mode (platform#247)", async (t) => {
   const reviewer = await createFixture(t);
@@ -144,6 +150,13 @@ test("both approval modes of the V2 receipt assemble, and the receipt digest bin
   const gatedEnvelope = await assemblePlatformDeploymentInputEnvelope(gated.input);
   assert.equal(gatedEnvelope.platform.admissionReceiptSha256, await fileDigest(gated.input.admissionReceiptPath));
   assert.notEqual(gatedEnvelope.platform.admissionReceiptSha256, reviewerEnvelope.platform.admissionReceiptSha256);
+  // 소유자만 허용된 workflow의 영수증은 소유자 행위자로 받아들인다.
+  const ownerOnly = await createFixture(t);
+  const ownerReceipt = JSON.parse(await readFile(ownerOnly.input.admissionReceiptPath, "utf8"));
+  ownerReceipt.approval = ACTOR_GATE_APPROVAL();
+  ownerReceipt.approval.actorGate = { workflow: OWNER_ONLY, allowedActors: ["AquilaXk"], triggeringActor: "AquilaXk", runAttempt: 1 };
+  await writeCompact(ownerOnly.input.admissionReceiptPath, ownerReceipt);
+  await assemblePlatformDeploymentInputEnvelope(ownerOnly.input);
 });
 
 test("approval receipt rejects the V1 contract and every approval deviation", async (t) => {
@@ -158,6 +171,11 @@ test("approval receipt rejects the V1 contract and every approval deviation", as
     ["actor gate with a reviewer", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.requiredReviewers = [{ type: "User", login: "AquilaXk" }]; }],
     ["actor gate with admin bypass", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.canAdminsBypass = true; }],
     ["actor gate with a wider allow-list", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.allowedActors.push("other"); }],
+    ["release chain app on an owner-only workflow", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = OWNER_ONLY; }],
+    ["owner-only allow-list with the app as actor", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = OWNER_ONLY; receipt.approval.actorGate.allowedActors = ["AquilaXk"]; }],
+    ["unknown workflow", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = ".github/workflows/cd.yml"; }],
+    ["prototype workflow key", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.workflow = "constructor"; }],
+    ["missing workflow", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); delete receipt.approval.actorGate.workflow; }],
     ["actor gate with an unlisted actor", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.triggeringActor = "other"; }],
     ["actor gate rerun", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.runAttempt = 2; }],
     ["actor gate extra key", (receipt) => { receipt.approval = ACTOR_GATE_APPROVAL(); receipt.approval.actorGate.extra = true; }],

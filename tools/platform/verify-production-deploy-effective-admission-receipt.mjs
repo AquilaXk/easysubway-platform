@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
 
+import { allowedActorsFor } from "./production-deploy-actor-allowlist.mjs";
+
 const REPOSITORY = "AquilaXk/easysubway-platform";
 const ENVIRONMENT = "production-deploy";
 const REF = "refs/heads/main";
 const API_VERSION = "2022-11-28";
 const REQUEST_TIMEOUT_MS = 5_000;
-// 사람 승인을 없앤 환경(ACTOR_GATE, platform#247)에서 배포를 여는 행위자. 승인 대신 각 workflow의 job `if`와 첫 step이 같은 행위자 게이트를 건다
-// (platform#244, production-deploy-actor-gates.test.mjs가 환경을 쓰는 모든 job을 고정한다). 여기 목록은 그 workflow별 허용 목록의 합집합이다.
-const ACTOR_GATE_ALLOWED_ACTORS = Object.freeze(["AquilaXk", "easysubway-release-chain[bot]"]);
-
 export async function verifyEffectiveAdmissionReceipt(context, request, timeoutMs = REQUEST_TIMEOUT_MS) {
   assertContext(context);
   if (typeof request !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) fail("E_PD_EAR_REQUEST");
@@ -17,8 +15,10 @@ export async function verifyEffectiveAdmissionReceipt(context, request, timeoutM
   const base = `https://api.github.com/repos/${REPOSITORY}/environments/${ENVIRONMENT}`;
   const environment = await getJson(request, base, timeoutMs);
   const policies = await getJson(request, `${base}/deployment-branch-policies`, timeoutMs);
-  const approval = validateApproval(environment, context);
+  const classified = validateApproval(environment);
   const branchPolicy = validateBranchPolicy(environment, policies);
+  // 사람 승인이 없는 환경은 승인 대신 이 run의 행위자를 Actions API 기록으로 확인한다(환경 변수는 쓰지 않는다).
+  const approval = classified.mode === "ACTOR_GATE" ? await readActorGate(request, context, timeoutMs) : classified;
 
   return {
     schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2",
@@ -36,8 +36,7 @@ export async function verifyEffectiveAdmissionReceipt(context, request, timeoutM
 
 async function main() {
   try {
-    // 행위자 사실은 인자가 아니라 runner 환경에서만 읽는다(호출자가 값을 지어낼 수 없게 인자 집합은 닫혀 있다).
-    const context = { ...parseArguments(process.argv.slice(2)), actor: process.env.GITHUB_ACTOR, runAttempt: process.env.GITHUB_RUN_ATTEMPT };
+    const context = parseArguments(process.argv.slice(2));
     const token = process.env.GITHUB_TOKEN;
     if (typeof token !== "string" || token.length === 0) fail("E_PD_EAR_TOKEN");
     const receipt = await verifyEffectiveAdmissionReceipt(context, (url, options) => fetch(url, {
@@ -106,8 +105,8 @@ function assertContext(context) {
 
 // 환경의 관측 상태가 정확히 두 모드 중 하나일 때만 통과한다. 그 밖(규칙 추가·부분 제거·검토자 2명 등)은 모두 실패한다.
 //   REVIEWER: 검토자 AquilaXk 1명 + 배포 브랜치 정책, 관리자 우회 불가
-//   ACTOR_GATE: 배포 브랜치 정책 하나뿐(검토자 없음), 관리자 우회 불가, 이 run의 행위자가 허용 목록이고 재실행이 아님
-function validateApproval(environment, context) {
+//   ACTOR_GATE: 배포 브랜치 정책 하나뿐(검토자 없음), 관리자 우회 불가. 행위자는 readActorGate가 run 기록으로 확인한다.
+function validateApproval(environment) {
   if (!isObject(environment) || environment.name !== ENVIRONMENT || environment.can_admins_bypass !== false || !Array.isArray(environment.protection_rules)) fail("E_PD_EAR_APPROVAL");
   const rules = environment.protection_rules;
   const requiredReviewerRules = rules.filter((rule) => isObject(rule) && rule.type === "required_reviewers");
@@ -115,7 +114,7 @@ function validateApproval(environment, context) {
   if (branchPolicyRules.length !== 1) fail("E_PD_EAR_APPROVAL");
   if (requiredReviewerRules.length === 0) {
     if (rules.length !== 1) fail("E_PD_EAR_APPROVAL");
-    return validateActorGate(context);
+    return { mode: "ACTOR_GATE" };
   }
   if (rules.length !== 2 || requiredReviewerRules.length !== 1) fail("E_PD_EAR_APPROVAL");
   const rule = requiredReviewerRules[0];
@@ -125,13 +124,23 @@ function validateApproval(environment, context) {
   return { mode: "REVIEWER", canAdminsBypass: false, preventSelfReview: false, requiredReviewers: [{ type: "User", login: "AquilaXk" }] };
 }
 
-function validateActorGate(context) {
-  if (typeof context.actor !== "string" || !ACTOR_GATE_ALLOWED_ACTORS.includes(context.actor) || context.runAttempt !== "1") fail("E_PD_EAR_ACTOR_GATE");
+// 현재 run의 기록(Actions API)으로 호출 workflow(path)와 시작 행위자(triggering_actor)·실행 시도를 확인한다.
+// 환경 변수(GITHUB_ACTOR 등)는 step `env:`로 바뀔 수 있어 근거로 쓰지 않는다. 기록을 읽지 못하거나 어긋나면 실패한다.
+async function readActorGate(request, context, timeoutMs) {
+  const runId = /\/actions\/runs\/([1-9][0-9]*)$/.exec(context.runUrl)?.[1];
+  if (runId === undefined) fail("E_PD_EAR_CONTEXT");
+  const run = await getJson(request, `https://api.github.com/repos/${REPOSITORY}/actions/runs/${runId}`, timeoutMs);
+  const allowedActors = isObject(run) ? allowedActorsFor(run.path) : undefined;
+  const triggeringActor = isObject(run?.triggering_actor) ? run.triggering_actor.login : undefined;
+  if (
+    !isObject(run) || String(run.id) !== runId || run.status !== "in_progress" || run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
+    run.head_sha !== context.workflowSha || run.run_attempt !== 1 || allowedActors === undefined || typeof triggeringActor !== "string" || !allowedActors.includes(triggeringActor)
+  ) fail("E_PD_EAR_ACTOR_GATE");
   return {
     mode: "ACTOR_GATE",
     canAdminsBypass: false,
     requiredReviewers: [],
-    actorGate: { allowedActors: [...ACTOR_GATE_ALLOWED_ACTORS], triggeringActor: context.actor, runAttempt: 1 },
+    actorGate: { workflow: run.path, allowedActors, triggeringActor, runAttempt: 1 },
   };
 }
 

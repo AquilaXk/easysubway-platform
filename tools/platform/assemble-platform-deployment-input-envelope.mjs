@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { validateJourneyReleaseTupleBytes } from "./bind-journey-release-candidate.mjs";
+import { allowedActorsFor } from "./production-deploy-actor-allowlist.mjs";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const PLATFORM_REPOSITORY = "AquilaXk/easysubway-platform";
@@ -284,8 +285,7 @@ function validatePlatformReceipt(receipt, platformRevision) {
 }
 
 // 영수증의 승인 증거는 닫힌 두 모드뿐이다(verify-production-deploy-effective-admission-receipt.mjs, platform#247).
-const ACTOR_GATE_ALLOWED_ACTORS = ["AquilaXk", "easysubway-release-chain[bot]"];
-
+// ACTOR_GATE의 허용 행위자는 호출 workflow별 단일 출처 표에서만 온다.
 function isAcceptedApproval(approval) {
   if (!isObject(approval)) return false;
   if (approval.mode === "REVIEWER") {
@@ -299,13 +299,15 @@ function isAcceptedApproval(approval) {
       approval.requiredReviewers[0].login === "AquilaXk";
   }
   if (approval.mode === "ACTOR_GATE") {
-    return sameKeys(approval, ["mode", "canAdminsBypass", "requiredReviewers", "actorGate"]) &&
-      approval.canAdminsBypass === false &&
-      Array.isArray(approval.requiredReviewers) &&
-      approval.requiredReviewers.length === 0 &&
-      sameKeys(approval.actorGate, ["allowedActors", "triggeringActor", "runAttempt"]) &&
-      sameArray(approval.actorGate.allowedActors, ACTOR_GATE_ALLOWED_ACTORS) &&
-      ACTOR_GATE_ALLOWED_ACTORS.includes(approval.actorGate.triggeringActor) &&
+    if (!sameKeys(approval, ["mode", "canAdminsBypass", "requiredReviewers", "actorGate"]) ||
+      approval.canAdminsBypass !== false ||
+      !Array.isArray(approval.requiredReviewers) ||
+      approval.requiredReviewers.length !== 0 ||
+      !sameKeys(approval.actorGate, ["workflow", "allowedActors", "triggeringActor", "runAttempt"])) return false;
+    const allowedActors = allowedActorsFor(approval.actorGate.workflow);
+    return allowedActors !== undefined &&
+      sameArray(approval.actorGate.allowedActors, allowedActors) &&
+      allowedActors.includes(approval.actorGate.triggeringActor) &&
       approval.actorGate.runAttempt === 1;
   }
   return false;
