@@ -261,22 +261,15 @@ function validatePlatformReceipt(receipt, platformRevision) {
       "schemaVersion", "artifactKind", "repository", "environment", "ref",
       "workflowSha", "runUrl", "observedAt", "approval", "branchPolicy",
     ]) ||
-    receipt.schemaVersion !== "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1" ||
-    receipt.artifactKind !== "production-deploy-effective-admission-receipt-v1" ||
+    receipt.schemaVersion !== "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2" ||
+    receipt.artifactKind !== "production-deploy-effective-admission-receipt-v2" ||
     receipt.repository !== PLATFORM_REPOSITORY ||
     receipt.environment !== PLATFORM_ENVIRONMENT ||
     receipt.ref !== "refs/heads/main" ||
     receipt.workflowSha !== platformRevision ||
     !new RegExp(`^https://github\\.com/${PLATFORM_REPOSITORY}/actions/runs/[1-9][0-9]*$`).test(receipt.runUrl) ||
     !isDateTime(receipt.observedAt) ||
-    !sameKeys(receipt.approval, ["canAdminsBypass", "preventSelfReview", "requiredReviewers"]) ||
-    receipt.approval.canAdminsBypass !== false ||
-    receipt.approval.preventSelfReview !== false ||
-    !Array.isArray(receipt.approval.requiredReviewers) ||
-    receipt.approval.requiredReviewers.length !== 1 ||
-    !sameKeys(receipt.approval.requiredReviewers[0], ["type", "login"]) ||
-    receipt.approval.requiredReviewers[0].type !== "User" ||
-    receipt.approval.requiredReviewers[0].login !== "AquilaXk" ||
+    !isAcceptedApproval(receipt.approval) ||
     !sameKeys(receipt.branchPolicy, ["protectedBranches", "customBranchPolicies", "allowedRefs"]) ||
     receipt.branchPolicy.protectedBranches !== false ||
     receipt.branchPolicy.customBranchPolicies !== true ||
@@ -288,6 +281,34 @@ function validatePlatformReceipt(receipt, platformRevision) {
   ) {
     throw failure("DEPLOYMENT_ENVELOPE_PLATFORM_MISMATCH", 2);
   }
+}
+
+// 영수증의 승인 증거는 닫힌 두 모드뿐이다(verify-production-deploy-effective-admission-receipt.mjs, platform#247).
+const ACTOR_GATE_ALLOWED_ACTORS = ["AquilaXk", "easysubway-release-chain[bot]"];
+
+function isAcceptedApproval(approval) {
+  if (!isObject(approval)) return false;
+  if (approval.mode === "REVIEWER") {
+    return sameKeys(approval, ["mode", "canAdminsBypass", "preventSelfReview", "requiredReviewers"]) &&
+      approval.canAdminsBypass === false &&
+      approval.preventSelfReview === false &&
+      Array.isArray(approval.requiredReviewers) &&
+      approval.requiredReviewers.length === 1 &&
+      sameKeys(approval.requiredReviewers[0], ["type", "login"]) &&
+      approval.requiredReviewers[0].type === "User" &&
+      approval.requiredReviewers[0].login === "AquilaXk";
+  }
+  if (approval.mode === "ACTOR_GATE") {
+    return sameKeys(approval, ["mode", "canAdminsBypass", "requiredReviewers", "actorGate"]) &&
+      approval.canAdminsBypass === false &&
+      Array.isArray(approval.requiredReviewers) &&
+      approval.requiredReviewers.length === 0 &&
+      sameKeys(approval.actorGate, ["allowedActors", "triggeringActor", "runAttempt"]) &&
+      sameArray(approval.actorGate.allowedActors, ACTOR_GATE_ALLOWED_ACTORS) &&
+      ACTOR_GATE_ALLOWED_ACTORS.includes(approval.actorGate.triggeringActor) &&
+      approval.actorGate.runAttempt === 1;
+  }
+  return false;
 }
 
 function validateBackendComponent(component, tuple) {

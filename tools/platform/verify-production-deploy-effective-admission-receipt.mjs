@@ -6,6 +6,9 @@ const ENVIRONMENT = "production-deploy";
 const REF = "refs/heads/main";
 const API_VERSION = "2022-11-28";
 const REQUEST_TIMEOUT_MS = 5_000;
+// 사람 승인을 없앤 환경(ACTOR_GATE, platform#247)에서 배포를 여는 행위자. 승인 대신 각 workflow의 job `if`와 첫 step이 같은 행위자 게이트를 건다
+// (platform#244, production-deploy-actor-gates.test.mjs가 환경을 쓰는 모든 job을 고정한다). 여기 목록은 그 workflow별 허용 목록의 합집합이다.
+const ACTOR_GATE_ALLOWED_ACTORS = Object.freeze(["AquilaXk", "easysubway-release-chain[bot]"]);
 
 export async function verifyEffectiveAdmissionReceipt(context, request, timeoutMs = REQUEST_TIMEOUT_MS) {
   assertContext(context);
@@ -14,12 +17,12 @@ export async function verifyEffectiveAdmissionReceipt(context, request, timeoutM
   const base = `https://api.github.com/repos/${REPOSITORY}/environments/${ENVIRONMENT}`;
   const environment = await getJson(request, base, timeoutMs);
   const policies = await getJson(request, `${base}/deployment-branch-policies`, timeoutMs);
-  const approval = validateApproval(environment);
+  const approval = validateApproval(environment, context);
   const branchPolicy = validateBranchPolicy(environment, policies);
 
   return {
-    schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V1",
-    artifactKind: "production-deploy-effective-admission-receipt-v1",
+    schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2",
+    artifactKind: "production-deploy-effective-admission-receipt-v2",
     repository: REPOSITORY,
     environment: ENVIRONMENT,
     ref: REF,
@@ -33,7 +36,8 @@ export async function verifyEffectiveAdmissionReceipt(context, request, timeoutM
 
 async function main() {
   try {
-    const context = parseArguments(process.argv.slice(2));
+    // 행위자 사실은 인자가 아니라 runner 환경에서만 읽는다(호출자가 값을 지어낼 수 없게 인자 집합은 닫혀 있다).
+    const context = { ...parseArguments(process.argv.slice(2)), actor: process.env.GITHUB_ACTOR, runAttempt: process.env.GITHUB_RUN_ATTEMPT };
     const token = process.env.GITHUB_TOKEN;
     if (typeof token !== "string" || token.length === 0) fail("E_PD_EAR_TOKEN");
     const receipt = await verifyEffectiveAdmissionReceipt(context, (url, options) => fetch(url, {
@@ -100,16 +104,35 @@ function assertContext(context) {
   if (!isObject(context) || context.repository !== REPOSITORY || context.ref !== REF || !/^[a-f0-9]{40}$/.test(context.workflowSha) || !new RegExp(`^https://github\\.com/${REPOSITORY}/actions/runs/[1-9][0-9]*$`).test(context.runUrl)) fail("E_PD_EAR_CONTEXT");
 }
 
-function validateApproval(environment) {
-  if (!isObject(environment) || environment.name !== ENVIRONMENT || environment.can_admins_bypass !== false || !Array.isArray(environment.protection_rules) || environment.protection_rules.length !== 2) fail("E_PD_EAR_APPROVAL");
-  const requiredReviewerRules = environment.protection_rules.filter((rule) => isObject(rule) && rule.type === "required_reviewers");
-  const branchPolicyRules = environment.protection_rules.filter((rule) => isObject(rule) && rule.type === "branch_policy");
-  if (requiredReviewerRules.length !== 1 || branchPolicyRules.length !== 1) fail("E_PD_EAR_APPROVAL");
+// 환경의 관측 상태가 정확히 두 모드 중 하나일 때만 통과한다. 그 밖(규칙 추가·부분 제거·검토자 2명 등)은 모두 실패한다.
+//   REVIEWER: 검토자 AquilaXk 1명 + 배포 브랜치 정책, 관리자 우회 불가
+//   ACTOR_GATE: 배포 브랜치 정책 하나뿐(검토자 없음), 관리자 우회 불가, 이 run의 행위자가 허용 목록이고 재실행이 아님
+function validateApproval(environment, context) {
+  if (!isObject(environment) || environment.name !== ENVIRONMENT || environment.can_admins_bypass !== false || !Array.isArray(environment.protection_rules)) fail("E_PD_EAR_APPROVAL");
+  const rules = environment.protection_rules;
+  const requiredReviewerRules = rules.filter((rule) => isObject(rule) && rule.type === "required_reviewers");
+  const branchPolicyRules = rules.filter((rule) => isObject(rule) && rule.type === "branch_policy");
+  if (branchPolicyRules.length !== 1) fail("E_PD_EAR_APPROVAL");
+  if (requiredReviewerRules.length === 0) {
+    if (rules.length !== 1) fail("E_PD_EAR_APPROVAL");
+    return validateActorGate(context);
+  }
+  if (rules.length !== 2 || requiredReviewerRules.length !== 1) fail("E_PD_EAR_APPROVAL");
   const rule = requiredReviewerRules[0];
   if (rule.prevent_self_review !== false || !Array.isArray(rule.reviewers) || rule.reviewers.length !== 1) fail("E_PD_EAR_APPROVAL");
   const reviewer = rule.reviewers[0];
   if (!isObject(reviewer) || reviewer.type !== "User" || !isObject(reviewer.reviewer) || reviewer.reviewer.login !== "AquilaXk") fail("E_PD_EAR_APPROVAL");
-  return { canAdminsBypass: false, preventSelfReview: false, requiredReviewers: [{ type: "User", login: "AquilaXk" }] };
+  return { mode: "REVIEWER", canAdminsBypass: false, preventSelfReview: false, requiredReviewers: [{ type: "User", login: "AquilaXk" }] };
+}
+
+function validateActorGate(context) {
+  if (typeof context.actor !== "string" || !ACTOR_GATE_ALLOWED_ACTORS.includes(context.actor) || context.runAttempt !== "1") fail("E_PD_EAR_ACTOR_GATE");
+  return {
+    mode: "ACTOR_GATE",
+    canAdminsBypass: false,
+    requiredReviewers: [],
+    actorGate: { allowedActors: [...ACTOR_GATE_ALLOWED_ACTORS], triggeringActor: context.actor, runAttempt: 1 },
+  };
 }
 
 function validateBranchPolicy(environment, policies) {
