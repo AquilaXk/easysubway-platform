@@ -58,6 +58,10 @@ function buildClusterState({
       labels: { "easysubway.io/candidate-token": token },
     },
   }));
+  const resolveCreatedAt = (override, fallback) => {
+    const value = override !== undefined ? override : fallback;
+    return value ? { creationTimestamp: value } : {};
+  };
   const configMaps = [
     ...candidates.map(({ token, createdAt, configCreatedAt }) => ({
       apiVersion: "v1",
@@ -65,7 +69,7 @@ function buildClusterState({
       metadata: {
         name: `journey-config-${token}`,
         namespace: "easysubway-journey",
-        ...(configCreatedAt !== undefined ? { creationTimestamp: configCreatedAt } : createdAt ? { creationTimestamp: createdAt } : {}),
+        ...resolveCreatedAt(configCreatedAt, createdAt),
       },
     })),
     ...extraConfigMaps,
@@ -77,7 +81,7 @@ function buildClusterState({
       metadata: {
         name: `journey-secret-${token}`,
         namespace: "easysubway-journey",
-        ...(secretCreatedAt !== undefined ? { creationTimestamp: secretCreatedAt } : createdAt ? { creationTimestamp: createdAt } : {}),
+        ...resolveCreatedAt(secretCreatedAt, createdAt),
       },
       data: { DATABASE_PASSWORD: Buffer.from(`super-secret-${token}`).toString("base64") },
     })),
@@ -215,8 +219,8 @@ test("--execute --confirm-qa-approval 호출 시 과거 9개 ConfigMap·Secret�
   assert.equal(result.counts.remainingConfigMaps, 2);
   assert.equal(result.counts.remainingSecrets, 2);
   assert.deepEqual(result.remaining, {
-    configMaps: [`journey-config-${ PREVIOUS_TOKEN }`, `journey-config-${ ACTIVE_TOKEN }`].sort(),
-    secrets: [`journey-secret-${ PREVIOUS_TOKEN }`, `journey-secret-${ ACTIVE_TOKEN }`].sort(),
+    configMaps: [`journey-config-${PREVIOUS_TOKEN}`, `journey-config-${ACTIVE_TOKEN}`].sort((a, b) => a.localeCompare(b)),
+    secrets: [`journey-secret-${PREVIOUS_TOKEN}`, `journey-secret-${ACTIVE_TOKEN}`].sort((a, b) => a.localeCompare(b)),
   });
 
   const remainingCandidateConfigs = cluster.state.configMaps

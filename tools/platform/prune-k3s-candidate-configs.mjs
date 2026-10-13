@@ -15,6 +15,11 @@ const SECRET_NAME_PATTERN = /^journey-secret-([a-z0-9][a-z0-9-]*)$/;
 const DEPLOYMENT_NAME_PATTERN = /^journey-candidate-([a-z0-9][a-z0-9-]*)$/;
 const KUBECTL_TARGET_PATTERN = /^(?:(configmap)\/(journey-config-([a-z0-9][a-z0-9-]*))|(secret)\/(journey-secret-([a-z0-9][a-z0-9-]*)))$/;
 const BARE_TARGET_PATTERN = /^journey-(config|secret)-([a-z0-9][a-z0-9-]*)$/;
+const SECRET_JSONPATH = String.raw`jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}`;
+
+function compareStrings(left, right) {
+  return left.localeCompare(right);
+}
 
 export class K3sCandidatePruneError extends Error {
   constructor(code, message) {
@@ -63,35 +68,41 @@ function extractActiveToken(activeService) {
   return activeToken;
 }
 
+function validateSingleDeployment(deployment, activeToken) {
+  const name = deployment?.metadata?.name ?? "";
+  const labels = deployment?.metadata?.labels ?? {};
+  const byCandidateToken = labels["easysubway.io/candidate-token"];
+  const byCandidate = labels["easysubway.io/candidate"];
+  const hasCandidateLabel = byCandidateToken !== undefined || byCandidate !== undefined;
+  if (!name.startsWith("journey-candidate-") && !hasCandidateLabel) return;
+
+  if (
+    byCandidateToken !== undefined &&
+    byCandidate !== undefined &&
+    byCandidateToken !== byCandidate
+  ) {
+    fail(
+      "E_K3S_PRUNE_ACTIVE_DEPLOYMENT_MISMATCH",
+      `candidate Deployment ${name} has conflicting candidate labels`,
+    );
+  }
+  const match = DEPLOYMENT_NAME_PATTERN.exec(name);
+  const labelToken = byCandidateToken ?? byCandidate;
+  const deploymentToken = match?.[1];
+  const tokenMismatch = !deploymentToken || deploymentToken !== activeToken;
+  const labelMismatch = Boolean(labelToken && labelToken !== activeToken);
+  if (tokenMismatch || labelMismatch) {
+    fail(
+      "E_K3S_PRUNE_ACTIVE_DEPLOYMENT_MISMATCH",
+      `candidate Deployment ${name} (label=${String(labelToken)}) does not match active Service token ${activeToken}`,
+    );
+  }
+}
+
 function validateActiveDeployments(deployments, activeToken) {
   if (!Array.isArray(deployments)) return;
   for (const deployment of deployments) {
-    const name = deployment?.metadata?.name ?? "";
-    const labels = deployment?.metadata?.labels ?? {};
-    const byCandidateToken = labels["easysubway.io/candidate-token"];
-    const byCandidate = labels["easysubway.io/candidate"];
-    const hasCandidateLabel = byCandidateToken !== undefined || byCandidate !== undefined;
-    if (!name.startsWith("journey-candidate-") && !hasCandidateLabel) continue;
-
-    if (
-      byCandidateToken !== undefined &&
-      byCandidate !== undefined &&
-      byCandidateToken !== byCandidate
-    ) {
-      fail(
-        "E_K3S_PRUNE_ACTIVE_DEPLOYMENT_MISMATCH",
-        `candidate Deployment ${name} has conflicting candidate labels`,
-      );
-    }
-    const match = DEPLOYMENT_NAME_PATTERN.exec(name);
-    const labelToken = byCandidateToken ?? byCandidate;
-    const deploymentToken = match?.[1];
-    if (!deploymentToken || deploymentToken !== activeToken || (labelToken && labelToken !== activeToken)) {
-      fail(
-        "E_K3S_PRUNE_ACTIVE_DEPLOYMENT_MISMATCH",
-        `candidate Deployment ${name} (label=${String(labelToken)}) does not match active Service token ${activeToken}`,
-      );
-    }
+    validateSingleDeployment(deployment, activeToken);
   }
 }
 
@@ -128,10 +139,7 @@ function collectCandidateObjects(items, prefix, pattern, kindLabel) {
   return byToken;
 }
 
-export function assertSafePruneTargets(targets, { activeToken, previousToken }) {
-  if (!Array.isArray(targets)) {
-    fail("E_K3S_PRUNE_TARGET_GUARD", "pruneTargets must be an array");
-  }
+function buildProtectedTokenState(activeToken, previousToken) {
   if (typeof activeToken !== "string" || !CANDIDATE_TOKEN_PATTERN.test(activeToken)) {
     fail("E_K3S_PRUNE_TARGET_GUARD", "activeToken is required for target guard");
   }
@@ -150,7 +158,26 @@ export function assertSafePruneTargets(targets, { activeToken, previousToken }) 
       `secret/journey-secret-${token}`,
     ]),
   );
+  return { protectedTokens, protectedNames };
+}
 
+function extractTargetToken(target) {
+  const kubectlMatch = KUBECTL_TARGET_PATTERN.exec(target);
+  if (kubectlMatch) {
+    return kubectlMatch[3] ?? kubectlMatch[6];
+  }
+  const bareMatch = BARE_TARGET_PATTERN.exec(target);
+  if (bareMatch) {
+    return bareMatch[2];
+  }
+  fail("E_K3S_PRUNE_TARGET_GUARD", `non-candidate object in pruneTargets: ${target}`);
+}
+
+export function assertSafePruneTargets(targets, { activeToken, previousToken }) {
+  if (!Array.isArray(targets)) {
+    fail("E_K3S_PRUNE_TARGET_GUARD", "pruneTargets must be an array");
+  }
+  const { protectedTokens, protectedNames } = buildProtectedTokenState(activeToken, previousToken);
   const seen = new Set();
   for (const target of targets) {
     if (typeof target !== "string" || protectedNames.has(target)) {
@@ -160,16 +187,72 @@ export function assertSafePruneTargets(targets, { activeToken, previousToken }) 
       fail("E_K3S_PRUNE_TARGET_GUARD", `duplicate object in pruneTargets: ${target}`);
     }
     seen.add(target);
-    const kubectlMatch = KUBECTL_TARGET_PATTERN.exec(target);
-    const bareMatch = BARE_TARGET_PATTERN.exec(target);
-    if (!kubectlMatch && !bareMatch) {
-      fail("E_K3S_PRUNE_TARGET_GUARD", `non-candidate object in pruneTargets: ${target}`);
-    }
-    const token = kubectlMatch ? (kubectlMatch[3] ?? kubectlMatch[6]) : bareMatch[2];
+    const token = extractTargetToken(target);
     if (protectedTokens.has(token)) {
       fail("E_K3S_PRUNE_TARGET_GUARD", `protected token ${token} found in pruneTargets: ${target}`);
     }
   }
+}
+
+function validateExplicitPreviousToken(explicitPreviousToken, activeToken, configMapsByToken, secretsByToken) {
+  const isValidFormat = typeof explicitPreviousToken === "string" && CANDIDATE_TOKEN_PATTERN.test(explicitPreviousToken);
+  if (!isValidFormat || explicitPreviousToken === activeToken) {
+    fail(
+      "E_K3S_PRUNE_PREVIOUS_INVALID",
+      `--previous-token must be a valid inactive candidate token (got ${String(explicitPreviousToken)})`,
+    );
+  }
+  if (!configMapsByToken.has(explicitPreviousToken) || !secretsByToken.has(explicitPreviousToken)) {
+    fail(
+      "E_K3S_PRUNE_PREVIOUS_INCOMPLETE",
+      `specified previous candidate ${explicitPreviousToken} is missing ConfigMap or Secret`,
+    );
+  }
+  return explicitPreviousToken;
+}
+
+function selectNewestInactiveToken(inactiveTokens, configMapsByToken, secretsByToken) {
+  const ranked = inactiveTokens.map((token) => {
+    const cfg = configMapsByToken.get(token);
+    const sec = secretsByToken.get(token);
+    if (!cfg || !sec) {
+      fail(
+        "E_K3S_PRUNE_PREVIOUS_INCOMPLETE",
+        `inactive candidate ${token} has an incomplete ConfigMap/Secret pair`,
+      );
+    }
+    const cfgTs = parseIsoTimestamp(cfg.creationTimestamp, cfg.name);
+    const secTs = parseIsoTimestamp(sec.creationTimestamp, sec.name);
+    return {
+      token,
+      minTimestampMs: Math.min(cfgTs, secTs),
+      maxTimestampMs: Math.max(cfgTs, secTs),
+    };
+  });
+  ranked.sort((left, right) => right.maxTimestampMs - left.maxTimestampMs);
+  if (ranked.length >= 2 && ranked[0].minTimestampMs <= ranked[1].maxTimestampMs) {
+    fail(
+      "E_K3S_PRUNE_PREVIOUS_AMBIGUOUS",
+      `top inactive candidates ${ranked[0].token} and ${ranked[1].token} have overlapping or identical creationTimestamp; pass --previous-token explicitly`,
+    );
+  }
+  return ranked[0].token;
+}
+
+function resolvePreviousToken({
+  explicitPreviousToken,
+  activeToken,
+  inactiveTokens,
+  configMapsByToken,
+  secretsByToken,
+}) {
+  if (explicitPreviousToken !== undefined && explicitPreviousToken !== null) {
+    return validateExplicitPreviousToken(explicitPreviousToken, activeToken, configMapsByToken, secretsByToken);
+  }
+  if (inactiveTokens.length === 0) {
+    return null;
+  }
+  return selectNewestInactiveToken(inactiveTokens, configMapsByToken, secretsByToken);
 }
 
 export function planK3sCandidateConfigPrune(
@@ -202,55 +285,15 @@ export function planK3sCandidateConfigPrune(
     );
   }
 
-  const allTokens = [...new Set([...configMapsByToken.keys(), ...secretsByToken.keys()])].sort();
+  const allTokens = [...new Set([...configMapsByToken.keys(), ...secretsByToken.keys()])].sort(compareStrings);
   const inactiveTokens = allTokens.filter((token) => token !== activeToken);
-
-  let resolvedPreviousToken = null;
-  if (explicitPreviousToken !== undefined && explicitPreviousToken !== null) {
-    if (
-      typeof explicitPreviousToken !== "string" ||
-      !CANDIDATE_TOKEN_PATTERN.test(explicitPreviousToken) ||
-      explicitPreviousToken === activeToken
-    ) {
-      fail(
-        "E_K3S_PRUNE_PREVIOUS_INVALID",
-        `--previous-token must be a valid inactive candidate token (got ${String(explicitPreviousToken)})`,
-      );
-    }
-    if (!configMapsByToken.has(explicitPreviousToken) || !secretsByToken.has(explicitPreviousToken)) {
-      fail(
-        "E_K3S_PRUNE_PREVIOUS_INCOMPLETE",
-        `specified previous candidate ${explicitPreviousToken} is missing ConfigMap or Secret`,
-      );
-    }
-    resolvedPreviousToken = explicitPreviousToken;
-  } else if (inactiveTokens.length > 0) {
-    const ranked = inactiveTokens.map((token) => {
-      const cfg = configMapsByToken.get(token);
-      const sec = secretsByToken.get(token);
-      if (!cfg || !sec) {
-        fail(
-          "E_K3S_PRUNE_PREVIOUS_INCOMPLETE",
-          `inactive candidate ${token} has an incomplete ConfigMap/Secret pair`,
-        );
-      }
-      const cfgTs = parseIsoTimestamp(cfg.creationTimestamp, cfg.name);
-      const secTs = parseIsoTimestamp(sec.creationTimestamp, sec.name);
-      return {
-        token,
-        minTimestampMs: Math.min(cfgTs, secTs),
-        maxTimestampMs: Math.max(cfgTs, secTs),
-      };
-    });
-    ranked.sort((left, right) => right.maxTimestampMs - left.maxTimestampMs);
-    if (ranked.length >= 2 && ranked[0].minTimestampMs <= ranked[1].maxTimestampMs) {
-      fail(
-        "E_K3S_PRUNE_PREVIOUS_AMBIGUOUS",
-        `top inactive candidates ${ranked[0].token} and ${ranked[1].token} have overlapping or identical creationTimestamp; pass --previous-token explicitly`,
-      );
-    }
-    resolvedPreviousToken = ranked[0].token;
-  }
+  const resolvedPreviousToken = resolvePreviousToken({
+    explicitPreviousToken,
+    activeToken,
+    inactiveTokens,
+    configMapsByToken,
+    secretsByToken,
+  });
 
   const retainedTokens = [
     activeToken,
@@ -267,8 +310,8 @@ export function planK3sCandidateConfigPrune(
     if (cfg) pruneConfigMaps.push(cfg.name);
     if (sec) pruneSecrets.push(sec.name);
   }
-  pruneConfigMaps.sort();
-  pruneSecrets.sort();
+  pruneConfigMaps.sort(compareStrings);
+  pruneSecrets.sort(compareStrings);
 
   const kubectlResources = [
     ...pruneConfigMaps.map((name) => `configmap/${name}`),
@@ -315,14 +358,7 @@ async function readClusterSnapshot(kubectlExec) {
     kubectlExec(["get", "service", ACTIVE_SERVICE_NAME, "--namespace", NAMESPACE, "--ignore-not-found", "-o", "json"]),
     kubectlExec(["get", "deployments", "--namespace", NAMESPACE, "-o", "json"]),
     kubectlExec(["get", "configmaps", "--namespace", NAMESPACE, "-o", "json"]),
-    kubectlExec([
-      "get",
-      "secrets",
-      "--namespace",
-      NAMESPACE,
-      "-o",
-      "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.metadata.creationTimestamp}{\"\\n\"}{end}",
-    ]),
+    kubectlExec(["get", "secrets", "--namespace", NAMESPACE, "-o", SECRET_JSONPATH]),
   ]);
 
   const activeServiceText = String(activeServiceRes?.stdout ?? "").trim();
@@ -348,6 +384,36 @@ async function readClusterSnapshot(kubectlExec) {
   return { activeService, deployments, configMaps, secrets };
 }
 
+function listCandidateResourceNames(items, prefix) {
+  return (items ?? [])
+    .map((item) => item?.metadata?.name)
+    .filter((name) => typeof name === "string" && name.startsWith(prefix))
+    .sort(compareStrings);
+}
+
+function filterPostDeleteSnapshot(resolvedSnapshot, finalKubectlResources) {
+  return {
+    configMaps: resolvedSnapshot.configMaps.filter(
+      (item) => !finalKubectlResources.includes(`configmap/${item?.metadata?.name}`),
+    ),
+    secrets: resolvedSnapshot.secrets.filter(
+      (item) => !finalKubectlResources.includes(`secret/${item?.metadata?.name}`),
+    ),
+  };
+}
+
+function validateModeAndApproval(mode, qaApproval) {
+  if (mode !== "DRY_RUN" && mode !== "EXECUTE") {
+    fail("E_K3S_PRUNE_USAGE", `mode must be DRY_RUN or EXECUTE (got ${String(mode)})`);
+  }
+  if (mode === "EXECUTE" && (typeof qaApproval !== "string" || qaApproval.trim().length === 0)) {
+    fail(
+      "E_K3S_PRUNE_APPROVAL_REQUIRED",
+      "EXECUTE mode requires explicit QA approval (--confirm-qa-approval <non-empty-string>)",
+    );
+  }
+}
+
 export async function pruneK3sCandidateConfigs({
   mode = "DRY_RUN",
   qaApproval = undefined,
@@ -357,17 +423,7 @@ export async function pruneK3sCandidateConfigs({
   commandRunner = defaultCommandRunner,
   kubectlPrefix = ["sudo", "--non-interactive", "k3s", "kubectl"],
 } = {}) {
-  if (mode !== "DRY_RUN" && mode !== "EXECUTE") {
-    fail("E_K3S_PRUNE_USAGE", `mode must be DRY_RUN or EXECUTE (got ${String(mode)})`);
-  }
-  if (mode === "EXECUTE") {
-    if (typeof qaApproval !== "string" || qaApproval.trim().length === 0) {
-      fail(
-        "E_K3S_PRUNE_APPROVAL_REQUIRED",
-        "EXECUTE mode requires explicit QA approval (--confirm-qa-approval <non-empty-string>)",
-      );
-    }
-  }
+  validateModeAndApproval(mode, qaApproval);
 
   const [kubectlCmd, ...kubectlBaseArgs] = kubectlPrefix;
   const kubectlExec = (args) => commandRunner(kubectlCmd, [...kubectlBaseArgs, ...args]);
@@ -408,27 +464,13 @@ export async function pruneK3sCandidateConfigs({
   }
 
   const postSnapshot = resolvedSnapshot
-    ? {
-      configMaps: resolvedSnapshot.configMaps.filter(
-        (item) => !finalKubectlResources.includes(`configmap/${item?.metadata?.name}`),
-      ),
-      secrets: resolvedSnapshot.secrets.filter(
-        (item) => !finalKubectlResources.includes(`secret/${item?.metadata?.name}`),
-      ),
-    }
+    ? filterPostDeleteSnapshot(resolvedSnapshot, finalKubectlResources)
     : await readClusterSnapshot(kubectlExec);
 
-  const remainingConfigMaps = (postSnapshot.configMaps ?? [])
-    .map((item) => item?.metadata?.name)
-    .filter((name) => typeof name === "string" && name.startsWith("journey-config-"))
-    .sort();
-  const remainingSecrets = (postSnapshot.secrets ?? [])
-    .map((item) => item?.metadata?.name)
-    .filter((name) => typeof name === "string" && name.startsWith("journey-secret-"))
-    .sort();
-
-  const expectedRetainedConfigs = [...plan.retained.configMaps].sort();
-  const expectedRetainedSecrets = [...plan.retained.secrets].sort();
+  const remainingConfigMaps = listCandidateResourceNames(postSnapshot.configMaps, "journey-config-");
+  const remainingSecrets = listCandidateResourceNames(postSnapshot.secrets, "journey-secret-");
+  const expectedRetainedConfigs = [...plan.retained.configMaps].sort(compareStrings);
+  const expectedRetainedSecrets = [...plan.retained.secrets].sort(compareStrings);
 
   if (
     JSON.stringify(remainingConfigMaps) !== JSON.stringify(expectedRetainedConfigs) ||
@@ -457,6 +499,14 @@ export async function pruneK3sCandidateConfigs({
   };
 }
 
+function readNextFlagValue(argv, index, errorMessage) {
+  const next = argv[index + 1];
+  if (!next || next.startsWith("--")) {
+    fail("E_K3S_PRUNE_USAGE", errorMessage);
+  }
+  return next;
+}
+
 function parseCliArgs(argv) {
   let mode = "DRY_RUN";
   let explicitDryRun = false;
@@ -475,25 +525,14 @@ function parseCliArgs(argv) {
       mode = "EXECUTE";
     } else if (arg === "--confirm-qa-approval") {
       const next = argv[index + 1];
-      if (next === undefined || next.startsWith("--")) {
-        qaApproval = "";
-      } else {
-        qaApproval = next;
-        index += 1;
-      }
+      const hasValue = next !== undefined && !next.startsWith("--");
+      qaApproval = hasValue ? next : "";
+      if (hasValue) index += 1;
     } else if (arg === "--previous-token") {
-      const next = argv[index + 1];
-      if (!next || next.startsWith("--")) {
-        fail("E_K3S_PRUNE_USAGE", "--previous-token requires a value");
-      }
-      previousToken = next;
+      previousToken = readNextFlagValue(argv, index, "--previous-token requires a value");
       index += 1;
     } else if (arg === "--snapshot-file") {
-      const next = argv[index + 1];
-      if (!next || next.startsWith("--")) {
-        fail("E_K3S_PRUNE_USAGE", "--snapshot-file requires a file path");
-      }
-      snapshotFile = next;
+      snapshotFile = readNextFlagValue(argv, index, "--snapshot-file requires a file path");
       index += 1;
     } else {
       fail("E_K3S_PRUNE_USAGE", `unknown argument: ${arg}`);
