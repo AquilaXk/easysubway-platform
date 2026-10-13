@@ -803,8 +803,6 @@ test("activation normalizes quoted public key PEM and injects startup bundle pro
   const rawPem = "\"-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\n-----END PUBLIC KEY-----\\n\"";
   const backendEnvironment = [
     `EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM=${rawPem}`,
-    "EASYSUBWAY_TIMETABLE_SEED_ENABLED=true",
-    "EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX=true",
     "SAFE_FLAG=true",
     "",
   ].join("\n");
@@ -840,8 +838,9 @@ test("activation normalizes quoted public key PEM and injects startup bundle pro
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM, expectedPem);
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_PUBLIC_KEY_PEM, expectedPem);
   assert.equal(createdSecrets[0].stringData.EASYSUBWAY_JOURNEY_V3_ROUTE_BUNDLE_STARTUP_CURRENT_KEY_ID, "test-key-v1");
-  assert.equal(createdSecrets[0].stringData.EASYSUBWAY_TIMETABLE_SEED_ENABLED, "false");
-  assert.equal(createdSecrets[0].stringData.EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX, "false");
+  assert.equal(Object.keys(createdSecrets[0].stringData).some((key) => key.includes("TIMETABLE_SEED")), false);
+  const runnerSource = await readFile(new URL("./run-k3s-journey-activation.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(runnerSource, /TIMETABLE_SEED/u);
 });
 
 test("activateCandidate sends tupleSha256 as activationRequestIdentity matching candidate startup configuration", async () => {

@@ -58,11 +58,11 @@ groups:
           impact_ko: "활성 K3s backend가 준비되지 않았거나 관측 경로가 막혀 backend 상태를 확인할 수 없습니다."
           action_ko: "journey-active Service의 활성 pod 상태와 /actuator/health/readiness 응답, compose 네트워크에서 ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
 
-      # 이 시계열은 backend actuator 메트릭에서 라이브로 scrape된다(Hub Issue #2376): prometheus.yml의
-      # backend_app_metrics job이 활성 K3s journey-active Service의 /actuator/prometheus 를 직접 수집한다(Issue #221).
-      # actuator는 공개 노출하지 않고 nginx 공개 경로에서 /actuator/* 를 차단하되 readiness/liveness probe만
-      # 예외로 둔다. .github/workflows/timetable-auto-refresh.yml의 T-24h/T-6h Slack 통지는 보완 경보로
-      # 병행 유지된다.
+      # 이 시계열은 backend actuator 메트릭에서 라이브로 scrape된다(Hub Issue #2376, backend#476, platform#231):
+      # prometheus.yml의 backend_app_metrics job이 활성 K3s journey-active Service의 /actuator/prometheus 를 직접
+      # 수집한다(Issue #221). 게이지 값은 활성 서버 경로 번들(route bundle)의 freshUntil까지 남은 초이며,
+      # 활성 번들이 없으면 NaN이다. actuator는 공개 노출하지 않고 nginx 공개 경로에서 /actuator/* 를 차단하되
+      # readiness/liveness probe만 예외로 둔다.
       - alert: TimetableSnapshotFreshnessExpiringT24h
         expr: min(easysubway_timetable_snapshot_remaining_seconds) <= 86400 and min(easysubway_timetable_snapshot_remaining_seconds) > 21600
         for: 5m
@@ -70,11 +70,11 @@ groups:
           severity: warning
           service: aquila-timetable-snapshot
         annotations:
-          summary: Timetable snapshot freshUntil expires within 24 hours
-          description: The server timetable snapshot freshUntil deadline is less than 24h away. The automatic re-collection workflow must have already run; owner regeneration/deploy may still be required.
+          summary: Active route bundle timetable freshUntil expires within 24 hours
+          description: The active server route bundle timetable freshUntil deadline is less than 24h away. Once expired, Journey route search and station timetable search fail closed with HTTP 503 until a new server route bundle is published and activated.
           title_ko: "운행표 snapshot 만료 24시간 전"
-          impact_ko: "재수집·재산출이 완료되지 않으면 만료 후 재시작 시 부팅 실패 위험이 있습니다."
-          action_ko: "timetable-auto-refresh 워크플로 실행 결과를 확인하고, UNCHANGED_AUTO 승격 산출물로 재산출·배포를 진행하세요."
+          impact_ko: "활성 서버 경로 번들(route bundle)의 시간표 신선도(freshUntil)가 만료되면 Journey 경로 탐색과 역 시간표 조회가 503으로 거부됩니다."
+          action_ko: "만료 전에 새 서버 경로 번들(route bundle)을 발행하고 K3s 운영 환경에 활성화하세요."
 
       - alert: TimetableSnapshotFreshnessExpiringT6h
         expr: min(easysubway_timetable_snapshot_remaining_seconds) <= 21600
@@ -83,11 +83,11 @@ groups:
           severity: critical
           service: aquila-timetable-snapshot
         annotations:
-          summary: Timetable snapshot freshUntil expires within 6 hours
-          description: The server timetable snapshot freshUntil deadline is less than 6h away or already passed. Regeneration and deploy of a refreshed snapshot are required before expiry.
+          summary: Active route bundle timetable freshUntil expires within 6 hours
+          description: The active server route bundle timetable freshUntil deadline is less than 6h away or already expired. Journey route search and station timetable search fail closed with HTTP 503 once expired; publish and activate a new server route bundle immediately.
           title_ko: "운행표 snapshot 만료 6시간 전"
-          impact_ko: "만료 시점 이후 재시작하면 부팅 hard fail로 서비스 중단 위험이 있습니다."
-          action_ko: "즉시 재산출된 snapshot을 배포하거나 break-glass override 절차를 검토하세요."
+          impact_ko: "활성 서버 경로 번들(route bundle)의 시간표 신선도(freshUntil) 만료가 임박했거나 이미 만료되어 Journey 경로 탐색과 역 시간표 조회가 503으로 거부됩니다."
+          action_ko: "즉시 새 서버 경로 번들(route bundle)을 발행·활성화하고 easysubway_timetable_snapshot_remaining_seconds가 양수로 회복되는지 확인하세요."
 
       # Hub Issue #2434 WP4: multi-window 5xx burn-rate (SLO 99.9% → error budget 0.001).
       # SLI = 5xx rate / total request rate. Traffic guard: long-window rate * 60 > 1 (≈ >1 req/min).

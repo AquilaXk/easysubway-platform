@@ -76,7 +76,7 @@ test("deployment runtime input inventory is closed and source-literal backed", (
     ["deploy.hub-source-checkout", "tools/deploy/deploy-backend.sh", "LEGACY_NOT_JOURNEY_V3", ["DEPLOY_REPO_URL=\"${DEPLOY_REPO_URL:-https://github.com/AquilaXk/easysubway.git}\"", "git clone \"${DEPLOY_REPO_URL}\"", "timeout 120 git fetch origin main", "git checkout --detach \"${DEPLOY_SHA}\""]],
     ["deploy.bundled-timetable-evidence", "tools/deploy/deploy-backend.sh", "LEGACY_NOT_JOURNEY_V3", ["SNAPSHOT_EVIDENCE_PATH=\"backend/src/main/resources/timetable/server-timetable-snapshot-evidence.json\"", "check-snapshot-freshness-precheck.mjs"]],
     ["backend-env.route-v2-ingress-session", "tools/deploy/backend-app-env.allowlist", "LEGACY_NOT_JOURNEY_V3", ["EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET", "EASYSUBWAY_ROUTE_V2_SESSION_MAX_REQUESTS", "EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256", "EASYSUBWAY_PLAY_INTEGRITY_CREDENTIALS_BASE64"]],
-    ["backend-env.legacy-datapack-delivery", "tools/deploy/backend-app-env.allowlist", "LEGACY_NOT_JOURNEY_V3", ["EASYSUBWAY_DATAPACK_CATALOG_BASE_URL", "EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM", "EASYSUBWAY_DATAPACK_SIGNING_KEY_ID", "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN", "EASYSUBWAY_TIMETABLE_SEED_ENABLED", "EASYSUBWAY_TIMETABLE_SEED_INCLUDES_ITX"]],
+    ["backend-env.legacy-datapack-delivery", "tools/deploy/backend-app-env.allowlist", "LEGACY_NOT_JOURNEY_V3", ["EASYSUBWAY_DATAPACK_CATALOG_BASE_URL", "EASYSUBWAY_DATAPACK_SIGNING_PUBLIC_KEY_PEM", "EASYSUBWAY_DATAPACK_SIGNING_KEY_ID", "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN"]],
     ["compose.backend-image", "infra/docker-compose.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend:", "backend-standby:", "image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}"]],
     ["nginx.host.readiness-proxy", "infra/nginx/host-easysubway.conf.template", "TARGET_JOURNEY_V3_REQUIRED", ["/actuator/health/readiness", "proxy_pass http://127.0.0.1:__BACKEND_PORT__;"]],
     ["source-free.workflow.artifact-identities", ".github/workflows/source-free-journey-deploy.yml", "TARGET_JOURNEY_V3_REQUIRED", ["backend_artifact_id:", "data_artifact_id:", "skip-decompress: true"]],
@@ -130,6 +130,8 @@ test("deployment runtime input inventory is closed and source-literal backed", (
   assert.deepEqual(Object.fromEntries(sourcePaths.map((sourcePath) => [sourcePath, inventory.entries.filter((entry) => entry.sourcePath === sourcePath).map((entry) => entry.id)])), Object.fromEntries(sourcePaths.map((sourcePath) => [sourcePath, entries.filter(([, path]) => path === sourcePath).map(([id]) => id)])));
   const legacyTokens = inventory.entries.filter(({ journeyV3Disposition }) => journeyV3Disposition === "LEGACY_NOT_JOURNEY_V3").flatMap(({ evidenceTokens }) => evidenceTokens);
   for (const marker of ["DEPLOY_REPO_URL", "SNAPSHOT_EVIDENCE_PATH", "EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET"]) assert.equal(legacyTokens.some((token) => token.includes(marker)), true);
+  assert.doesNotMatch(readFileSync(new URL("tools/deploy/backend-app-env.allowlist", root), "utf8"), /TIMETABLE_SEED/u);
+  assert.doesNotMatch(readFileSync(new URL(".env.example", root), "utf8"), /TIMETABLE_SEED/u);
 });
 
 test("accepts an exact producer artifact and immutable image digest", () => {

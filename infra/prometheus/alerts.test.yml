@@ -1,5 +1,5 @@
 # promtool test rules infra/prometheus/alerts.test.yml
-# 운행표 snapshot 잔여 유효기간 경보의 T-24h/T-6h 임계값을 시뮬레이션으로 검증한다.
+# 활성 서버 경로 번들(route bundle) 시간표 잔여 유효기간 경보의 T-24h/T-6h 임계값을 시뮬레이션으로 검증한다.
 rule_files:
   - alerts.yml
 
@@ -19,11 +19,11 @@ tests:
               severity: warning
               service: aquila-timetable-snapshot
             exp_annotations:
-              summary: Timetable snapshot freshUntil expires within 24 hours
-              description: The server timetable snapshot freshUntil deadline is less than 24h away. The automatic re-collection workflow must have already run; owner regeneration/deploy may still be required.
+              summary: Active route bundle timetable freshUntil expires within 24 hours
+              description: The active server route bundle timetable freshUntil deadline is less than 24h away. Once expired, Journey route search and station timetable search fail closed with HTTP 503 until a new server route bundle is published and activated.
               title_ko: "운행표 snapshot 만료 24시간 전"
-              impact_ko: "재수집·재산출이 완료되지 않으면 만료 후 재시작 시 부팅 실패 위험이 있습니다."
-              action_ko: "timetable-auto-refresh 워크플로 실행 결과를 확인하고, UNCHANGED_AUTO 승격 산출물로 재산출·배포를 진행하세요."
+              impact_ko: "활성 서버 경로 번들(route bundle)의 시간표 신선도(freshUntil)가 만료되면 Journey 경로 탐색과 역 시간표 조회가 503으로 거부됩니다."
+              action_ko: "만료 전에 새 서버 경로 번들(route bundle)을 발행하고 K3s 운영 환경에 활성화하세요."
       - eval_time: 6m
         alertname: TimetableSnapshotFreshnessExpiringT6h
         exp_alerts: []
@@ -41,11 +41,11 @@ tests:
               severity: critical
               service: aquila-timetable-snapshot
             exp_annotations:
-              summary: Timetable snapshot freshUntil expires within 6 hours
-              description: The server timetable snapshot freshUntil deadline is less than 6h away or already passed. Regeneration and deploy of a refreshed snapshot are required before expiry.
+              summary: Active route bundle timetable freshUntil expires within 6 hours
+              description: The active server route bundle timetable freshUntil deadline is less than 6h away or already expired. Journey route search and station timetable search fail closed with HTTP 503 once expired; publish and activate a new server route bundle immediately.
               title_ko: "운행표 snapshot 만료 6시간 전"
-              impact_ko: "만료 시점 이후 재시작하면 부팅 hard fail로 서비스 중단 위험이 있습니다."
-              action_ko: "즉시 재산출된 snapshot을 배포하거나 break-glass override 절차를 검토하세요."
+              impact_ko: "활성 서버 경로 번들(route bundle)의 시간표 신선도(freshUntil) 만료가 임박했거나 이미 만료되어 Journey 경로 탐색과 역 시간표 조회가 503으로 거부됩니다."
+              action_ko: "즉시 새 서버 경로 번들(route bundle)을 발행·활성화하고 easysubway_timetable_snapshot_remaining_seconds가 양수로 회복되는지 확인하세요."
       - eval_time: 6m
         alertname: TimetableSnapshotFreshnessExpiringT24h
         exp_alerts: []

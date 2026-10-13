@@ -124,3 +124,72 @@ test("어떤 workflow도 GITHUB_ACTOR·GITHUB_RUN_ATTEMPT를 env로 덮어쓰지
     assert.doesNotMatch(read(file), /^\s*(GITHUB_ACTOR|GITHUB_TRIGGERING_ACTOR|GITHUB_RUN_ATTEMPT|GITHUB_RUN_ID)\s*:/mu, file);
   }
 });
+
+const REQUIRED_CODEOWNERS_PATHS = [
+  ".github/workflows/**",
+  ".github/CODEOWNERS",
+  "tools/ci/production-deploy-actor-gates.test.mjs",
+];
+
+function verifyCodeownersContract(raw) {
+  assert.equal(raw.includes("\r"), false, "CODEOWNERS must use LF line endings");
+  const rules = [];
+  for (const [index, line] of raw.split("\n").entries()) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const tokens = trimmed.split(/\s+/u);
+    const [pattern, ...owners] = tokens;
+    assert.ok(pattern && owners.length > 0, `line ${index + 1}: rule must specify pattern and owner`);
+    rules.push({ line: index + 1, pattern: pattern.replace(/^\//u, ""), owners });
+  }
+  assert.deepEqual(
+    rules.map(({ pattern }) => pattern),
+    REQUIRED_CODEOWNERS_PATHS,
+    "CODEOWNERS must declare the exact required trust-root paths in order without trailing override rules",
+  );
+  for (const rule of rules) {
+    assert.deepEqual(rule.owners, ["@AquilaXk"], `${rule.pattern} must be owned exclusively by @AquilaXk`);
+  }
+  assert.match(raw, /require_code_owner_review:\s*false/u, "must document solo-repo require_code_owner_review: false constraint");
+  assert.match(raw, /require_code_owner_review:\s*true/u, "must document collaborator transition procedure to require_code_owner_review: true");
+}
+
+test(".github/CODEOWNERS가 workflow·CODEOWNERS·게이트 계약 테스트의 단독 소유자를 @AquilaXk로 고정하고 전환 절차를 문서화한다 (#246)", () => {
+  const codeowners = readFileSync(new URL("../../.github/CODEOWNERS", import.meta.url), "utf8");
+  verifyCodeownersContract(codeowners);
+});
+
+test("CODEOWNERS 규칙 삭제·경로 제거·소유자 약화 변이는 게이트 계약을 깨뜨린다 (#246)", () => {
+  const codeowners = readFileSync(new URL("../../.github/CODEOWNERS", import.meta.url), "utf8");
+  const mutations = [
+    ["빈 CODEOWNERS(전체 규칙 삭제)", "# comment only\n"],
+    [
+      "workflow 경로(.github/workflows/**) 제거",
+      codeowners.replace(/^\.github\/workflows\/\*\*\s+@AquilaXk\n/mu, ""),
+    ],
+    [
+      "CODEOWNERS 자기 보호 경로(.github/CODEOWNERS) 제거",
+      codeowners.replace(/^\.github\/CODEOWNERS\s+@AquilaXk\n/mu, ""),
+    ],
+    [
+      "게이트 계약 테스트 경로 제거",
+      codeowners.replace(/^tools\/ci\/production-deploy-actor-gates\.test\.mjs\s+@AquilaXk\n/mu, ""),
+    ],
+    [
+      "공동 소유자 추가로 단독 소유 약화",
+      codeowners.replace(".github/workflows/** @AquilaXk", ".github/workflows/** @AquilaXk @other-collaborator"),
+    ],
+    [
+      "소유자 누락(unowned pattern)",
+      codeowners.replace(".github/workflows/** @AquilaXk", ".github/workflows/**"),
+    ],
+    [
+      "후행 규칙으로 소유자 덮어쓰기",
+      `${codeowners}.github/workflows/cd.yml @other-collaborator\n`,
+    ],
+  ];
+  for (const [label, mutated] of mutations) {
+    assert.throws(() => verifyCodeownersContract(mutated), label);
+  }
+});
+
