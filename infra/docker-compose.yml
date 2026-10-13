@@ -311,3 +311,10 @@ volumes:
   alloy-data:
   backend-logs:
   backend-standby-logs:
+
+networks:
+  default:
+    name: easysubway_default
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16

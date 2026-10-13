@@ -961,6 +961,24 @@ test("레포의 prometheus.yml에는 제거된 back_worker 대상이 없고 rule
   assert.match(config, /rule_files:\n\s+- \/etc\/prometheus\/alerts\.yml/u);
 });
 
+test("레포의 docker-compose.yml은 기본 네트워크 이름과 ipam 서브넷을 관측 계약과 동일하게 고정한다", () => {
+  const contract = JSON.parse(
+    readFileSync(join(repoRoot, "contracts", "release", "platform-k3s-observability-contract.json"), "utf8"),
+  );
+  const compose = readFileSync(join(repoRoot, "infra", "docker-compose.yml"), "utf8");
+  const networksSection = compose.split(/\nnetworks:\n/u)[1];
+  assert.ok(networksSection, "infra/docker-compose.yml must declare a top-level networks block");
+  const escapedName = contract.composeNetwork.name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const escapedSubnet = contract.composeNetwork.subnet.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  assert.match(
+    networksSection,
+    new RegExp(
+      `^  default:\\n    name: ${escapedName}\\n    ipam:\\n      config:\\n        - subnet: "?${escapedSubnet}"?(?:\\n|$)`,
+      "mu",
+    ),
+  );
+});
+
 // 호스트 실측(2026-10-08): 컨테이너 easysubway-prometheus, volume easysubway_prometheus-data(compose project easysubway). 레포 compose를 실제 compose로
 // 해석했을 때 같은 이름이 나와야 새 위치에서 compose를 실행해도 TSDB volume이 그대로 이어진다. docker compose가 없는 환경에서는 건너뛰고, CI에는 있다.
 const composeAvailable = spawnSync("docker", ["compose", "version"], { stdio: "ignore" }).status === 0;
@@ -973,10 +991,15 @@ test("실제 compose 해석: 프로젝트 easysubway에서 prometheus 서비스�
       "compose", "-p", "easysubway", "--project-directory", current, "-f", join(current, "docker-compose.yml"), "--profile", "observability", "config", "--format", "json", "prometheus",
     ], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: process.env.HOME, EASYSUBWAY_BACKEND_ENV_FILE: "/dev/null", EASYSUBWAY_BACKEND_IMAGE: "ghcr.io/aquilaxk/easysubway-backend@sha256:0000000000000000000000000000000000000000000000000000000000000000" } });
     const config = JSON.parse(stdout);
+    const contract = JSON.parse(
+      readFileSync(join(repoRoot, "contracts", "release", "platform-k3s-observability-contract.json"), "utf8"),
+    );
     assert.deepEqual(Object.keys(config.services), ["prometheus"]);
     const service = config.services.prometheus;
     assert.equal(service.container_name, "easysubway-prometheus");
     assert.equal(config.volumes["prometheus-data"].name, "easysubway_prometheus-data");
+    assert.equal(config.networks.default.name, contract.composeNetwork.name);
+    assert.deepEqual(config.networks.default.ipam.config, [{ subnet: contract.composeNetwork.subnet }]);
     const sources = service.volumes.filter((volume) => volume.type === "bind").map((volume) => [volume.source, volume.target]);
     assert.deepEqual(sources, [
       [join(current, "prometheus", "prometheus.yml"), "/etc/prometheus/prometheus.yml"],
