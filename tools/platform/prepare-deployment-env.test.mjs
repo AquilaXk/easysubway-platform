@@ -24,8 +24,10 @@ const intentKey = "EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY";
 const strongReceipt = "canonical-receipt-pepper-32-bytes-minimum";
 const strongIntent = "canonical-upload-intent-key-32-bytes-minimum";
 const datapackWorkflowTokenKey = "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN";
+const datapackAutomationStatusTokenKey = "EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN";
 const datapackCallbackHmacKey = "EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY";
 const datapackWorkflowToken = "synthetic-datapack-workflow-token";
+const datapackAutomationStatusToken = "synthetic-datapack-automation-status-token";
 const datapackCallbackHmac = "synthetic-datapack-callback-hmac-key-at-least-32-bytes";
 const sharedSecret = "shared-report-secret-value-with-enough-entropy";
 const legacySecret = "sensitive-legacy-receipt-pepper-with-enough-entropy";
@@ -60,6 +62,7 @@ test("canonical report and DataPack callback secrets are preserved without the l
     assert.match(backendEnv, new RegExp(`^${receiptKey}=${strongReceipt}$`, "m"));
     assert.match(backendEnv, new RegExp(`^${intentKey}=${strongIntent}$`, "m"));
     assert.equal(count(backendEnv, `${datapackWorkflowTokenKey}=${datapackWorkflowToken}`), 1);
+    assert.equal(count(backendEnv, `${datapackAutomationStatusTokenKey}=${datapackAutomationStatusToken}`), 1);
     assert.equal(count(backendEnv, `${datapackCallbackHmacKey}=${datapackCallbackHmac}`), 1);
     assert.doesNotMatch(backendEnv, new RegExp(`^${legacyReceiptKey}=`, "m"));
   } finally {
@@ -167,7 +170,7 @@ test("missing weak legacy or equal report secrets fail before output publication
       assert.equal(result.status, 1, JSON.stringify({ overrides: Object.keys(overrides), result }));
       assert.match(result.stderr, new RegExp(expectedIdentity));
       for (const secret of [
-        strongReceipt, strongIntent, datapackWorkflowToken, datapackCallbackHmac, sharedSecret, legacySecret,
+        strongReceipt, strongIntent, datapackWorkflowToken, datapackAutomationStatusToken, datapackCallbackHmac, sharedSecret, legacySecret,
       ]) {
         assert.equal(result.stderr.includes(secret), false);
       }
@@ -289,6 +292,7 @@ function makeFixture(overrides = {}) {
     [receiptKey, strongReceipt],
     [intentKey, strongIntent],
     [datapackWorkflowTokenKey, datapackWorkflowToken],
+    [datapackAutomationStatusTokenKey, datapackAutomationStatusToken],
     [datapackCallbackHmacKey, datapackCallbackHmac],
   ]);
   for (const [key, value] of Object.entries(overrides)) {

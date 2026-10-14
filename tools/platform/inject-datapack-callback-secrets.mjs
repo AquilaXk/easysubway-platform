@@ -15,8 +15,9 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const workflowTokenKey = "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN";
+const automationStatusTokenKey = "EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN";
 const callbackHmacKey = "EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY";
-const managedKeys = [workflowTokenKey, callbackHmacKey];
+const managedKeys = [workflowTokenKey, automationStatusTokenKey, callbackHmacKey];
 
 function fail(message) {
   throw new Error(message);
@@ -89,7 +90,7 @@ function withoutManagedDefinitions(contents) {
 function replacementContents(contents, values) {
   const preserved = withoutManagedDefinitions(contents);
   const separator = preserved.length > 0 && !preserved.endsWith("\n") ? "\n" : "";
-  return `${preserved}${separator}${workflowTokenKey}=${values.workflowToken}\n${callbackHmacKey}=${values.callbackHmac}\n`;
+  return `${preserved}${separator}${workflowTokenKey}=${values.workflowToken}\n${automationStatusTokenKey}=${values.automationStatusToken}\n${callbackHmacKey}=${values.callbackHmac}\n`;
 }
 
 function atomicReplace(path, contents, expectedSnapshot) {
@@ -119,6 +120,7 @@ function atomicReplace(path, contents, expectedSnapshot) {
 export function inject(environment = process.env) {
   const values = {
     workflowToken: requiredSecret(environment, workflowTokenKey, { rejectTrimWhitespace: true }),
+    automationStatusToken: requiredSecret(environment, automationStatusTokenKey, { rejectTrimWhitespace: true }),
     callbackHmac: requiredSecret(environment, callbackHmacKey, { minimumUtf8Bytes: 32 }),
   };
   const path = deploymentEnvPath(environment);

@@ -17,14 +17,16 @@ import test from "node:test";
 const root = new URL("../..", import.meta.url);
 const script = new URL("tools/platform/inject-datapack-callback-secrets.mjs", root);
 const tokenKey = "EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN";
+const automationStatusTokenKey = "EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN";
 const hmacKey = "EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY";
 const token = "workflow-token-value";
+const automationStatusToken = "automation-status-token-value";
 const hmac = "callback-hmac-key-with-at-least-32-bytes";
 
 test("replaces only exact callback definitions, preserves unrelated dotenv bytes, and locks mode", () => {
   const fixture = makeFixture(
     "# keep this comment\r\nOTHER=before\r\n"
-      + `${tokenKey}=old-token\r\n${hmacKey}=old-hmac\r\n`
+      + `${tokenKey}=old-token\r\n${automationStatusTokenKey}=old-automation-status-token\r\n${hmacKey}=old-hmac\r\n`
       + ` ${tokenKey}=not-an-exact-definition\r\n${tokenKey}_SUFFIX=keep\r\nOTHER=after\r\n`,
   );
   try {
@@ -36,7 +38,7 @@ test("replaces only exact callback definitions, preserves unrelated dotenv bytes
       readFileSync(fixture.path, "utf8"),
       "# keep this comment\r\nOTHER=before\r\n"
         + ` ${tokenKey}=not-an-exact-definition\r\n${tokenKey}_SUFFIX=keep\r\nOTHER=after\r\n`
-        + `${tokenKey}=${token}\n${hmacKey}=${hmac}\n`,
+        + `${tokenKey}=${token}\n${automationStatusTokenKey}=${automationStatusToken}\n${hmacKey}=${hmac}\n`,
     );
     assert.equal(lstatSync(fixture.path).mode & 0o777, 0o600);
   } finally {
@@ -52,6 +54,12 @@ test("rejects invalid secrets before changing the dotenv", () => {
     [{ [tokenKey]: " workflow-token-value" }, tokenKey],
     [{ [tokenKey]: "workflow-token-value\u00a0" }, tokenKey],
     [{ [tokenKey]: "line\nbreak" }, tokenKey],
+    [{ [automationStatusTokenKey]: undefined }, automationStatusTokenKey],
+    [{ [automationStatusTokenKey]: "" }, automationStatusTokenKey],
+    [{ [automationStatusTokenKey]: "   " }, automationStatusTokenKey],
+    [{ [automationStatusTokenKey]: " automation-status-token-value" }, automationStatusTokenKey],
+    [{ [automationStatusTokenKey]: "automation-status-token-value\u00a0" }, automationStatusTokenKey],
+    [{ [automationStatusTokenKey]: "line\nbreak" }, automationStatusTokenKey],
     [{ [hmacKey]: undefined }, hmacKey],
     [{ [hmacKey]: "short" }, hmacKey],
     [{ [hmacKey]: "line\rbreak" }, hmacKey],
@@ -105,8 +113,10 @@ test("rejects arguments and invalid RUNNER_TEMP before dotenv mutation", () => {
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, expected);
       assert.equal(result.stdout.includes(token), false);
+      assert.equal(result.stdout.includes(automationStatusToken), false);
       assert.equal(result.stdout.includes(hmac), false);
       assert.equal(result.stderr.includes(token), false);
+      assert.equal(result.stderr.includes(automationStatusToken), false);
       assert.equal(result.stderr.includes(hmac), false);
       assert.equal(readFileSync(fixture.path, "utf8"), "KEEP=unchanged\n");
     } finally {
@@ -128,6 +138,7 @@ function run(fixture, overrides = {}, args = []) {
     ...process.env,
     RUNNER_TEMP: fixture.directory,
     [tokenKey]: token,
+    [automationStatusTokenKey]: automationStatusToken,
     [hmacKey]: hmac,
     ...overrides,
   };
