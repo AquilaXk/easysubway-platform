@@ -116,6 +116,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           EASYSUBWAY_ENV: ${{ secrets.EASYSUBWAY_ENV }}
           EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN || '' }}
+          EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN || '' }}
           EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY || '' }}
           MODE: ${{ inputs.mode }}
           CONFIGURED_DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}

@@ -55,7 +55,7 @@ test("fixed-host workflow is PREVIEW-only and K3s is the sole Journey DEPLOY own
   assert.doesNotMatch(k3sWorkflow, /run-fixed-host-journey-activation\.mjs/);
   assert.doesNotMatch(k3sWorkflow, /docker compose/);
   assert.equal(count(`${workflow}\n${k3sWorkflow}`, "--mode DEPLOY"), 0, "only K3s MODE dispatch may own DEPLOY");
-  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 5, "K3s owns the sole DEPLOY execution branch and conditional callback-secret exposure");
+  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 6, "K3s owns the sole DEPLOY execution branch and conditional callback-secret exposure");
 });
 
 test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or mutable artifact lookup", () => {
@@ -82,6 +82,7 @@ test("K3s injects DataPack callback secrets only for DEPLOY before environment p
   assert.notEqual(injectionIndex, -1);
   assert.equal(count(workflow, injection), 1);
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN"), 1);
+  assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN"), 1);
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY"), 1);
   assert.match(workflow.slice(writeIndex, prepareIndex), /if \[\[ "\$\{MODE\}" == "DEPLOY" \]\]; then/);
   assert.match(workflow.slice(writeIndex, prepareIndex), /node tools\/platform\/inject-datapack-callback-secrets\.mjs\n/);
