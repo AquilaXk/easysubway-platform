@@ -110,7 +110,7 @@ test("rejects malformed, duplicate, reordered, extra, and non-canonical candidat
       [`{"schemaVersion":"JOURNEY_RELEASE_TUPLE_V1","schemaVersion":"JOURNEY_RELEASE_TUPLE_V1"}`, "E_JRT_CANDIDATE_JSON"],
       [JSON.stringify(Object.fromEntries(Object.entries(candidate).reverse()), null, 2) + "\n", "E_JRT_CANDIDATE_SCHEMA"],
       [canonical({ ...candidate, unexpected: true }), "E_JRT_CANDIDATE_SCHEMA"],
-      [canonical(candidate).replace("\n", "\r\n"), "E_JRT_CANDIDATE_SCHEMA"],
+      [canonical(candidate).replaceAll("\n", "\r\n"), "E_JRT_CANDIDATE_SCHEMA"],
     ];
     for (const [bytes, code] of cases) {
       writeCandidate(fixture, candidate, bytes);
