@@ -78,37 +78,34 @@ test("전국 후보 갱신은 data workflow의 정기 cron(29 */2 * * *)과 같�
   assert.equal(contract.excluded.some(({ workflow }) => workflow === "nationwide-candidate-refresh.yml"), false);
 });
 
+// UTC 하루(24시간) 동안 이 항목이 때가 되는 횟수.
+const dispatchesOn = (id) => Array.from({ length: 24 }, (_, hour) => dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, hour)))).flat().filter((entry) => entry.id === id).length;
+
 // data#1288·#1293(회복된 실패 이슈 닫기)·data#1299(ITX 같은 날 실패 후 재수집)가 외부 스케줄러 주기를 정한다(AquilaXk/easysubway-platform#258).
+// githubCron의 정본은 data 레포 각 workflow의 schedule이다. 이 표의 값은 data 레포의 check-scheduler-heartbeat.test.mjs 표(cron)와 같아야 한다.
 // 입력이 없는 dispatch여도 되는 이유: 두 workflow의 입력은 모두 선택이고 기본값이 정기 실행과 같다.
 const DISPATCH_CADENCES = [
-  { workflow: "recovered-failure-issues-close.yml", entry: { id: "recovered-failure-issues-close", workflow: "recovered-failure-issues-close.yml", everyHours: 1, offsetHour: 0, minute: 13, githubCron: "13 * * * *" }, dispatchesPerDay: 24 },
-  { workflow: "itx-current-promotion.yml", entry: { id: "itx-current-promotion", workflow: "itx-current-promotion.yml", everyHours: 3, offsetHour: 0, minute: 0, githubCron: "0 */3 * * *" }, dispatchesPerDay: 8 },
+  { workflow: "recovered-failure-issues-close.yml", everyHours: 1, minute: 13, githubCron: "13 * * * *" },
+  { workflow: "itx-current-promotion.yml", everyHours: 3, minute: 0, githubCron: "0 */3 * * *" },
 ];
 
-for (const { workflow, entry, dispatchesPerDay } of DISPATCH_CADENCES) {
-  test(`${workflow}는 GitHub schedule 백업과 같은 주기·분으로 입력 없이 dispatch되고 하루 ${dispatchesPerDay}번 때가 된다`, () => {
-    assert.deepEqual(contract.workflows.filter((item) => item.workflow === workflow), [entry]);
+for (const { workflow, everyHours, minute, githubCron } of DISPATCH_CADENCES) {
+  test(`${workflow}는 GitHub schedule 백업과 같은 주기·분으로 입력 없이 dispatch되고 주기마다 때가 된다`, () => {
+    const id = workflow.replace(/\.yml$/u, "");
+    assert.deepEqual(contract.workflows.filter((item) => item.workflow === workflow), [{ id, workflow, everyHours, offsetHour: 0, minute, githubCron }]);
     assert.equal(contract.excluded.some((item) => item.workflow === workflow), false);
-    let due = 0;
-    for (let hour = 0; hour < 24; hour += 1) due += dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, hour))).filter(({ id }) => id === entry.id).length;
-    assert.equal(due, dispatchesPerDay);
+    assert.equal(dispatchesOn(id), 24 / everyHours);
   });
 }
 
 test("정기 대상은 하루 동안 원래 주기대로 때가 된다", () => {
-  const counts = new Map();
-  for (let hour = 0; hour < 24; hour += 1) {
-    for (const { id } of dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, hour)))) counts.set(id, (counts.get(id) ?? 0) + 1);
-  }
-  assert.equal(counts.get("source-reverification"), 12);
-  assert.equal(counts.get("kric-current-facility-refresh"), 12);
-  assert.equal(counts.get("datapack-expiry-alert-datapack-expiry"), 6);
-  assert.equal(counts.get("source-derivative-rebinding"), 4);
+  assert.equal(dispatchesOn("source-reverification"), 12);
+  assert.equal(dispatchesOn("kric-current-facility-refresh"), 12);
+  assert.equal(dispatchesOn("datapack-expiry-alert-datapack-expiry"), 6);
+  assert.equal(dispatchesOn("source-derivative-rebinding"), 4);
   // #240: data#1035가 스케줄러 App의 입력 없는 dispatch를 정기 역할로 인정한 뒤 후보 갱신도 원래 2시간 주기로 깨운다.
-  assert.equal(counts.get("nationwide-candidate-refresh"), 12);
-  assert.equal(counts.get("datapack-expiry-alert-provider-approval"), 1);
-  assert.equal(counts.get("itx-current-promotion"), 8);
-  assert.equal(counts.get("recovered-failure-issues-close"), 24);
+  assert.equal(dispatchesOn("nationwide-candidate-refresh"), 12);
+  assert.equal(dispatchesOn("datapack-expiry-alert-provider-approval"), 1);
   assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 18))).map(({ id }) => id).slice(0, 1), ["itx-current-promotion"]);
   assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 1))).map(({ id }) => id), ["recovered-failure-issues-close"]);
 });
