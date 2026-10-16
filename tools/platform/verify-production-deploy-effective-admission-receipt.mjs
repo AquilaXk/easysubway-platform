@@ -7,8 +7,21 @@ const REPOSITORY = "AquilaXk/easysubway-platform";
 const ENVIRONMENT = "production-deploy";
 const REF = "refs/heads/main";
 const API_VERSION = "2022-11-28";
-const REQUEST_TIMEOUT_MS = 5_000;
-export async function verifyEffectiveAdmissionReceipt(context, request, timeoutMs = REQUEST_TIMEOUT_MS) {
+export const REQUEST_TIMEOUT_MS = 5_000;
+// run 기록이 아직 시작 상태로 반영되지 않은 동안 같은 run을 다시 읽는 횟수와 간격이다(platform#256). 끝내 시작되지 않으면 실패한다.
+export const RUN_START_MAX_READS = 12;
+export const RUN_START_READ_INTERVAL_MS = 5_000;
+const REQUESTS_BEFORE_RUN_RECORD = 2; // 환경, 배포 브랜치 정책
+const NOT_STARTED_RUN_STATUSES = new Set(["queued", "requested", "waiting", "pending"]);
+const OBSERVED_VALUE_MAX_LENGTH = 48;
+
+// 모든 요청이 타임아웃까지 가고 run 기록이 끝내 시작되지 않을 때의 최대 소요 시간. 이 영수증을 부르는 workflow의 timeout-minutes보다 짧아야 한다(테스트가 고정한다).
+export function worstCaseVerificationMs(timeoutMs = REQUEST_TIMEOUT_MS) {
+  return (REQUESTS_BEFORE_RUN_RECORD + RUN_START_MAX_READS) * timeoutMs + (RUN_START_MAX_READS - 1) * RUN_START_READ_INTERVAL_MS;
+}
+
+// pause: 재읽기 사이의 대기, trace: 통과한 판정의 진단 한 줄을 받는 곳(실패는 오류의 detail로 나간다).
+export async function verifyEffectiveAdmissionReceipt(context, request, timeoutMs = REQUEST_TIMEOUT_MS, { pause = sleep, trace = () => {} } = {}) {
   assertContext(context);
   if (typeof request !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) fail("E_PD_EAR_REQUEST");
 
@@ -18,7 +31,7 @@ export async function verifyEffectiveAdmissionReceipt(context, request, timeoutM
   const classified = validateApproval(environment);
   const branchPolicy = validateBranchPolicy(environment, policies);
   // 사람 승인이 없는 환경은 승인 대신 이 run의 행위자를 Actions API 기록으로 확인한다(환경 변수는 쓰지 않는다).
-  const approval = classified.mode === "ACTOR_GATE" ? await readActorGate(request, context, timeoutMs) : classified;
+  const approval = classified.mode === "ACTOR_GATE" ? await readActorGate(request, context, timeoutMs, { pause, trace }) : classified;
 
   return {
     schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2",
@@ -46,10 +59,10 @@ async function main() {
         accept: "application/vnd.github+json",
         authorization: `Bearer ${token}`,
       },
-    }));
+    }), REQUEST_TIMEOUT_MS, { trace: (line) => process.stderr.write(`${line}\n`) });
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
   } catch (error) {
-    process.stderr.write(`${error instanceof ReceiptError ? error.code : "E_PD_EAR_FAILURE"}\n`);
+    process.stderr.write(error instanceof ReceiptError ? `${error.code}\n${error.detail === undefined ? "" : `${error.detail}\n`}` : "E_PD_EAR_FAILURE\n");
     process.exitCode = 1;
   }
 }
@@ -126,22 +139,75 @@ function validateApproval(environment) {
 
 // 현재 run의 기록(Actions API)으로 호출 workflow(path)와 시작 행위자(triggering_actor)·실행 시도를 확인한다.
 // 환경 변수(GITHUB_ACTOR 등)는 step `env:`로 바뀔 수 있어 근거로 쓰지 않는다. 기록을 읽지 못하거나 어긋나면 실패한다.
-async function readActorGate(request, context, timeoutMs) {
+// 통과하든 실패하든 읽기 횟수, 읽을 때마다 관측한 status, 판정에 쓴 기록의 시각, 조건별 결과를 한 줄로 남긴다(platform#256).
+async function readActorGate(request, context, timeoutMs, { pause, trace }) {
   const runId = /\/actions\/runs\/([1-9][0-9]*)$/.exec(context.runUrl)?.[1];
   if (runId === undefined) fail("E_PD_EAR_CONTEXT");
-  const run = await getJson(request, `https://api.github.com/repos/${REPOSITORY}/actions/runs/${runId}`, timeoutMs);
-  const allowedActors = isObject(run) ? allowedActorsFor(run.path) : undefined;
-  const triggeringActor = isObject(run?.triggering_actor) ? run.triggering_actor.login : undefined;
-  if (
-    !isObject(run) || String(run.id) !== runId || run.status !== "in_progress" || run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
-    run.head_sha !== context.workflowSha || run.run_attempt !== 1 || allowedActors === undefined || typeof triggeringActor !== "string" || !allowedActors.includes(triggeringActor)
-  ) fail("E_PD_EAR_ACTOR_GATE");
+  const { run, statuses, stillNotStarted } = await readRunRecord(request, runId, timeoutMs, pause);
+  const { allowedActors, checks } = inspectRunRecord(run, runId, context.workflowSha);
+  const diagnostic = describeRunRecord(run, statuses, checks);
+  if (stillNotStarted) fail("E_PD_EAR_RUN_NOT_STARTED", diagnostic);
+  if (!isObject(run) || checks.some(({ matches }) => !matches)) fail("E_PD_EAR_ACTOR_GATE", diagnostic);
+  trace(diagnostic);
   return {
     mode: "ACTOR_GATE",
     canAdminsBypass: false,
     requiredReviewers: [],
-    actorGate: { workflow: run.path, allowedActors, triggeringActor, runAttempt: 1 },
+    actorGate: { workflow: run.path, allowedActors, triggeringActor: run.triggering_actor.login, runAttempt: 1 },
   };
+}
+
+function isRecordOfRun(run, runId) {
+  return isObject(run) && String(run.id) === runId;
+}
+
+// 이 run의 기록이 아직 시작 전 상태이면 정해진 횟수까지 같은 run을 다시 읽는다. 판정은 마지막으로 읽은 기록으로 한다.
+async function readRunRecord(request, runId, timeoutMs, pause) {
+  const url = `https://api.github.com/repos/${REPOSITORY}/actions/runs/${runId}`;
+  const statuses = [];
+  for (let reads = 1; ; reads += 1) {
+    const run = await getJson(request, url, timeoutMs);
+    statuses.push(isObject(run) ? run.status : undefined);
+    const notStarted = isRecordOfRun(run, runId) && NOT_STARTED_RUN_STATUSES.has(run.status);
+    if (!notStarted || reads === RUN_START_MAX_READS) return { run, statuses, stillNotStarted: notStarted };
+    await pause(RUN_START_READ_INTERVAL_MS);
+  }
+}
+
+function inspectRunRecord(run, runId, workflowSha) {
+  if (!isObject(run)) return { allowedActors: undefined, checks: [] };
+  const allowedActors = allowedActorsFor(run.path);
+  const triggeringActor = isObject(run.triggering_actor) ? run.triggering_actor.login : undefined;
+  return {
+    allowedActors,
+    checks: [
+      { field: "id", observed: String(run.id), matches: isRecordOfRun(run, runId) },
+      { field: "status", observed: run.status, matches: run.status === "in_progress" },
+      { field: "event", observed: run.event, matches: run.event === "workflow_dispatch" },
+      { field: "head_branch", observed: run.head_branch, matches: run.head_branch === "main" },
+      { field: "head_sha", observed: run.head_sha, matches: run.head_sha === workflowSha },
+      { field: "run_attempt", observed: run.run_attempt, matches: run.run_attempt === 1 },
+      { field: "path", observed: run.path, matches: allowedActors !== undefined },
+      { field: "triggering_actor", observed: triggeringActor, matches: typeof triggeringActor === "string" && allowedActors?.includes(triggeringActor) === true },
+    ],
+  };
+}
+
+// 공개 값만 쓴다: 읽기 횟수, 읽을 때마다의 status, 기록의 시각, 조건별 통과(ok)와 불일치(MISMATCH와 관측값).
+function describeRunRecord(run, statuses, checks) {
+  const record = isObject(run) ? `updated_at=${observe(run.updated_at)} run_started_at=${observe(run.run_started_at)}` : "run record is not an object";
+  const results = checks.map(({ field, observed, matches }) => `${field}=${matches ? "ok" : `MISMATCH(${observe(observed)})`}`);
+  return [`reads=${statuses.length}`, `statuses=${statuses.map(observe).join(",")}`, record, ...results].join(" ");
+}
+
+// 로그에 남기는 관측값은 JSON 한 줄로 만들어 길이를 제한한다.
+function observe(value) {
+  const text = JSON.stringify(value) ?? "undefined";
+  return text.length > OBSERVED_VALUE_MAX_LENGTH ? `${text.slice(0, OBSERVED_VALUE_MAX_LENGTH)}...` : text;
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function validateBranchPolicy(environment, policies) {
@@ -155,14 +221,15 @@ function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function fail(code) {
-  throw new ReceiptError(code);
+function fail(code, detail) {
+  throw new ReceiptError(code, detail);
 }
 
 class ReceiptError extends Error {
-  constructor(code) {
+  constructor(code, detail) {
     super(code);
     this.code = code;
+    this.detail = detail;
   }
 }
 
