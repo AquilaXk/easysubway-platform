@@ -107,7 +107,7 @@ test("ACTOR_GATE rejects an actor outside the calling workflow's allow-list, a r
   for (const [label, overrides] of [
     ["rerun", { run_attempt: 2 }], ["attempt string", { run_attempt: "1" }], ["attempt missing", { run_attempt: undefined }],
     ["other run", { id: 69 }], ["other sha", { head_sha: "b".repeat(40) }], ["other branch", { head_branch: "feature" }],
-    ["push event", { event: "push" }], ["completed", { status: "completed" }], ["queued", { status: "queued" }],
+    ["push event", { event: "push" }], ["completed", { status: "completed" }],
   ]) await denied(runRecord(overrides), label);
   // 환경 변수는 판정에 쓰이지 않는다: 값이 있어도 run 기록이 허용하지 않으면 거부한다.
   process.env.GITHUB_ACTOR = "AquilaXk";
@@ -119,6 +119,84 @@ test("ACTOR_GATE rejects an actor outside the calling workflow's allow-list, a r
   await assert.rejects(verifyEffectiveAdmissionReceipt(context, stubFetch({ environment: unattendedEnvironment, runStatus: 404 })), { code: "E_PD_EAR_HTTP" });
   await assert.rejects(verifyEffectiveAdmissionReceipt(context, stubFetch({ environment: unattendedEnvironment, runJsonError: true })), { code: "E_PD_EAR_JSON" });
   await assert.rejects(verifyEffectiveAdmissionReceipt(context, (url, options) => (url.includes("/actions/runs/") ? new Promise(() => {}) : stubFetch({ environment: unattendedEnvironment })(url, options)), 1), { code: "E_PD_EAR_TIMEOUT" });
+});
+
+// platform#256: run 기록이 아직 시작 상태로 반영되지 않았을 때 한 번 읽고 거부하면 정상 배포가 막힌다.
+// 같은 run을 제한된 횟수만 다시 읽어 확정하고, 확정 뒤에는 모든 조건을 그대로 검사한다.
+const runReads = (requests) => requests.filter(({ url }) => url.includes("/actions/runs/")).length;
+const recordPauses = () => {
+  const pauses = [];
+  return { pauses, pause: async (ms) => { pauses.push(ms); } };
+};
+const verifyUnattended = (fetch, pause) => verifyEffectiveAdmissionReceipt(context, fetch, 5_000, pause);
+
+test("ACTOR_GATE re-reads a run record that has not started yet and passes once it is in_progress (platform#256)", async () => {
+  for (const pending of ["queued", "requested", "waiting", "pending"]) {
+    const requests = [];
+    const { pauses, pause } = recordPauses();
+    const receipt = await verifyUnattended(stubFetch({ environment: unattendedEnvironment, runs: [runRecord({ status: pending }), runRecord({ status: "queued" }), runRecord()] }, requests), pause);
+    assert.equal(receipt.approval.mode, "ACTOR_GATE", pending);
+    assert.equal(runReads(requests), 3, pending);
+    assert.deepEqual(pauses, [5_000, 5_000], pending);
+  }
+  // 처음부터 in_progress면 기다리지 않는다.
+  const immediate = recordPauses();
+  const requests = [];
+  await verifyUnattended(stubFetch({ environment: unattendedEnvironment, run: runRecord() }, requests), immediate.pause);
+  assert.equal(runReads(requests), 1);
+  assert.deepEqual(immediate.pauses, []);
+});
+
+test("ACTOR_GATE fails explicitly when the run record never starts, and never passes on a stale record", async () => {
+  const requests = [];
+  const { pauses, pause } = recordPauses();
+  await assert.rejects(
+    verifyUnattended(stubFetch({ environment: unattendedEnvironment, run: runRecord({ status: "queued" }) }, requests), pause),
+    (error) => error.code === "E_PD_EAR_RUN_NOT_STARTED" && error.detail === 'status="queued" reads=12',
+  );
+  assert.equal(runReads(requests), 12);
+  assert.deepEqual(pauses, Array(11).fill(5_000));
+});
+
+test("ACTOR_GATE checks every condition on the settled record and does not retry denials that are not 'not started'", async () => {
+  const deniedAfter = async (runs, expectedReads, label) => {
+    const requests = [];
+    const { pauses, pause } = recordPauses();
+    await assert.rejects(verifyUnattended(stubFetch({ environment: unattendedEnvironment, runs }, requests), pause), { code: "E_PD_EAR_ACTOR_GATE" }, label);
+    assert.equal(runReads(requests), expectedReads, label);
+    assert.equal(pauses.length, expectedReads - 1, label);
+  };
+  // 시작이 확정된 뒤의 행위자·시도·commit 불일치는 그대로 거부한다.
+  await deniedAfter([runRecord({ status: "queued" }), runRecord({ triggering_actor: { login: "write-collaborator" } })], 2, "actor after settle");
+  await deniedAfter([runRecord({ status: "queued" }), runRecord({ run_attempt: 2 })], 2, "rerun after settle");
+  await deniedAfter([runRecord({ status: "waiting" }), runRecord({ head_sha: "b".repeat(40) })], 2, "sha after settle");
+  await deniedAfter([runRecord({ status: "queued" }), runRecord({ status: "completed" })], 2, "completed after settle");
+  // 시작 전이 아닌 상태, 다른 run의 기록, 알 수 없는 상태는 기다리지 않는다.
+  await deniedAfter([runRecord({ status: "completed" })], 1, "completed");
+  await deniedAfter([runRecord({ status: "cancelled" })], 1, "unknown status");
+  await deniedAfter([runRecord({ status: "queued", id: 69 })], 1, "other run");
+  await deniedAfter([runRecord({ status: "queued", triggering_actor: { login: "write-collaborator" } }), runRecord({ triggering_actor: { login: "write-collaborator" } })], 2, "stranger stays denied once the record settles");
+});
+
+test("failures name the mismatched run-record fields without exposing secrets (platform#256)", async () => {
+  const detailOf = async (run) => {
+    try {
+      await verifyEffectiveAdmissionReceipt(context, stubFetch({ environment: unattendedEnvironment, run }));
+    } catch (error) {
+      assert.equal(error.code, "E_PD_EAR_ACTOR_GATE");
+      return error.detail;
+    }
+    throw new Error("expected a rejection");
+  };
+  assert.equal(await detailOf(runRecord({ status: "completed", run_attempt: 2 })), 'status="completed" run_attempt=2');
+  assert.equal(await detailOf(runRecord({ triggering_actor: { login: "write-collaborator" } })), 'triggering_actor="write-collaborator"');
+  assert.equal(await detailOf(runRecord({ path: ".github/workflows/unknown.yml" })), 'path=".github/workflows/unknown.yml" triggering_actor="easysubway-release-chain[bot]"');
+  assert.equal(await detailOf("not-an-object"), "run record is not an object");
+  assert.equal(await detailOf(runRecord({ triggering_actor: undefined })), "triggering_actor=undefined");
+  // 관측값은 한 줄로 잘라 낸다(긴 값·줄바꿈이 로그를 어지럽히지 못한다).
+  const longDetail = await detailOf(runRecord({ head_branch: `feature\n::error::${"x".repeat(200)}` }));
+  assert.doesNotMatch(longDetail, /\n/);
+  assert.ok(longDetail.length < 120, longDetail);
 });
 
 test("ACTOR_GATE still rejects every environment deviation, so removing the reviewer cannot open more than the branch-policy rule", async () => {
@@ -237,7 +315,7 @@ test("CLI judges the actor by the run record, never by environment variables or 
     const spoof = run(runRecord({ triggering_actor: { login: "other" } }), [], { GITHUB_ACTOR: "AquilaXk", GITHUB_RUN_ATTEMPT: "1" });
     assert.notEqual(spoof.status, 0);
     assert.equal(spoof.stdout, "");
-    assert.match(spoof.stderr, /^E_PD_EAR_ACTOR_GATE\n$/);
+    assert.match(spoof.stderr, /^E_PD_EAR_ACTOR_GATE\ntriggering_actor="other"\n$/);
     // 행위자는 인자로 줄 수 없다: 인자 집합은 그대로 닫혀 있다.
     const extra = run(runRecord(), ["--actor", "AquilaXk"]);
     assert.notEqual(extra.status, 0);
@@ -295,9 +373,11 @@ function reviewers(reviewers_) {
 
 function stubFetch(overrides = {}, requests = []) {
   const values = { environment, policies, status: 200, ...overrides };
+  let runReadCount = 0;
   return async (url, options) => {
     requests.push({ url, options });
     const isRun = url.includes("/actions/runs/");
+    if (isRun) runReadCount += 1;
     const status = isRun && values.runStatus !== undefined ? values.runStatus : values.status;
     return {
     ok: status >= 200 && status < 300,
@@ -305,7 +385,7 @@ function stubFetch(overrides = {}, requests = []) {
     json: async () => {
       if (values.jsonError || (isRun && values.runJsonError)) throw new Error("raw-provider-body");
       if (values.jsonNeverSettles) return new Promise(() => {});
-      if (isRun) return values.run;
+      if (isRun) return values.runs === undefined ? values.run : values.runs[Math.min(runReadCount - 1, values.runs.length - 1)];
       return url.endsWith("/deployment-branch-policies") ? values.policies : values.environment;
     },
   };

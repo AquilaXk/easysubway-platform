@@ -8,7 +8,13 @@ const ENVIRONMENT = "production-deploy";
 const REF = "refs/heads/main";
 const API_VERSION = "2022-11-28";
 const REQUEST_TIMEOUT_MS = 5_000;
-export async function verifyEffectiveAdmissionReceipt(context, request, timeoutMs = REQUEST_TIMEOUT_MS) {
+// run 기록이 아직 시작 상태로 반영되지 않은 동안 같은 run을 다시 읽는 횟수와 간격이다(platform#256). 끝내 시작되지 않으면 실패한다.
+const RUN_START_MAX_READS = 12;
+const RUN_START_READ_INTERVAL_MS = 5_000;
+const NOT_STARTED_RUN_STATUSES = new Set(["queued", "requested", "waiting", "pending"]);
+const OBSERVED_VALUE_MAX_LENGTH = 48;
+
+export async function verifyEffectiveAdmissionReceipt(context, request, timeoutMs = REQUEST_TIMEOUT_MS, pause = sleep) {
   assertContext(context);
   if (typeof request !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) fail("E_PD_EAR_REQUEST");
 
@@ -18,7 +24,7 @@ export async function verifyEffectiveAdmissionReceipt(context, request, timeoutM
   const classified = validateApproval(environment);
   const branchPolicy = validateBranchPolicy(environment, policies);
   // 사람 승인이 없는 환경은 승인 대신 이 run의 행위자를 Actions API 기록으로 확인한다(환경 변수는 쓰지 않는다).
-  const approval = classified.mode === "ACTOR_GATE" ? await readActorGate(request, context, timeoutMs) : classified;
+  const approval = classified.mode === "ACTOR_GATE" ? await readActorGate(request, context, timeoutMs, pause) : classified;
 
   return {
     schemaVersion: "PRODUCTION_DEPLOY_EFFECTIVE_ADMISSION_RECEIPT_V2",
@@ -49,7 +55,7 @@ async function main() {
     }));
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
   } catch (error) {
-    process.stderr.write(`${error instanceof ReceiptError ? error.code : "E_PD_EAR_FAILURE"}\n`);
+    process.stderr.write(error instanceof ReceiptError ? `${error.code}\n${error.detail === undefined ? "" : `${error.detail}\n`}` : "E_PD_EAR_FAILURE\n");
     process.exitCode = 1;
   }
 }
@@ -126,22 +132,56 @@ function validateApproval(environment) {
 
 // 현재 run의 기록(Actions API)으로 호출 workflow(path)와 시작 행위자(triggering_actor)·실행 시도를 확인한다.
 // 환경 변수(GITHUB_ACTOR 등)는 step `env:`로 바뀔 수 있어 근거로 쓰지 않는다. 기록을 읽지 못하거나 어긋나면 실패한다.
-async function readActorGate(request, context, timeoutMs) {
+async function readActorGate(request, context, timeoutMs, pause) {
   const runId = /\/actions\/runs\/([1-9][0-9]*)$/.exec(context.runUrl)?.[1];
   if (runId === undefined) fail("E_PD_EAR_CONTEXT");
-  const run = await getJson(request, `https://api.github.com/repos/${REPOSITORY}/actions/runs/${runId}`, timeoutMs);
-  const allowedActors = isObject(run) ? allowedActorsFor(run.path) : undefined;
-  const triggeringActor = isObject(run?.triggering_actor) ? run.triggering_actor.login : undefined;
-  if (
-    !isObject(run) || String(run.id) !== runId || run.status !== "in_progress" || run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
-    run.head_sha !== context.workflowSha || run.run_attempt !== 1 || allowedActors === undefined || typeof triggeringActor !== "string" || !allowedActors.includes(triggeringActor)
-  ) fail("E_PD_EAR_ACTOR_GATE");
+  const run = await readStartedRun(request, runId, timeoutMs, pause);
+  const checks = isObject(run) ? runRecordChecks(run, runId, context.workflowSha) : undefined;
+  if (checks === undefined) fail("E_PD_EAR_ACTOR_GATE", "run record is not an object");
+  const mismatches = checks.filter(({ matches }) => !matches);
+  if (mismatches.length > 0) fail("E_PD_EAR_ACTOR_GATE", mismatches.map(({ field, observed }) => `${field}=${observe(observed)}`).join(" "));
   return {
     mode: "ACTOR_GATE",
     canAdminsBypass: false,
     requiredReviewers: [],
-    actorGate: { workflow: run.path, allowedActors, triggeringActor, runAttempt: 1 },
+    actorGate: { workflow: run.path, allowedActors: allowedActorsFor(run.path), triggeringActor: run.triggering_actor.login, runAttempt: 1 },
   };
+}
+
+// 이 run의 기록이 아직 시작 전 상태이면 정해진 횟수까지 다시 읽어 확정한다. 확정된 기록만 판정하고, 그 밖의 기록은 그대로 판정으로 넘긴다.
+async function readStartedRun(request, runId, timeoutMs, pause) {
+  const url = `https://api.github.com/repos/${REPOSITORY}/actions/runs/${runId}`;
+  for (let reads = 1; ; reads += 1) {
+    const run = await getJson(request, url, timeoutMs);
+    if (!isObject(run) || String(run.id) !== runId || !NOT_STARTED_RUN_STATUSES.has(run.status)) return run;
+    if (reads === RUN_START_MAX_READS) fail("E_PD_EAR_RUN_NOT_STARTED", `status=${observe(run.status)} reads=${reads}`);
+    await pause(RUN_START_READ_INTERVAL_MS);
+  }
+}
+
+function runRecordChecks(run, runId, workflowSha) {
+  const allowedActors = allowedActorsFor(run.path);
+  const triggeringActor = isObject(run.triggering_actor) ? run.triggering_actor.login : undefined;
+  return [
+    { field: "id", observed: String(run.id), matches: String(run.id) === runId },
+    { field: "status", observed: run.status, matches: run.status === "in_progress" },
+    { field: "event", observed: run.event, matches: run.event === "workflow_dispatch" },
+    { field: "head_branch", observed: run.head_branch, matches: run.head_branch === "main" },
+    { field: "head_sha", observed: run.head_sha, matches: run.head_sha === workflowSha },
+    { field: "run_attempt", observed: run.run_attempt, matches: run.run_attempt === 1 },
+    { field: "path", observed: run.path, matches: allowedActors !== undefined },
+    { field: "triggering_actor", observed: triggeringActor, matches: typeof triggeringActor === "string" && allowedActors?.includes(triggeringActor) === true },
+  ];
+}
+
+// 로그에 남기는 관측값은 JSON 한 줄로 만들어 길이를 제한한다.
+function observe(value) {
+  const text = JSON.stringify(value) ?? "undefined";
+  return text.length > OBSERVED_VALUE_MAX_LENGTH ? `${text.slice(0, OBSERVED_VALUE_MAX_LENGTH)}...` : text;
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function validateBranchPolicy(environment, policies) {
@@ -155,14 +195,15 @@ function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function fail(code) {
-  throw new ReceiptError(code);
+function fail(code, detail) {
+  throw new ReceiptError(code, detail);
 }
 
 class ReceiptError extends Error {
-  constructor(code) {
+  constructor(code, detail) {
     super(code);
     this.code = code;
+    this.detail = detail;
   }
 }
 
