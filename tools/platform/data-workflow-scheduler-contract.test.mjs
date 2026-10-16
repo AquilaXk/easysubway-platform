@@ -78,6 +78,23 @@ test("전국 후보 갱신은 data workflow의 정기 cron(29 */2 * * *)과 같�
   assert.equal(contract.excluded.some(({ workflow }) => workflow === "nationwide-candidate-refresh.yml"), false);
 });
 
+// data#1288·#1293(회복된 실패 이슈 닫기)·data#1299(ITX 같은 날 실패 후 재수집)가 외부 스케줄러 주기를 정한다(AquilaXk/easysubway-platform#258).
+// 입력이 없는 dispatch여도 되는 이유: 두 workflow의 입력은 모두 선택이고 기본값이 정기 실행과 같다.
+const DISPATCH_CADENCES = [
+  { workflow: "recovered-failure-issues-close.yml", entry: { id: "recovered-failure-issues-close", workflow: "recovered-failure-issues-close.yml", everyHours: 1, offsetHour: 0, minute: 13, githubCron: "13 * * * *" }, dispatchesPerDay: 24 },
+  { workflow: "itx-current-promotion.yml", entry: { id: "itx-current-promotion", workflow: "itx-current-promotion.yml", everyHours: 3, offsetHour: 0, minute: 0, githubCron: "0 */3 * * *" }, dispatchesPerDay: 8 },
+];
+
+for (const { workflow, entry, dispatchesPerDay } of DISPATCH_CADENCES) {
+  test(`${workflow}는 GitHub schedule 백업과 같은 주기·분으로 입력 없이 dispatch되고 하루 ${dispatchesPerDay}번 때가 된다`, () => {
+    assert.deepEqual(contract.workflows.filter((item) => item.workflow === workflow), [entry]);
+    assert.equal(contract.excluded.some((item) => item.workflow === workflow), false);
+    let due = 0;
+    for (let hour = 0; hour < 24; hour += 1) due += dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, hour))).filter(({ id }) => id === entry.id).length;
+    assert.equal(due, dispatchesPerDay);
+  });
+}
+
 test("정기 대상은 하루 동안 원래 주기대로 때가 된다", () => {
   const counts = new Map();
   for (let hour = 0; hour < 24; hour += 1) {
@@ -90,9 +107,10 @@ test("정기 대상은 하루 동안 원래 주기대로 때가 된다", () => {
   // #240: data#1035가 스케줄러 App의 입력 없는 dispatch를 정기 역할로 인정한 뒤 후보 갱신도 원래 2시간 주기로 깨운다.
   assert.equal(counts.get("nationwide-candidate-refresh"), 12);
   assert.equal(counts.get("datapack-expiry-alert-provider-approval"), 1);
-  assert.equal(counts.get("itx-current-promotion"), 1);
+  assert.equal(counts.get("itx-current-promotion"), 8);
+  assert.equal(counts.get("recovered-failure-issues-close"), 24);
   assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 18))).map(({ id }) => id).slice(0, 1), ["itx-current-promotion"]);
-  assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 1))), []);
+  assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 1))).map(({ id }) => id), ["recovered-failure-issues-close"]);
 });
 
 test("렌더는 결정적이고 이름이 내용 digest에서 나오며 secret 값을 담지 않는다", () => {

@@ -61,10 +61,10 @@
     {
       "id": "itx-current-promotion",
       "workflow": "itx-current-promotion.yml",
-      "everyHours": 24,
-      "offsetHour": 18,
+      "everyHours": 3,
+      "offsetHour": 0,
       "minute": 0,
-      "githubCron": "0 18 * * *"
+      "githubCron": "0 */3 * * *"
     },
     {
       "id": "current-capital-topology-registration",
@@ -73,6 +73,14 @@
       "offsetHour": 0,
       "minute": 5,
       "githubCron": "5 */2 * * *"
+    },
+    {
+      "id": "recovered-failure-issues-close",
+      "workflow": "recovered-failure-issues-close.yml",
+      "everyHours": 1,
+      "offsetHour": 0,
+      "minute": 13,
+      "githubCron": "13 * * * *"
     },
     {
       "id": "kric-current-facility-refresh",
