@@ -75,6 +75,14 @@
       "githubCron": "5 */2 * * *"
     },
     {
+      "id": "automation-status-publish",
+      "workflow": "automation-status-publish.yml",
+      "everyHours": 1,
+      "offsetHour": 0,
+      "minute": 7,
+      "githubCron": "7 * * * *"
+    },
+    {
       "id": "recovered-failure-issues-close",
       "workflow": "recovered-failure-issues-close.yml",
       "everyHours": 1,

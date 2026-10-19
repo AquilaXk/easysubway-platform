@@ -83,8 +83,9 @@ const dispatchesOn = (id) => Array.from({ length: 24 }, (_, hour) => dueEntries(
 
 // data#1288·#1293(회복된 실패 이슈 닫기)·data#1299(ITX 같은 날 실패 후 재수집)가 외부 스케줄러 주기를 정한다(AquilaXk/easysubway-platform#258).
 // githubCron의 정본은 data 레포 각 workflow의 schedule이다. 이 표의 값은 data 레포의 check-scheduler-heartbeat.test.mjs 표(cron)와 같아야 한다.
-// 입력이 없는 dispatch여도 되는 이유: 두 workflow의 입력은 모두 선택이고 기본값이 정기 실행과 같다.
+// 입력이 없는 dispatch여도 되는 이유: 세 workflow의 입력은 모두 선택이고 기본값이 정기 실행과 같다.
 const DISPATCH_CADENCES = [
+  { workflow: "automation-status-publish.yml", everyHours: 1, minute: 7, githubCron: "7 * * * *" },
   { workflow: "recovered-failure-issues-close.yml", everyHours: 1, minute: 13, githubCron: "13 * * * *" },
   { workflow: "itx-current-promotion.yml", everyHours: 3, minute: 0, githubCron: "0 */3 * * *" },
 ];
@@ -107,7 +108,7 @@ test("정기 대상은 하루 동안 원래 주기대로 때가 된다", () => {
   assert.equal(dispatchesOn("nationwide-candidate-refresh"), 12);
   assert.equal(dispatchesOn("datapack-expiry-alert-provider-approval"), 1);
   assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 18))).map(({ id }) => id).slice(0, 1), ["itx-current-promotion"]);
-  assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 1))).map(({ id }) => id), ["recovered-failure-issues-close"]);
+  assert.deepEqual(dueEntries(contract.workflows, new Date(Date.UTC(2026, 9, 7, 1))).map(({ id }) => id), ["automation-status-publish", "recovered-failure-issues-close"]);
 });
 
 test("렌더는 결정적이고 이름이 내용 digest에서 나오며 secret 값을 담지 않는다", () => {
