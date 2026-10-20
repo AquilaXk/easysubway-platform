@@ -18,7 +18,7 @@ export async function readRegularFile(repositoryRoot, relativePath, { label = "i
   const parts = relativePath.split("/");
   for (const [index, part] of parts.entries()) {
     source = path.join(source, part);
-    const stat = await lstat(source);
+    const stat = await lstat(source); // NOSONAR -- 순차 실행이 의도다: 상위 구성요소가 symlink이면 하위를 검사하지 않고 즉시 거부해야 한다.
     if (stat.isSymbolicLink()) throw new Error(`${label} must not contain a symlink`);
     if (index === parts.length - 1 && !stat.isFile()) throw new Error(`${label} must be a regular file`);
   }
