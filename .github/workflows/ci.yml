@@ -94,6 +94,8 @@ jobs:
           node --test tools/platform/deploy-data-workflow-scheduler.test.mjs
           node --test tools/platform/deploy-lib.test.mjs
           node --test tools/ops/source-reachability-probe.test.mjs
+          node --test tools/lib/read-regular-file.test.mjs
+          node --test tools/ops/facility-report-photo-restore-check.test.mjs
           node --test tools/platform/source-reachability-probe-contract.test.mjs
           node --test tools/platform/deploy-source-reachability-probe.test.mjs
           node --test tools/platform/deploy-observability-config.test.mjs

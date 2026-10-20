@@ -306,6 +306,8 @@ if [[ "$(value EASYSUBWAY_DATASOURCE_PASSWORD)" != "$(value EASYSUBWAY_POSTGRES_
 	printf 'datasource password must match Compose postgres password\n' >&2
 	exit 1
 fi
+# Sonar S5332 Won't fix: 이 값은 Compose 내부 네트워크의 object-storage 컨테이너(TLS 미구성 MinIO)를 가리키는 고정 서비스 이름이며
+# 호스트 밖으로 노출되지 않는다. 외부 공개 URL은 아래 public_upload_url 검증이 HTTPS만 허용한다.
 if [[ "$(value EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT)" != "http://object-storage:9000" ]]; then
 	printf 'report object storage internal endpoint must be http://object-storage:9000\n' >&2
 	exit 1
