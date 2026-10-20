@@ -22,8 +22,8 @@ function sandbox() {
   return directory;
 }
 
-function manifestRow(objectKey, bytes) {
-  return ["r1", "a.jpg", "image/jpeg", objectKey, "", createHash("sha256").update(bytes).digest("hex"), String(bytes.length), `objects/${objectKey}`, "objects/"];
+function manifestRow(objectKey, bytes, thumbnailKey = "") {
+  return ["r1", "a.jpg", "image/jpeg", objectKey, thumbnailKey, createHash("sha256").update(bytes).digest("hex"), String(bytes.length), `objects/${objectKey}`, `objects/${thumbnailKey}`];
 }
 
 function writeManifest(restoreDir, rows) {
@@ -101,11 +101,28 @@ test("a traversal object key is rejected", () => {
   assert.match(result.stderr, /traversal/);
 });
 
-test("a size or sha256 mismatch is rejected", () => {
+function manifestWithRowOverrides(restoreDir, overrides) {
+  const row = manifestRow("a.jpg", PHOTO);
+  for (const [column, value] of Object.entries(overrides)) row[HEADER.indexOf(column)] = value;
+  writeManifest(restoreDir, [row]);
+}
+
+test("a size mismatch with a matching sha256 is rejected by the size check", () => {
   const restoreDir = restoreDirWithPhoto();
-  writeManifest(restoreDir, [manifestRow("a.jpg", Buffer.from("other-bytes"))]);
+  manifestWithRowOverrides(restoreDir, { size_bytes: String(PHOTO.length + 1) });
   const result = runCheck(restoreDir);
   assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /object size mismatch/);
+});
+
+test("a sha256 mismatch with a matching size is rejected by the sha256 check", () => {
+  const restoreDir = restoreDirWithPhoto();
+  const sameLengthOther = Buffer.from("other-bytes");
+  assert.equal(sameLengthOther.length, PHOTO.length);
+  manifestWithRowOverrides(restoreDir, { sha256: createHash("sha256").update(sameLengthOther).digest("hex") });
+  const result = runCheck(restoreDir);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /object sha256 mismatch/);
 });
 
 test("a missing object is rejected", () => {
@@ -114,4 +131,56 @@ test("a missing object is rejected", () => {
   const result = runCheck(restoreDir);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /missing/);
+});
+
+const THUMBNAIL = Buffer.from("thumb-bytes");
+
+function restoreDirWithThumbnail() {
+  const restoreDir = restoreDirWithPhoto();
+  writeFileSync(path.join(restoreDir, "objects", "t.jpg"), THUMBNAIL);
+  writeManifest(restoreDir, [manifestRow("a.jpg", PHOTO, "t.jpg")]);
+  return restoreDir;
+}
+
+test("a regular backup with a thumbnail passes", () => {
+  const result = runCheck(restoreDirWithThumbnail());
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("a thumbnail symlinked outside the backup is rejected", () => {
+  const restoreDir = restoreDirWithThumbnail();
+  const outside = path.join(path.dirname(restoreDir), "outside-thumb.jpg");
+  writeFileSync(outside, THUMBNAIL);
+  rmSync(path.join(restoreDir, "objects", "t.jpg"));
+  symlinkSync(outside, path.join(restoreDir, "objects", "t.jpg"));
+  const result = runCheck(restoreDir);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /thumbnail_path must not contain a symlink/);
+});
+
+test("a thumbnail hardlinked to a file outside the backup is rejected", () => {
+  const restoreDir = restoreDirWithThumbnail();
+  const outside = path.join(path.dirname(restoreDir), "outside-thumb.jpg");
+  writeFileSync(outside, THUMBNAIL);
+  rmSync(path.join(restoreDir, "objects", "t.jpg"));
+  linkSync(outside, path.join(restoreDir, "objects", "t.jpg"));
+  const result = runCheck(restoreDir);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /thumbnail_path must not be a hardlink/);
+});
+
+test("a missing thumbnail is rejected", () => {
+  const restoreDir = restoreDirWithThumbnail();
+  rmSync(path.join(restoreDir, "objects", "t.jpg"));
+  const result = runCheck(restoreDir);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /thumbnail_path missing/);
+});
+
+test("a restore directory given through a symlink is resolved and checked", () => {
+  const restoreDir = restoreDirWithPhoto();
+  const viaLink = path.join(path.dirname(restoreDir), "restore-link");
+  symlinkSync(restoreDir, viaLink);
+  const result = runCheck(viaLink);
+  assert.equal(result.status, 0, result.stderr);
 });

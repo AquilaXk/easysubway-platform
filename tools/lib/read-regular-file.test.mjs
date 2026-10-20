@@ -47,3 +47,8 @@ test("rejects unsafe relative paths", async () => {
     await assert.rejects(() => readRegularFile(root, unsafe), /unsafe/, unsafe);
   }
 });
+
+test("rejects a directory given as the final component", async () => {
+  const { root } = layout();
+  await assert.rejects(() => readRegularFile(root, "dir"), /regular file/);
+});
