@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -408,4 +408,50 @@ test("summarize 하위 명령은 JSONL 파일을 읽어 표를 출력한다", ()
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("ConfigMap 볼륨처럼 ..data symlink 경로로 실행해도 진입점이 실행된다(silent exit 0 방지)", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "probe-symlink-"));
+  try {
+    const mount = path.join(directory, "mount");
+    mkdirSync(path.join(mount, "..2026_10_20"), { recursive: true });
+    copyFileSync(new URL("./source-reachability-probe.mjs", import.meta.url), path.join(mount, "..2026_10_20", "probe.mjs"));
+    symlinkSync("..2026_10_20", path.join(mount, "..data"));
+    symlinkSync(path.join("..data", "probe.mjs"), path.join(mount, "probe.mjs"));
+    const file = path.join(directory, "a.jsonl");
+    writeFileSync(file, `${JSON.stringify(summaryRecord("2026-10-21T09:00:00.000Z", { vantage: "gha-us", target: "korail-www", host: "www.korail.com" }))}\n`);
+    const summarized = spawnSync(process.execPath, [path.join(mount, "probe.mjs"), "summarize", file], { encoding: "utf8" });
+    assert.equal(summarized.status, 0, summarized.stderr);
+    assert.match(summarized.stdout, /\| gha-us \| korail-www \|/u);
+    const missingVantage = spawnSync(process.execPath, [path.join(mount, "probe.mjs")], { encoding: "utf8" });
+    assert.notEqual(missingVantage.status, 0, "인자 오류가 symlink 경로에서도 드러나야 한다");
+    assert.match(missingVantage.stderr, /PROBE_ARGUMENTS/u);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("측정 라운드가 대상 수 x 라운드 수보다 적게 기록하면 0이 아닌 오류로 끝난다(대상별 실패 기록은 정상)", async () => {
+  const targets = [localTarget(1), { ...localTarget(2), id: "second" }];
+  const emitted = [];
+  const run = (probe, rounds = 1) => runRounds({ targets, rounds, intervalMs: 0, vantage: "cli-test", probe, sleep: async () => {}, emit: (record) => emitted.push(record) });
+  const answered = async (target, { round }) => ({ target: target.id, round });
+  await assert.rejects(run(async (target, options) => (target.id === "second" ? null : answered(target, options))), /PROBE_INCOMPLETE_ROUND: recorded 1 of 2/u);
+  await assert.rejects(run(async () => null), /PROBE_INCOMPLETE_ROUND: recorded 0 of 2/u);
+  await assert.rejects(run(async (target, options) => (options.round === 2 ? null : answered(target, options)), 2), /PROBE_INCOMPLETE_ROUND: recorded 2 of 4/u);
+  emitted.length = 0;
+  await run(answered);
+  assert.equal(emitted.length, 2, "대상마다 기록이 있으면 정상 종료한다");
+  const refused = net.createServer();
+  const port = await listen(refused);
+  await close(refused);
+  const lines = [];
+  await main(["--vantage", "cli-test"], { targets: [localTarget(port)], write: (text) => lines.push(text), probeOptions: FAST });
+  assert.equal(lines.length, 1, "연결 실패 기록이 있으면 정상 종료한다");
+});
+
+test("실재하지 않는 argv[1]로 import해도 예외 없이 export를 쓸 수 있다", () => {
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `const m = await import(${JSON.stringify(new URL("./source-reachability-probe.mjs", import.meta.url).href)}); console.log(typeof m.main);`, "/nonexistent/entry.mjs"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "function");
 });

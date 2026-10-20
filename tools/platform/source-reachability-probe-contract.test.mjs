@@ -167,3 +167,11 @@ test("Platform CI가 측정 스크립트·계약·배포 도구 테스트를 실
     assert.ok(ci.includes(`          node --test ${file}\n`), file);
   }
 });
+
+test("bootstrap 자리표시 CronJob도 restricted PodSecurity 요건을 갖춘다(apply 경고 방지)", () => {
+  const cronJob = rbac.items.find(({ kind }) => kind === "CronJob");
+  const pod = cronJob.spec.jobTemplate.spec.template.spec;
+  assert.deepEqual(pod.securityContext, objects.cronJob.spec.jobTemplate.spec.template.spec.securityContext);
+  assert.deepEqual(pod.containers[0].securityContext.allowPrivilegeEscalation, false);
+  assert.deepEqual(pod.containers[0].securityContext.capabilities, { drop: ["ALL"] });
+});

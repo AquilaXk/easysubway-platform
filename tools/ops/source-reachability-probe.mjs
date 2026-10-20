@@ -10,7 +10,7 @@
 // 사용:
 //   node source-reachability-probe.mjs --vantage <label> [--rounds N] [--interval-seconds S] [--align] [--output file.jsonl]
 //   node source-reachability-probe.mjs summarize <file.jsonl>...
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { Resolver } from "node:dns/promises";
 import net from "node:net";
 import { performance } from "node:perf_hooks";
@@ -192,11 +192,17 @@ const untilSlot = (nowMs, intervalMs, { startNow }) => (startNow ? (intervalMs -
 /** 라운드마다 모든 대상을 측정해 기록한다. 대상은 서로 다른 호스트라 함께 재고, 기록은 대상 순서로 내보낸다. */
 export async function runRounds({ targets, rounds, intervalMs, vantage, align = false, clock = Date.now, probe = probeTarget, probeOptions = {}, sleep = (ms) => sleepFor(ms), emit }) {
   if (align) await sleep(untilSlot(clock(), intervalMs, { startNow: true }));
+  let recorded = 0;
   for (let round = 1; round <= rounds; round += 1) {
     const records = await Promise.all(targets.map((target) => probe(target, { vantage, round, ...probeOptions }))); // NOSONAR -- 라운드는 호스트 부하를 줄이려고 의도적으로 순차다
-    for (const record of records) emit(record);
+    for (const record of records.filter(Boolean)) {
+      emit(record);
+      recorded += 1;
+    }
     if (round < rounds) await sleep(align ? untilSlot(clock(), intervalMs, { startNow: false }) : intervalMs); // NOSONAR -- 라운드 간격 대기다
   }
+  // 대상별 연결 실패도 기록이 남으므로 정상이다. 대상 수 x 라운드 수보다 기록이 적으면 측정이 일부만 돈 것이라 실패시킨다.
+  if (recorded !== targets.length * rounds) fail("PROBE_INCOMPLETE_ROUND", `recorded ${recorded} of ${targets.length * rounds} expected measurements`);
 }
 
 export function parseArguments(argv) {
@@ -350,7 +356,18 @@ function summarizeFiles(files) {
   return renderSummary(summarizeRecords(records));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** 이 모듈이 직접 실행된 진입점인지 본다. ConfigMap 볼륨 symlink는 realpath로 풀고, 실재하지 않는 경로(`node -e` 등)는 진입점이 아니다. */
+function isEntryPoint(scriptPath) {
+  if (!scriptPath) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(scriptPath)).href;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+if (isEntryPoint(process.argv[1])) {
   try {
     if (process.argv[2] === "summarize") process.stdout.write(summarizeFiles(process.argv.slice(3)));
     else await main(process.argv.slice(2));
