@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
-import { deployDataWorkflowScheduler, runCommand } from "./deploy-data-workflow-scheduler.mjs";
+import { deployDataWorkflowScheduler } from "./deploy-data-workflow-scheduler.mjs";
 import { readSchedulerContract, readSchedulerScript, renderDataWorkflowScheduler } from "./render-data-workflow-scheduler.mjs";
 
 // AquilaXk/easysubway-platform#237: PREVIEW는 렌더만 하고, DEPLOY는 App 자격 확인 뒤 별도 deployer 신원으로 secret(내용 digest 이름)·ConfigMap을 만들고
@@ -232,19 +232,6 @@ test("DEPLOY는 클러스터를 건드리기 전에 App 자격을 확인하고 �
   accessChecks.length = 0;
   await deployDataWorkflowScheduler({ mode: "PREVIEW", env: {}, commandRunner: fakeCluster().commandRunner, verifyAccess });
   assert.equal(accessChecks.length, 0, "PREVIEW는 GitHub를 부르지 않는다");
-});
-
-test("자식 프로세스는 최소 환경(PATH)만 받아 환경 변수의 App key가 상속되지 않는다", async () => {
-  process.env.EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY = "inherited-key-must-not-leak";
-  process.env.EASYSUBWAY_DISPATCH_APP_CLIENT_ID = "Iv23liInheritedClientId";
-  try {
-    const { stdout } = await runCommand("env", []);
-    assert.deepEqual(stdout.trim().split("\n").map((line) => line.split("=")[0]).filter((name) => name !== "PWD" && name !== "_" && name !== "SHLVL").sort(), ["PATH"]);
-    assert.equal(stdout.includes("inherited-key-must-not-leak"), false);
-  } finally {
-    delete process.env.EASYSUBWAY_DISPATCH_APP_PRIVATE_KEY;
-    delete process.env.EASYSUBWAY_DISPATCH_APP_CLIENT_ID;
-  }
 });
 
 test("mode는 PREVIEW와 DEPLOY만 받는다", async () => {

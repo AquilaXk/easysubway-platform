@@ -11,6 +11,7 @@ export const DEPLOY_ACTORS_BY_WORKFLOW = Object.freeze({
   ".github/workflows/production-deploy-effective-admission-receipt.yml": Object.freeze([OWNER]),
   ".github/workflows/source-free-journey-deploy.yml": Object.freeze([OWNER]),
   ".github/workflows/source-free-journey-k3s-deploy.yml": Object.freeze([OWNER, RELEASE_CHAIN_APP]),
+  ".github/workflows/source-reachability-probe-deploy.yml": Object.freeze([OWNER]),
 });
 
 /** 알려진 workflow path면 그 workflow의 허용 행위자 사본을, 아니면 undefined를 돌려준다. */

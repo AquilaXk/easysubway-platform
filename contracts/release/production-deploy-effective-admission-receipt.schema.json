@@ -57,7 +57,8 @@
                     ".github/workflows/observability-config-deploy.yml",
                     ".github/workflows/production-deploy-effective-admission-receipt.yml",
                     ".github/workflows/source-free-journey-deploy.yml",
-                    ".github/workflows/source-free-journey-k3s-deploy.yml"
+                    ".github/workflows/source-free-journey-k3s-deploy.yml",
+                    ".github/workflows/source-reachability-probe-deploy.yml"
                   ]
                 },
                 "allowedActors": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "type": "string", "enum": ["AquilaXk", "easysubway-release-chain[bot]"] } },
