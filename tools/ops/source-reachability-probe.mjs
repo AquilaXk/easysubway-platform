@@ -192,11 +192,17 @@ const untilSlot = (nowMs, intervalMs, { startNow }) => (startNow ? (intervalMs -
 /** 라운드마다 모든 대상을 측정해 기록한다. 대상은 서로 다른 호스트라 함께 재고, 기록은 대상 순서로 내보낸다. */
 export async function runRounds({ targets, rounds, intervalMs, vantage, align = false, clock = Date.now, probe = probeTarget, probeOptions = {}, sleep = (ms) => sleepFor(ms), emit }) {
   if (align) await sleep(untilSlot(clock(), intervalMs, { startNow: true }));
+  let recorded = 0;
   for (let round = 1; round <= rounds; round += 1) {
     const records = await Promise.all(targets.map((target) => probe(target, { vantage, round, ...probeOptions }))); // NOSONAR -- 라운드는 호스트 부하를 줄이려고 의도적으로 순차다
-    for (const record of records) emit(record);
+    for (const record of records.filter(Boolean)) {
+      emit(record);
+      recorded += 1;
+    }
     if (round < rounds) await sleep(align ? untilSlot(clock(), intervalMs, { startNow: false }) : intervalMs); // NOSONAR -- 라운드 간격 대기다
   }
+  // 대상별 연결 실패도 기록이 남으므로 정상이다. 대상 수 x 라운드 수보다 기록이 적으면 측정이 일부만 돈 것이라 실패시킨다.
+  if (recorded !== targets.length * rounds) fail("PROBE_INCOMPLETE_ROUND", `recorded ${recorded} of ${targets.length * rounds} expected measurements`);
 }
 
 export function parseArguments(argv) {
@@ -223,7 +229,6 @@ export function parseArguments(argv) {
 export async function main(argv, { targets = PROBE_TARGETS, write = (text) => process.stdout.write(text), sleep, clock, probeOptions = {} } = {}) {
   const options = parseArguments(argv);
   if (options.output) writeFileSync(options.output, "");
-  let recorded = 0;
   await runRounds({
     targets,
     rounds: options.rounds,
@@ -235,13 +240,10 @@ export async function main(argv, { targets = PROBE_TARGETS, write = (text) => pr
     ...(clock ? { clock } : {}),
     emit: (record) => {
       const line = `${JSON.stringify(record)}\n`;
-      recorded += 1;
       write(line);
       if (options.output) appendFileSync(options.output, line);
     },
   });
-  // 대상별 연결 실패는 기록이 남으므로 정상이다. 기록이 하나도 없는 라운드만 측정이 돌지 않은 것으로 실패시킨다.
-  if (recorded === 0) fail("PROBE_NO_RECORDS", "the measurement round recorded nothing");
 }
 
 // ---- 기록 검증: 수집(COLLECT)과 요약이 같은 검증을 쓴다. 형식이 다른 기록은 버리지 않고 오류로 드러낸다.
@@ -354,7 +356,18 @@ function summarizeFiles(files) {
   return renderSummary(summarizeRecords(records));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+/** 이 모듈이 직접 실행된 진입점인지 본다. ConfigMap 볼륨 symlink는 realpath로 풀고, 실재하지 않는 경로(`node -e` 등)는 진입점이 아니다. */
+function isEntryPoint(scriptPath) {
+  if (!scriptPath) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(scriptPath)).href;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+if (isEntryPoint(process.argv[1])) {
   try {
     if (process.argv[2] === "summarize") process.stdout.write(summarizeFiles(process.argv.slice(3)));
     else await main(process.argv.slice(2));

@@ -431,13 +431,27 @@ test("ConfigMap 볼륨처럼 ..data symlink 경로로 실행해도 진입점이 
   }
 });
 
-test("측정 라운드가 기록을 한 건도 남기지 않으면 0이 아닌 오류로 끝난다(대상별 실패 기록은 정상)", async () => {
-  const lines = [];
-  await assert.rejects(main(["--vantage", "cli-test"], { targets: [], write: (text) => lines.push(text) }), /PROBE_NO_RECORDS/u);
-  assert.deepEqual(lines, []);
+test("측정 라운드가 대상 수 x 라운드 수보다 적게 기록하면 0이 아닌 오류로 끝난다(대상별 실패 기록은 정상)", async () => {
+  const targets = [localTarget(1), { ...localTarget(2), id: "second" }];
+  const emitted = [];
+  const run = (probe, rounds = 1) => runRounds({ targets, rounds, intervalMs: 0, vantage: "cli-test", probe, sleep: async () => {}, emit: (record) => emitted.push(record) });
+  const answered = async (target, { round }) => ({ target: target.id, round });
+  await assert.rejects(run(async (target, options) => (target.id === "second" ? null : answered(target, options))), /PROBE_INCOMPLETE_ROUND: recorded 1 of 2/u);
+  await assert.rejects(run(async () => null), /PROBE_INCOMPLETE_ROUND: recorded 0 of 2/u);
+  await assert.rejects(run(async (target, options) => (options.round === 2 ? null : answered(target, options)), 2), /PROBE_INCOMPLETE_ROUND: recorded 2 of 4/u);
+  emitted.length = 0;
+  await run(answered);
+  assert.equal(emitted.length, 2, "대상마다 기록이 있으면 정상 종료한다");
   const refused = net.createServer();
   const port = await listen(refused);
   await close(refused);
+  const lines = [];
   await main(["--vantage", "cli-test"], { targets: [localTarget(port)], write: (text) => lines.push(text), probeOptions: FAST });
   assert.equal(lines.length, 1, "연결 실패 기록이 있으면 정상 종료한다");
+});
+
+test("실재하지 않는 argv[1]로 import해도 예외 없이 export를 쓸 수 있다", () => {
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `const m = await import(${JSON.stringify(new URL("./source-reachability-probe.mjs", import.meta.url).href)}); console.log(typeof m.main);`, "/nonexistent/entry.mjs"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "function");
 });
