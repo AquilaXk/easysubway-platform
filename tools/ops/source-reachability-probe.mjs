@@ -10,7 +10,7 @@
 // 사용:
 //   node source-reachability-probe.mjs --vantage <label> [--rounds N] [--interval-seconds S] [--align] [--output file.jsonl]
 //   node source-reachability-probe.mjs summarize <file.jsonl>...
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { Resolver } from "node:dns/promises";
 import net from "node:net";
 import { performance } from "node:perf_hooks";
@@ -223,6 +223,7 @@ export function parseArguments(argv) {
 export async function main(argv, { targets = PROBE_TARGETS, write = (text) => process.stdout.write(text), sleep, clock, probeOptions = {} } = {}) {
   const options = parseArguments(argv);
   if (options.output) writeFileSync(options.output, "");
+  let recorded = 0;
   await runRounds({
     targets,
     rounds: options.rounds,
@@ -234,10 +235,13 @@ export async function main(argv, { targets = PROBE_TARGETS, write = (text) => pr
     ...(clock ? { clock } : {}),
     emit: (record) => {
       const line = `${JSON.stringify(record)}\n`;
+      recorded += 1;
       write(line);
       if (options.output) appendFileSync(options.output, line);
     },
   });
+  // 대상별 연결 실패는 기록이 남으므로 정상이다. 기록이 하나도 없는 라운드만 측정이 돌지 않은 것으로 실패시킨다.
+  if (recorded === 0) fail("PROBE_NO_RECORDS", "the measurement round recorded nothing");
 }
 
 // ---- 기록 검증: 수집(COLLECT)과 요약이 같은 검증을 쓴다. 형식이 다른 기록은 버리지 않고 오류로 드러낸다.
@@ -350,7 +354,7 @@ function summarizeFiles(files) {
   return renderSummary(summarizeRecords(records));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     if (process.argv[2] === "summarize") process.stdout.write(summarizeFiles(process.argv.slice(3)));
     else await main(process.argv.slice(2));
