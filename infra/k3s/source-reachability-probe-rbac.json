@@ -1,0 +1,282 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "easysubway-probe",
+        "labels": {
+          "kubernetes.io/metadata.name": "easysubway-probe",
+          "app.kubernetes.io/part-of": "easysubway",
+          "pod-security.kubernetes.io/enforce": "restricted"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "source-reachability-probe-deployer",
+        "namespace": "easysubway-probe"
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "source-reachability-probe-deployer",
+        "namespace": "easysubway-probe"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "batch"
+          ],
+          "resources": [
+            "cronjobs"
+          ],
+          "resourceNames": [
+            "source-reachability-probe"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps"
+          ],
+          "resourceNames": [
+            "source-reachability-probe-script"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "serviceaccounts"
+          ],
+          "resourceNames": [
+            "source-reachability-probe"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "networking.k8s.io"
+          ],
+          "resources": [
+            "networkpolicies"
+          ],
+          "resourceNames": [
+            "source-reachability-probe-boundary"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods/log"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "source-reachability-probe-deployer",
+        "namespace": "easysubway-probe"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "source-reachability-probe-deployer",
+          "namespace": "easysubway-probe"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "source-reachability-probe-deployer"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "source-reachability-probe",
+        "namespace": "easysubway-probe",
+        "labels": {
+          "app.kubernetes.io/name": "source-reachability-probe",
+          "app.kubernetes.io/part-of": "easysubway"
+        }
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "metadata": {
+        "name": "source-reachability-probe-boundary",
+        "namespace": "easysubway-probe"
+      },
+      "spec": {
+        "podSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "source-reachability-probe"
+          }
+        },
+        "policyTypes": [
+          "Ingress",
+          "Egress"
+        ],
+        "egress": [
+          {
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "kube-system"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "UDP",
+                "port": 53
+              },
+              {
+                "protocol": "TCP",
+                "port": 53
+              }
+            ]
+          },
+          {
+            "to": [
+              {
+                "ipBlock": {
+                  "cidr": "0.0.0.0/0",
+                  "except": [
+                    "10.0.0.0/8",
+                    "100.64.0.0/10",
+                    "169.254.0.0/16",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16"
+                  ]
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 80
+              },
+              {
+                "protocol": "TCP",
+                "port": 443
+              },
+              {
+                "protocol": "TCP",
+                "port": 8088
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "source-reachability-probe-script",
+        "namespace": "easysubway-probe",
+        "labels": {
+          "app.kubernetes.io/name": "source-reachability-probe",
+          "app.kubernetes.io/part-of": "easysubway"
+        }
+      },
+      "data": {}
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "metadata": {
+        "name": "source-reachability-probe",
+        "namespace": "easysubway-probe",
+        "labels": {
+          "app.kubernetes.io/name": "source-reachability-probe",
+          "app.kubernetes.io/part-of": "easysubway"
+        }
+      },
+      "spec": {
+        "schedule": "0 0 1 1 *",
+        "timeZone": "Etc/UTC",
+        "suspend": true,
+        "concurrencyPolicy": "Forbid",
+        "jobTemplate": {
+          "spec": {
+            "template": {
+              "spec": {
+                "restartPolicy": "Never",
+                "automountServiceAccountToken": false,
+                "containers": [
+                  {
+                    "name": "probe",
+                    "image": "docker.io/library/node:24.19.0-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43",
+                    "command": [
+                      "node",
+                      "--version"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

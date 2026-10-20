@@ -1,0 +1,100 @@
+name: Source Reachability Probe Deploy
+
+# hub AquilaXk/easysubway#3036: 서울 k3s에서 공공 원천 호스트 도달성(연결 성공률·단계별 지연)을 재는 CronJob을 올리고, 결과를 꺼내고, 측정이 끝나면 걷어낸다.
+# 같은 시간대 미국 측정은 data 레포의 source-reachability-probe workflow가 같은 스크립트(tools/ops/source-reachability-probe.mjs)로 한다.
+# PREVIEW는 GitHub-hosted runner에서 객체만 렌더한다(클러스터·secret 접근 없음). DEPLOY·COLLECT·REMOVE는 승인 환경(production-deploy)의
+# self-hosted runner에서만 돌고 deployer 신원(고정 이름 객체 한정 권한)으로만 클러스터를 건드린다. 이 workflow는 secret을 쓰지 않는다. PR 병합만으로 배포되지 않는다.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Closed execution mode"
+        required: true
+        type: choice
+        options:
+          - PREVIEW
+          - DEPLOY
+          - COLLECT
+          - REMOVE
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    name: ${{ inputs.mode == 'PREVIEW' && 'Render source reachability probe' || format('{0} source reachability probe on K3s', inputs.mode) }}
+    # 허용되지 않은 행위자의 dispatch는 환경·러너를 잡기 전에 job 단계에서 건너뛴다(concurrency도 job 단위라 건너뛴 job은 슬롯을 차지하지 않는다).
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'
+    concurrency:
+      group: source-reachability-probe-production
+      cancel-in-progress: false
+    environment: production-deploy
+    runs-on: ${{ fromJSON(inputs.mode != 'PREVIEW' && '["self-hosted","Linux","ARM64","easysubway-production"]' || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+    steps:
+      - name: Require an authorized dispatcher
+        shell: bash
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          DEPLOY_REF: ${{ github.ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          case "${TRIGGERING_ACTOR}" in
+            "AquilaXk") ;;
+            *) echo "deploy dispatcher is not authorized: ${TRIGGERING_ACTOR}" >&2; exit 1 ;;
+          esac
+          [[ "${DEPLOY_REF}" == "refs/heads/main" && "${RUN_ATTEMPT}" == "1" ]] || { echo "deploy must start from main on the first attempt" >&2; exit 1; }
+
+      - name: Checkout Platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Verify production-deploy admission
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
+            --repository "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${RUNNER_TEMP}/admission-receipt.json"
+
+      - name: Render, deploy, collect or remove the probe
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          COLLECT_OUTPUT: ${{ runner.temp }}/oci-seoul-k3s-probe.jsonl
+        run: |
+          set -euo pipefail
+          args=(--mode "${MODE}")
+          if [[ "${MODE}" == "COLLECT" ]]; then
+            args+=(--output "${COLLECT_OUTPUT}")
+          fi
+          node tools/platform/deploy-source-reachability-probe.mjs "${args[@]}" > "${RUNNER_TEMP}/probe-result.json"
+          {
+            echo '```json'
+            cat "${RUNNER_TEMP}/probe-result.json"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the collected measurements
+        if: inputs.mode == 'COLLECT'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: source-reachability-oci-seoul-k3s-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/oci-seoul-k3s-probe.jsonl
+            ${{ runner.temp }}/probe-result.json
+          if-no-files-found: error
+          retention-days: 30
