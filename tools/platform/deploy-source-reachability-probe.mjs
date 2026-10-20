@@ -3,17 +3,21 @@
 // 측정 스크립트는 tools/ops/source-reachability-probe.mjs 하나이고 GitHub 호스티드 러너도 같은 파일을 쓴다. secret은 쓰지 않는다.
 // 모드:
 //   PREVIEW  렌더만 한다(클러스터 접근 없음).
-//   DEPLOY   deployer 신원으로 고정 이름 객체(ConfigMap·ServiceAccount·NetworkPolicy·CronJob)를 apply하고 읽어 렌더와 대조한다.
-//   COLLECT  보존된 Job 파드의 로그(JSON Lines)를 읽어 검증하고 --output 파일에 쓴다.
-//   REMOVE   측정 종료: CronJob과 ConfigMap을 지운다(Job·파드는 소유 관계로 함께 지워진다).
-// namespace·deployer RBAC·고정 이름 객체는 관리자가 infra/k3s/source-reachability-probe-rbac.json으로 한 번 만든다(data-workflow-scheduler와 같은 패턴).
+//   DEPLOY   deployer 신원으로 고정 이름 객체(ConfigMap·ServiceAccount·CronJob)를 apply하고, NetworkPolicy 둘까지 읽어 렌더와 대조한다.
+//   COLLECT  보존된 Job 파드의 로그(JSON Lines)를 읽어 기록 형식을 하나씩 검증하고, 다시 직렬화한 줄만 --output 파일에 쓴다.
+//   REMOVE   측정 종료: CronJob과 ConfigMap을 지운다(Job·파드는 소유 관계로 함께 지워진다). 멱등이라 부분 실패 뒤 다시 돌릴 수 있다.
+// namespace·deployer RBAC·NetworkPolicy·고정 이름 객체는 관리자가 infra/k3s/source-reachability-probe-rbac.json으로 한 번 만든다(data-workflow-scheduler와 같은 패턴).
+// 격리 경계인 NetworkPolicy는 deployer가 바꿀 수 없다(get만): namespace 전체 default-deny가 깔려 있어 파드 라벨이 빠져도 파드는 고립된다.
 // deployer에는 만들기 권한이 없고, 이름이 정해진 객체의 get·update·patch(CronJob·ConfigMap은 delete)와 파드 로그 읽기만 있다.
+// REMOVE 뒤에는 CronJob 자리표시자가 없으므로 다시 DEPLOY하려면 관리자 bootstrap을 다시 적용해야 한다.
 // 실패는 숨기지 않는다: 자동 rollback도 대체 값도 없다.
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import { PROBE_TARGETS, RECORD_SCHEMA } from "../ops/source-reachability-probe.mjs";
-import { isSubset, runCommand } from "./deploy-data-workflow-scheduler.mjs";
+import { PROBE_TARGETS, parseRecordLines } from "../ops/source-reachability-probe.mjs";
+import { runCommand } from "./lib/process.mjs";
+import { isSubset } from "./lib/subset.mjs";
 
 export const NAMESPACE = "easysubway-probe";
 export const DEPLOYER = `system:serviceaccount:${NAMESPACE}:source-reachability-probe-deployer`;
@@ -44,6 +48,7 @@ export const OBJECT_NAMES = Object.freeze({
   serviceAccount: NAME,
   configMap: `${NAME}-script`,
   networkPolicy: `${NAME}-boundary`,
+  defaultDenyPolicy: `${NAME}-default-deny`,
   deployer: `${NAME}-deployer`,
 });
 
@@ -55,12 +60,17 @@ class ProbeDeployError extends Error {
 }
 
 const fail = (code, detail) => { throw new ProbeDeployError(code, detail); };
-const labels = () => ({ "app.kubernetes.io/name": NAME, "app.kubernetes.io/part-of": "easysubway" });
+// NetworkPolicy 허용 규칙은 이 라벨을 가진 파드에만 적용된다. 라벨이 없는 파드는 default-deny에 막힌다.
+export const POD_SELECTOR_LABELS = Object.freeze({ "app.kubernetes.io/name": NAME });
+const labels = () => ({ ...POD_SELECTOR_LABELS, "app.kubernetes.io/part-of": "easysubway" });
 const metadata = (name) => ({ name, namespace: NAMESPACE, labels: labels() });
 
 export function readProbeScript() {
   return readFileSync(SCRIPT_URL);
 }
+
+/** 서울 ConfigMap에 실리는 스크립트의 SHA-256. data 레포 workflow가 받은 스크립트의 기대 해시와 같아야 두 측정이 같은 스크립트다. */
+export const probeScriptSha256 = (scriptBytes) => createHash("sha256").update(scriptBytes).digest("hex");
 
 /** 측정 대상이 쓰는 포트만 공개 인터넷으로 열고(DNS 제외) 사설 대역과 ingress는 모두 막는다. */
 function egressRules() {
@@ -79,7 +89,14 @@ export function renderSourceReachabilityProbe({ scriptBytes }) {
     apiVersion: "networking.k8s.io/v1",
     kind: "NetworkPolicy",
     metadata: { name: OBJECT_NAMES.networkPolicy, namespace: NAMESPACE },
-    spec: { podSelector: { matchLabels: { "app.kubernetes.io/name": NAME } }, policyTypes: ["Ingress", "Egress"], egress: egressRules() },
+    spec: { podSelector: { matchLabels: { ...POD_SELECTOR_LABELS } }, policyTypes: ["Ingress", "Egress"], egress: egressRules() },
+  };
+  // namespace의 모든 파드를 ingress·egress 모두 막는다. 허용 규칙(networkPolicy)이 라벨로 고른 파드만 그 위에서 열린다.
+  const defaultDenyPolicy = {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: { name: OBJECT_NAMES.defaultDenyPolicy, namespace: NAMESPACE },
+    spec: { podSelector: {}, policyTypes: ["Ingress", "Egress"] },
   };
   const cronJob = {
     apiVersion: "batch/v1",
@@ -105,6 +122,8 @@ export function renderSourceReachabilityProbe({ scriptBytes }) {
               serviceAccountName: OBJECT_NAMES.serviceAccount,
               automountServiceAccountToken: false,
               enableServiceLinks: false,
+              // 측정은 c-ares로 완전한 이름을 직접 조회하지만, 파드의 다른 이름 조회도 search 확장이 섞이지 않게 ndots를 1로 둔다.
+              dnsConfig: { options: [{ name: "ndots", value: "1" }] },
               nodeSelector: { "kubernetes.io/arch": "arm64" },
               securityContext: { runAsNonRoot: true, runAsUser: RUN_AS, runAsGroup: RUN_AS, seccompProfile: { type: "RuntimeDefault" } },
               containers: [{
@@ -126,7 +145,7 @@ export function renderSourceReachabilityProbe({ scriptBytes }) {
   return {
     schemaVersion: "PLATFORM_SOURCE_REACHABILITY_PROBE_RENDER_V1",
     names: { ...OBJECT_NAMES },
-    objects: { serviceAccount, configMap, networkPolicy, cronJob },
+    objects: { serviceAccount, configMap, networkPolicy, defaultDenyPolicy, cronJob },
   };
 }
 
@@ -152,17 +171,21 @@ async function deploy({ kubectl, rendered }) {
   // 관리자가 만든 고정 이름 객체가 없으면 만들어 주지 않고 멈춘다(deployer에는 만들기 권한이 없다).
   const existing = await kubectl(["get", "cronjob", OBJECT_NAMES.cronJob, "--namespace", NAMESPACE, "--ignore-not-found", "-o", "name"]);
   if (existing.stdout.trim() === "") fail("E_PROBE_DEPLOY_NOT_BOOTSTRAPPED", "apply infra/k3s/source-reachability-probe-rbac.json as the host administrator first");
-  const applied = [rendered.objects.configMap, rendered.objects.serviceAccount, rendered.objects.networkPolicy, rendered.objects.cronJob];
+  // NetworkPolicy는 관리자 bootstrap 전용이라 apply하지 않고 읽어서 렌더와 같은지만 확인한다(다르면 bootstrap을 다시 적용해야 한다).
+  const applied = [rendered.objects.configMap, rendered.objects.serviceAccount, rendered.objects.cronJob];
   await kubectl(["apply", "-f", "-"], JSON.stringify({ apiVersion: "v1", kind: "List", items: applied }));
   for (const [resource, name, wanted] of [
     ["configmap", OBJECT_NAMES.configMap, rendered.objects.configMap],
     ["serviceaccount", OBJECT_NAMES.serviceAccount, rendered.objects.serviceAccount],
     ["networkpolicy", OBJECT_NAMES.networkPolicy, rendered.objects.networkPolicy],
+    ["networkpolicy", OBJECT_NAMES.defaultDenyPolicy, rendered.objects.defaultDenyPolicy],
     ["cronjob", OBJECT_NAMES.cronJob, rendered.objects.cronJob],
   ]) {
     // 읽기 대조는 객체마다 순서대로 한다(첫 불일치에서 멈춘다).
     const live = parseJson((await kubectl(["get", resource, name, "--namespace", NAMESPACE, "-o", "json"])).stdout, `live ${resource}`); // NOSONAR
-    if (!isSubset(wanted, live)) fail("E_PROBE_DEPLOY_READBACK", `live ${resource} differs from the rendered ${resource}`);
+    // NetworkPolicy는 격리 경계라 부분 일치로는 부족하다: 빈 podSelector({})는 어떤 selector의 부분 집합이기도 하므로 spec은 양방향으로 대조한다.
+    const matches = isSubset(wanted, live) && (resource !== "networkpolicy" || isSubset(live.spec, wanted.spec));
+    if (!matches) fail("E_PROBE_DEPLOY_READBACK", `live ${resource} ${name} differs from the rendered ${resource}`);
   }
   return { kubernetesMutationCount: applied.length };
 }
@@ -178,32 +201,29 @@ async function collect({ kubectl, output }) {
     phases[phase] = (phases[phase] ?? 0) + 1;
   }
   const logs = (await kubectl(["logs", "--namespace", NAMESPACE, "-l", selector, "--tail=-1", "--prefix=false"])).stdout;
-  const lines = logs.split("\n").filter((line) => line !== "");
-  const observed = [];
-  for (const line of lines) {
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      fail("E_PROBE_COLLECT_FORMAT", "a pod log line is not JSON");
-    }
-    if (record?.schema !== RECORD_SCHEMA || typeof record.observedAt !== "string") fail("E_PROBE_COLLECT_FORMAT", `a pod log line is not a ${RECORD_SCHEMA} record`);
-    observed.push(record.observedAt);
+  // 공개 저장소 artifact로 나가므로 모든 줄을 RECORD_KEYS 기준으로 검증하고, 원문이 아니라 다시 직렬화한 줄만 쓴다.
+  let records;
+  try {
+    records = parseRecordLines(logs);
+  } catch (error) {
+    fail("E_PROBE_COLLECT_FORMAT", String(error.message).replace(/^PROBE_RECORD_INVALID: /u, ""));
   }
-  writeFileSync(output, lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+  writeFileSync(output, records.map((record) => `${JSON.stringify(record)}\n`).join(""));
+  const observed = records.map(({ observedAt }) => observedAt);
   observed.sort((left, right) => left.localeCompare(right));
-  return { kubernetesMutationCount: 0, collected: { pods: pods.length, podPhases: phases, records: lines.length, firstObservedAt: observed[0] ?? null, lastObservedAt: observed.at(-1) ?? null } };
+  return { kubernetesMutationCount: 0, collected: { pods: pods.length, podPhases: phases, records: records.length, firstObservedAt: observed[0] ?? null, lastObservedAt: observed.at(-1) ?? null } };
 }
 
 async function remove({ kubectl }) {
-  await kubectl(["delete", "cronjob", OBJECT_NAMES.cronJob, "--namespace", NAMESPACE, "--ignore-not-found=false"]);
-  await kubectl(["delete", "configmap", OBJECT_NAMES.configMap, "--namespace", NAMESPACE, "--ignore-not-found=false"]);
+  await kubectl(["delete", "cronjob", OBJECT_NAMES.cronJob, "--namespace", NAMESPACE, "--ignore-not-found=true"]);
+  await kubectl(["delete", "configmap", OBJECT_NAMES.configMap, "--namespace", NAMESPACE, "--ignore-not-found=true"]);
   return { kubernetesMutationCount: 2 };
 }
 
 export async function deploySourceReachabilityProbe({ mode, output = null, commandRunner = runCommand } = {}) {
   if (!MODES.includes(mode) || typeof commandRunner !== "function") fail("E_PROBE_DEPLOY_USAGE", `mode must be one of ${MODES.join(", ")}`);
-  const rendered = renderSourceReachabilityProbe({ scriptBytes: readProbeScript() });
+  const scriptBytes = readProbeScript();
+  const rendered = renderSourceReachabilityProbe({ scriptBytes });
   const kubectl = makeKubectl(commandRunner);
   const outcome = {
     PREVIEW: async () => ({ kubernetesMutationCount: 0 }),
@@ -218,6 +238,7 @@ export async function deploySourceReachabilityProbe({ mode, output = null, comma
     names: rendered.names,
     image: RUNTIME.image,
     schedule: SCHEDULE.cron,
+    scriptSha256: probeScriptSha256(scriptBytes),
     targets: PROBE_TARGETS.map(({ id, host, port }) => ({ id, host, port })),
     ...(await outcome()),
   };

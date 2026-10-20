@@ -10,16 +10,16 @@
 // 이 검증은 도구 수준이며, 관리자 권한(sudo k3s kubectl)을 가진 runner가 임의 삭제를 할 수 있다는 사실 자체는 기존 journey 활성화와 같다.
 // 실패는 숨기지 않는다: 자동 rollback도, 이전 값으로 대체도 없다. secret 값은 create의 stdin으로만 가고 출력·인자·로그에 남지 않는다.
 import { createHash, createPrivateKey } from "node:crypto";
-import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import { createAppJwt, verifyAppAccess } from "../ops/data-workflow-scheduler.mjs";
+import { runCommand } from "./lib/process.mjs";
+import { isSubset } from "./lib/subset.mjs";
 import { readSchedulerContract, readSchedulerScript, renderDataWorkflowScheduler } from "./render-data-workflow-scheduler.mjs";
 
 const NAMESPACE = "easysubway-journey";
 const DEPLOYER = "system:serviceaccount:easysubway-journey:data-scheduler-deployer";
 const MODES = Object.freeze(["PREVIEW", "DEPLOY"]);
-const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const OWNER_LABEL = "data-workflow-scheduler";
 const SCHEDULER_OBJECT_NAME = /^data-workflow-scheduler-(?:secret|config)-[0-9a-f]{20}$/u;
 const PREVIEW_SECRET_IDENTITY = `sha256:${"0".repeat(64)}`;
@@ -58,15 +58,6 @@ function referencedNames(cronJob) {
   const volumes = cronJob?.spec?.jobTemplate?.spec?.template?.spec?.volumes;
   const volume = (name) => (Array.isArray(volumes) ? volumes.find((item) => item.name === name) : undefined);
   return { secret: volume("dispatch-app")?.secret?.secretName, configMap: volume("scheduler")?.configMap?.name };
-}
-
-/** expected의 모든 필드가 actual에 같은 값으로 있으면 참이다(클러스터가 채운 기본값 등 actual의 추가 필드는 허용). */
-export function isSubset(expected, actual) {
-  if (Array.isArray(expected)) return Array.isArray(actual) && expected.length === actual.length && expected.every((item, index) => isSubset(item, actual[index]));
-  if (expected !== null && typeof expected === "object") {
-    return actual !== null && typeof actual === "object" && Object.keys(expected).every((key) => isSubset(expected[key], actual[key]));
-  }
-  return expected === actual;
 }
 
 export async function deployDataWorkflowScheduler({
@@ -185,46 +176,6 @@ export async function deployDataWorkflowScheduler({
     pruned.push(`${resource}/${oldName}`);
   }
   return result(rendered, { kubernetesMutationCount: mutations, pruned });
-}
-
-class HostCommandError extends Error {}
-
-// 자식에는 PATH만 넘긴다: 이 프로세스 환경의 App key·client id가 sudo·kubectl로 상속되지 않는다.
-export function runCommand(command, args, { input, timeoutMs = 120_000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: { PATH: SAFE_PATH }, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
-    const stdout = [];
-    const stderr = [];
-    let size = 0;
-    let settled = false;
-    const finish = (callback) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      callback();
-    };
-    const collect = (target) => (chunk) => {
-      size += chunk.length;
-      if (size > 1024 * 1024) {
-        child.kill("SIGTERM");
-        finish(() => reject(new HostCommandError("host command output exceeded the limit")));
-        return;
-      }
-      target.push(chunk);
-    };
-    child.stdout.on("data", collect(stdout));
-    child.stderr.on("data", collect(stderr));
-    child.once("error", (error) => finish(() => reject(error)));
-    child.once("close", (code) => finish(() => {
-      if (code === 0) resolve({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
-      else reject(new HostCommandError(`host command failed (${code}): ${Buffer.concat(stderr).toString("utf8").slice(0, 1000)}`));
-    }));
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish(() => reject(new HostCommandError("host command timed out")));
-    }, timeoutMs);
-    if (input) child.stdin.end(input);
-  });
 }
 
 async function main(argv) {

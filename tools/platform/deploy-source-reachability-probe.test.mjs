@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -14,7 +15,14 @@ const withDefaults = (object) => {
   if (live.kind === "CronJob") live.spec.jobTemplate.spec.template.spec.dnsPolicy = "ClusterFirst";
   return live;
 };
-const liveByResource = { configmap: expected.objects.configMap, serviceaccount: expected.objects.serviceAccount, networkpolicy: expected.objects.networkPolicy, cronjob: expected.objects.cronJob };
+// ServiceAccount와 CronJob은 이름이 같아 종류와 이름을 함께 키로 쓴다.
+const liveByName = {
+  [`configmap/${OBJECT_NAMES.configMap}`]: expected.objects.configMap,
+  [`serviceaccount/${OBJECT_NAMES.serviceAccount}`]: expected.objects.serviceAccount,
+  [`networkpolicy/${OBJECT_NAMES.networkPolicy}`]: expected.objects.networkPolicy,
+  [`networkpolicy/${OBJECT_NAMES.defaultDenyPolicy}`]: expected.objects.defaultDenyPolicy,
+  [`cronjob/${OBJECT_NAMES.cronJob}`]: expected.objects.cronJob,
+};
 
 function fakeCluster({ bootstrapped = true, live = {}, pods = [], logs = "", failOn = null } = {}) {
   const calls = [];
@@ -23,10 +31,10 @@ function fakeCluster({ bootstrapped = true, live = {}, pods = [], logs = "", fai
     assert.equal(command, "sudo");
     assert.deepEqual(args.slice(0, 4), ["--non-interactive", "k3s", "kubectl", `--as=${DEPLOYER}`], "모든 호출은 deployer 신원이다");
     const [verb, kind] = args.slice(4);
-    if (failOn === verb) throw new Error(`host command failed (1): ${verb} refused`);
+    if (failOn === verb || failOn === `${verb}:${args[6]}`) throw new Error(`host command failed (1): ${verb} refused`);
     if (verb === "get" && kind === "cronjob" && args.includes("--ignore-not-found")) return { stdout: bootstrapped ? "cronjob.batch/source-reachability-probe\n" : "", stderr: "" };
     if (verb === "get" && kind === "pods") return { stdout: JSON.stringify({ items: pods }), stderr: "" };
-    if (verb === "get") return { stdout: JSON.stringify(live[kind] ?? withDefaults(liveByResource[kind])), stderr: "" };
+    if (verb === "get") return { stdout: JSON.stringify(live[`${kind}/${args[6]}`] ?? withDefaults(liveByName[`${kind}/${args[6]}`])), stderr: "" };
     if (verb === "logs") return { stdout: logs, stderr: "" };
     if (verb === "apply" || verb === "delete") return { stdout: "", stderr: "" };
     return assert.fail(`unexpected kubectl verb ${verb}`);
@@ -34,7 +42,9 @@ function fakeCluster({ bootstrapped = true, live = {}, pods = [], logs = "", fai
   return { calls, commandRunner };
 }
 const verbs = (cluster) => cluster.calls.map(({ args }) => (["get", "delete"].includes(args[4]) ? args.slice(4, 6) : args.slice(4, 5)).join(":"));
-const record = (observedAt, extra = {}) => JSON.stringify({ schema: "SOURCE_REACHABILITY_PROBE_V1", observedAt, vantage: "oci-seoul-k3s", target: "kric-open-api", ok: true, ...extra });
+const recordObject = (observedAt, extra = {}) => ({ schema: "SOURCE_REACHABILITY_PROBE_V1", observedAt, vantage: "oci-seoul-k3s", round: 1, target: "kric-open-api", host: "openapi.kric.go.kr", port: 443, ok: true, httpStatus: 200, dnsMs: 1, connectMs: 2, tlsMs: 3, firstByteMs: 4, totalMs: 10, failedStage: null, errorCode: null, ...extra });
+const record = (observedAt, extra = {}) => JSON.stringify(recordObject(observedAt, extra));
+const failedExtra = { ok: false, httpStatus: null, tlsMs: null, firstByteMs: null, failedStage: "connect", errorCode: "ETIMEDOUT" };
 
 test("PREVIEW는 클러스터를 건드리지 않고 이름·측정 대상만 돌려준다", async () => {
   const cluster = fakeCluster();
@@ -50,10 +60,12 @@ test("PREVIEW는 클러스터를 건드리지 않고 이름·측정 대상만 �
 test("DEPLOY는 고정 이름 객체를 한 번 apply하고 네 객체를 읽어 렌더와 대조한다", async () => {
   const cluster = fakeCluster();
   const result = await deploySourceReachabilityProbe({ mode: "DEPLOY", commandRunner: cluster.commandRunner });
-  assert.deepEqual(verbs(cluster), ["get:cronjob", "apply", "get:configmap", "get:serviceaccount", "get:networkpolicy", "get:cronjob"]);
+  assert.deepEqual(verbs(cluster), ["get:cronjob", "apply", "get:configmap", "get:serviceaccount", "get:networkpolicy", "get:networkpolicy", "get:cronjob"]);
   const applied = JSON.parse(cluster.calls[1].input);
-  assert.deepEqual(applied.items, [expected.objects.configMap, expected.objects.serviceAccount, expected.objects.networkPolicy, expected.objects.cronJob]);
-  assert.equal(result.kubernetesMutationCount, 4);
+  assert.deepEqual(applied.items, [expected.objects.configMap, expected.objects.serviceAccount, expected.objects.cronJob], "NetworkPolicy는 deployer가 바꾸지 않는다(관리자 bootstrap 전용)");
+  assert.deepEqual(cluster.calls.filter(({ args }) => args[5] === "networkpolicy").map(({ args }) => args[6]), [OBJECT_NAMES.networkPolicy, OBJECT_NAMES.defaultDenyPolicy]);
+  assert.equal(result.kubernetesMutationCount, 3);
+  assert.equal(result.scriptSha256, createHash("sha256").update(readFileSync(new URL("../ops/source-reachability-probe.mjs", import.meta.url))).digest("hex"));
   assert.equal(JSON.stringify(cluster.calls).toLowerCase().includes("secret"), false);
 });
 
@@ -66,8 +78,19 @@ test("DEPLOY는 관리자 bootstrap이 없으면 만들지 않고 멈춘다", as
 test("DEPLOY는 적용한 객체가 렌더와 다르면 읽기 대조 실패로 끝낸다", async () => {
   const drifted = structuredClone(expected.objects.cronJob);
   drifted.spec.suspend = true;
-  const cluster = fakeCluster({ live: { cronjob: drifted } });
+  const cluster = fakeCluster({ live: { [`cronjob/${OBJECT_NAMES.cronJob}`]: drifted } });
   await assert.rejects(deploySourceReachabilityProbe({ mode: "DEPLOY", commandRunner: cluster.commandRunner }), { code: "E_PROBE_DEPLOY_READBACK" });
+});
+
+test("DEPLOY는 관리자가 적용한 NetworkPolicy가 렌더와 다르면(허용 규칙이든 default-deny든) 읽기 대조 실패로 끝낸다", async () => {
+  const widened = structuredClone(expected.objects.networkPolicy);
+  widened.spec.egress[1].to[0].ipBlock.except = [];
+  const opened = structuredClone(expected.objects.defaultDenyPolicy);
+  opened.spec.podSelector = { matchLabels: { "app.kubernetes.io/name": "source-reachability-probe" } };
+  for (const live of [{ [`networkpolicy/${OBJECT_NAMES.networkPolicy}`]: widened }, { [`networkpolicy/${OBJECT_NAMES.defaultDenyPolicy}`]: opened }]) {
+    const cluster = fakeCluster({ live });
+    await assert.rejects(deploySourceReachabilityProbe({ mode: "DEPLOY", commandRunner: cluster.commandRunner }), { code: "E_PROBE_DEPLOY_READBACK" });
+  }
 });
 
 test("kubectl 실패는 코드와 함께 그대로 드러나고 이후 호출을 하지 않는다", async () => {
@@ -76,15 +99,16 @@ test("kubectl 실패는 코드와 함께 그대로 드러나고 이후 호출을
   assert.deepEqual(verbs(cluster), ["get:cronjob", "apply"]);
 });
 
-test("COLLECT는 Job 파드 로그의 JSONL을 검증해 파일로 쓰고 파드 단계와 기간을 보고한다", async () => {
+test("COLLECT는 Job 파드 로그의 JSONL을 검증해 다시 직렬화한 줄만 파일로 쓰고 파드 단계와 기간을 보고한다", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "probe-collect-"));
   try {
     const output = path.join(directory, "seoul.jsonl");
-    const logs = `${record("2026-10-21T08:10:00.000Z")}\n${record("2026-10-21T08:00:00.000Z", { ok: false })}\n`;
+    const shuffled = JSON.stringify(Object.fromEntries(Object.entries(recordObject("2026-10-21T08:10:00.000Z")).reverse()));
+    const logs = `${shuffled}\n${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`;
     const pods = [{ status: { phase: "Succeeded" } }, { status: { phase: "Succeeded" } }, { status: { phase: "Failed" } }];
     const cluster = fakeCluster({ pods, logs });
     const result = await deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner });
-    assert.equal(readFileSync(output, "utf8"), logs);
+    assert.equal(readFileSync(output, "utf8"), `${record("2026-10-21T08:10:00.000Z")}\n${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`, "원문이 아니라 RECORD_KEYS 순서로 다시 만든 줄이다");
     assert.deepEqual(result.collected, { pods: 3, podPhases: { Succeeded: 2, Failed: 1 }, records: 2, firstObservedAt: "2026-10-21T08:00:00.000Z", lastObservedAt: "2026-10-21T08:10:00.000Z" });
     assert.equal(result.kubernetesMutationCount, 0);
     assert.deepEqual(verbs(cluster), ["get:pods", "logs"]);
@@ -94,13 +118,23 @@ test("COLLECT는 Job 파드 로그의 JSONL을 검증해 파일로 쓰고 파드
   }
 });
 
-test("COLLECT는 형식이 다른 줄을 버리지 않고 실패하며 파일을 쓰지 않는다", async () => {
+test("COLLECT는 형식이 다른 줄(JSON 아님·키 추가·타입 오류·값 범위 오류·알 수 없는 대상)을 버리지 않고 실패하며 파일을 쓰지 않는다", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "probe-collect-"));
   try {
     const output = path.join(directory, "seoul.jsonl");
-    for (const logs of ["not json\n", `${JSON.stringify({ schema: "OTHER", observedAt: "2026-10-21T08:00:00.000Z" })}\n`]) {
+    const at = "2026-10-21T08:00:00.000Z";
+    const bad = [
+      "not json\n",
+      `${JSON.stringify({ schema: "OTHER", observedAt: at })}\n`,
+      `${record(at)}\n${JSON.stringify({ ...recordObject(at), note: "any extra key leaks into a public artifact" })}\n`,
+      `${record(at, { httpStatus: "200" })}\n`,
+      `${record(at, { dnsMs: -5 })}\n`,
+      `${record(at, { host: "internal.example", target: "kric-open-api" })}\n`,
+      `${record(at, { errorCode: "secret token value" , ok: false, failedStage: "dns", httpStatus: null })}\n`,
+    ];
+    for (const logs of bad) {
       const cluster = fakeCluster({ logs });
-      await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner }), { code: "E_PROBE_COLLECT_FORMAT" });
+      await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner }), { code: "E_PROBE_COLLECT_FORMAT" }, logs);
       assert.equal(existsSync(output), false);
     }
     await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", commandRunner: fakeCluster().commandRunner }), { code: "E_PROBE_DEPLOY_USAGE" });
@@ -109,12 +143,24 @@ test("COLLECT는 형식이 다른 줄을 버리지 않고 실패하며 파일을
   }
 });
 
-test("REMOVE는 CronJob과 ConfigMap만 지운다", async () => {
+test("REMOVE는 CronJob과 ConfigMap만 지우고, 이미 없는 객체는 오류로 보지 않는다(멱등)", async () => {
   const cluster = fakeCluster();
   const result = await deploySourceReachabilityProbe({ mode: "REMOVE", commandRunner: cluster.commandRunner });
   assert.deepEqual(verbs(cluster), ["delete:cronjob", "delete:configmap"]);
   assert.deepEqual(cluster.calls.map(({ args }) => args[6]), [OBJECT_NAMES.cronJob, OBJECT_NAMES.configMap]);
+  assert.ok(cluster.calls.every(({ args }) => args.includes("--ignore-not-found=true") && !args.includes("--ignore-not-found=false")));
   assert.equal(result.kubernetesMutationCount, 2);
+});
+
+test("REMOVE는 ConfigMap 삭제가 실패해 중단된 뒤에도 다시 실행해 끝낼 수 있다", async () => {
+  const partial = fakeCluster({ failOn: `delete:${OBJECT_NAMES.configMap}` });
+  await assert.rejects(deploySourceReachabilityProbe({ mode: "REMOVE", commandRunner: partial.commandRunner }), { code: "E_PROBE_DEPLOY_KUBECTL" });
+  assert.deepEqual(verbs(partial), ["delete:cronjob", "delete:configmap"]);
+  // 두 번째 실행: CronJob은 이미 없다. kubectl이 --ignore-not-found=true로 통과시키므로 ConfigMap 삭제까지 도달한다.
+  const rerun = fakeCluster();
+  const result = await deploySourceReachabilityProbe({ mode: "REMOVE", commandRunner: rerun.commandRunner });
+  assert.equal(result.kubernetesMutationCount, 2);
+  assert.deepEqual(rerun.calls[0].args.slice(4), ["delete", "cronjob", OBJECT_NAMES.cronJob, "--namespace", NAMESPACE, "--ignore-not-found=true"]);
 });
 
 test("알 수 없는 모드는 거부한다", async () => {
