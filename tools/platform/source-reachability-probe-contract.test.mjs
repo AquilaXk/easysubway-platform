@@ -66,7 +66,11 @@ test("NetworkPolicy는 ingress 전부 차단, kube-system DNS와 측정 대상 �
   assert.deepEqual(spec.policyTypes, ["Ingress", "Egress"]);
   assert.equal(spec.ingress, undefined);
   assert.equal(spec.podSelector.matchLabels["app.kubernetes.io/name"], "source-reachability-probe");
-  assert.deepEqual(spec.egress[0], { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] });
+  assert.deepEqual(spec.egress[0], {
+    to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } }, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } }],
+    ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }],
+  }, "DNS는 kube-system의 CoreDNS(k8s-app=kube-dns) 파드로만 간다. 두 selector가 한 항목 안에 있어 AND다");
+  assert.equal(spec.egress[0].to.length, 1, "namespace 전체나 다른 파드로 DNS 허용이 번지지 않는다");
   assert.deepEqual(spec.egress[1].to, [{ ipBlock: { cidr: "0.0.0.0/0", except: ["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"] } }]);
   assert.deepEqual(spec.egress[1].ports, [80, 443, 8088].map((port) => ({ protocol: "TCP", port })));
   assert.deepEqual([...new Set(PROBE_TARGETS.map(({ port }) => port))].sort((a, b) => a - b), [80, 443, 8088], "허용 포트는 측정 대상 포트와 같다");

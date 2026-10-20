@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { PROBE_TARGETS } from "../ops/source-reachability-probe.mjs";
 import { DEPLOYER, NAMESPACE, OBJECT_NAMES, deploySourceReachabilityProbe, readProbeScript, renderSourceReachabilityProbe } from "./deploy-source-reachability-probe.mjs";
 
 // hub easysubway#3036: PREVIEW는 렌더만, DEPLOY는 deployer 신원으로 고정 이름 객체를 apply·대조, COLLECT는 Job 파드 로그를 검증해 파일로, REMOVE는 측정 종료 정리.
@@ -24,18 +25,27 @@ const liveByName = {
   [`cronjob/${OBJECT_NAMES.cronJob}`]: expected.objects.cronJob,
 };
 
-function fakeCluster({ bootstrapped = true, live = {}, pods = [], logs = "", failOn = null } = {}) {
+const COMMAND_OUTPUT_LIMIT = 1024 * 1024; // lib/process.mjs의 runCommand 출력 한도와 같다
+const podOf = (name, phase = "Succeeded") => ({ metadata: { name }, status: { phase } });
+
+/** podLogs는 파드 이름 → 그 파드의 로그다. 라벨 selector로 읽으면 kubectl처럼 모든 파드 로그를 이어 붙여 돌려준다. */
+function fakeCluster({ bootstrapped = true, live = {}, pods = [], podLogs = {}, failOn = null } = {}) {
   const calls = [];
   const commandRunner = async (command, args, { input } = {}) => {
     calls.push({ command, args, input: input === undefined ? undefined : input.toString("utf8") });
     assert.equal(command, "sudo");
     assert.deepEqual(args.slice(0, 4), ["--non-interactive", "k3s", "kubectl", `--as=${DEPLOYER}`], "모든 호출은 deployer 신원이다");
     const [verb, kind] = args.slice(4);
-    if (failOn === verb || failOn === `${verb}:${args[6]}`) throw new Error(`host command failed (1): ${verb} refused`);
+    if (failOn === verb || failOn === `${verb}:${verb === "logs" ? args[5] : args[6]}`) throw new Error(`host command failed (1): ${verb} refused`);
     if (verb === "get" && kind === "cronjob" && args.includes("--ignore-not-found")) return { stdout: bootstrapped ? "cronjob.batch/source-reachability-probe\n" : "", stderr: "" };
     if (verb === "get" && kind === "pods") return { stdout: JSON.stringify({ items: pods }), stderr: "" };
     if (verb === "get") return { stdout: JSON.stringify(live[`${kind}/${args[6]}`] ?? withDefaults(liveByName[`${kind}/${args[6]}`])), stderr: "" };
-    if (verb === "logs") return { stdout: logs, stderr: "" };
+    if (verb === "logs") {
+      const named = args[5].startsWith("-") ? null : args[5];
+      const stdout = named === null ? Object.values(podLogs).join("") : (podLogs[named] ?? "");
+      if (Buffer.byteLength(stdout) > COMMAND_OUTPUT_LIMIT) throw new Error("host command output exceeded the limit");
+      return { stdout, stderr: "" };
+    }
     if (verb === "apply" || verb === "delete") return { stdout: "", stderr: "" };
     return assert.fail(`unexpected kubectl verb ${verb}`);
   };
@@ -104,15 +114,16 @@ test("COLLECT는 Job 파드 로그의 JSONL을 검증해 다시 직렬화한 줄
   try {
     const output = path.join(directory, "seoul.jsonl");
     const shuffled = JSON.stringify(Object.fromEntries(Object.entries(recordObject("2026-10-21T08:10:00.000Z")).reverse()));
-    const logs = `${shuffled}\n${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`;
-    const pods = [{ status: { phase: "Succeeded" } }, { status: { phase: "Succeeded" } }, { status: { phase: "Failed" } }];
-    const cluster = fakeCluster({ pods, logs });
+    const podLogs = { "pod-a": `${shuffled}\n`, "pod-b": `${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`, "pod-c": "" };
+    const pods = [podOf("pod-a"), podOf("pod-b"), podOf("pod-c", "Failed"), podOf("pod-d", "Running")];
+    const cluster = fakeCluster({ pods, podLogs });
     const result = await deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner });
     assert.equal(readFileSync(output, "utf8"), `${record("2026-10-21T08:10:00.000Z")}\n${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`, "원문이 아니라 RECORD_KEYS 순서로 다시 만든 줄이다");
-    assert.deepEqual(result.collected, { pods: 3, podPhases: { Succeeded: 2, Failed: 1 }, records: 2, firstObservedAt: "2026-10-21T08:00:00.000Z", lastObservedAt: "2026-10-21T08:10:00.000Z" });
+    assert.deepEqual(result.collected, { pods: 4, podsRead: 3, podPhases: { Succeeded: 2, Failed: 1, Running: 1 }, records: 2, firstObservedAt: "2026-10-21T08:00:00.000Z", lastObservedAt: "2026-10-21T08:10:00.000Z" });
     assert.equal(result.kubernetesMutationCount, 0);
-    assert.deepEqual(verbs(cluster), ["get:pods", "logs"]);
-    assert.ok(cluster.calls[1].args.includes("--tail=-1"), "selector 로그는 기본 10줄로 잘리므로 전체를 읽는다");
+    assert.deepEqual(verbs(cluster), ["get:pods", "logs", "logs", "logs"], "끝난 파드(Succeeded·Failed)만 파드별로 읽고 실행 중인 파드는 다음 수집으로 미룬다");
+    assert.deepEqual(cluster.calls.slice(1).map(({ args }) => args[5]), ["pod-a", "pod-b", "pod-c"]);
+    assert.ok(cluster.calls.slice(1).every(({ args }) => args.includes("--tail=-1") && !args.includes("-l")), "파드마다 전체 로그를 읽고 selector로 한꺼번에 읽지 않는다");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -133,11 +144,53 @@ test("COLLECT는 형식이 다른 줄(JSON 아님·키 추가·타입 오류·�
       `${record(at, { errorCode: "secret token value" , ok: false, failedStage: "dns", httpStatus: null })}\n`,
     ];
     for (const logs of bad) {
-      const cluster = fakeCluster({ logs });
+      const cluster = fakeCluster({ pods: [podOf("pod-a")], podLogs: { "pod-a": logs } });
       await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner }), { code: "E_PROBE_COLLECT_FORMAT" }, logs);
       assert.equal(existsSync(output), false);
     }
     await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", commandRunner: fakeCluster().commandRunner }), { code: "E_PROBE_DEPLOY_USAGE" });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// 실제 측정 기록처럼 소수점 이하 자릿수가 긴 값으로 파드 하나(10개 대상 한 라운드)의 로그를 만든다.
+const realisticPodLog = (podIndex) => `${PROBE_TARGETS.map((target, index) => JSON.stringify({
+  ...recordObject(new Date(Date.UTC(2026, 9, 21, 0, 0, 0) + podIndex * 600_000).toISOString(), { target: target.id, host: target.host, port: target.port, round: 1 }),
+  dnsMs: 12.345678901234 + index, connectMs: 31.2345678901234, tlsMs: 45.678901234567, firstByteMs: 123.456789012345, totalMs: 212.3456789012345,
+})).join("\n")}\n`;
+
+test("COLLECT는 파드 300개(약 50시간) 규모도 파드별로 읽어 출력 한도에 걸리지 않고 파일에 이어 쓴다", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "probe-collect-"));
+  try {
+    const output = path.join(directory, "seoul.jsonl");
+    const names = Array.from({ length: 300 }, (_, index) => `source-reachability-probe-${index}`);
+    const podLogs = Object.fromEntries(names.map((name, index) => [name, realisticPodLog(index)]));
+    assert.ok(Buffer.byteLength(Object.values(podLogs).join("")) > COMMAND_OUTPUT_LIMIT, "전제: 모든 로그를 한 번에 읽으면 출력 한도를 넘는 규모다");
+    const cluster = fakeCluster({ pods: names.map((name) => podOf(name)), podLogs });
+    const result = await deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner });
+    assert.equal(result.collected.records, 3000);
+    assert.equal(result.collected.podsRead, 300);
+    assert.equal(cluster.calls.filter(({ args }) => args[4] === "logs").length, 300);
+    const lines = readFileSync(output, "utf8").trim().split("\n");
+    assert.equal(lines.length, 3000);
+    assert.equal(result.collected.firstObservedAt, "2026-10-21T00:00:00.000Z");
+    assert.equal(result.collected.lastObservedAt, new Date(Date.UTC(2026, 9, 21, 0, 0, 0) + 299 * 600_000).toISOString());
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("COLLECT는 중간 파드의 로그가 어긋나면 이미 쓴 내용을 지우고 실패한다(공개 artifact에 부분 결과를 남기지 않는다)", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "probe-collect-"));
+  try {
+    const output = path.join(directory, "seoul.jsonl");
+    const cluster = fakeCluster({ pods: [podOf("pod-a"), podOf("pod-b")], podLogs: { "pod-a": `${record("2026-10-21T08:00:00.000Z")}\n`, "pod-b": "not json\n" } });
+    await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner }), { code: "E_PROBE_COLLECT_FORMAT" });
+    assert.equal(existsSync(output), false);
+    const failing = fakeCluster({ pods: [podOf("pod-a"), podOf("pod-b")], podLogs: { "pod-a": `${record("2026-10-21T08:00:00.000Z")}\n` }, failOn: "logs:pod-b" });
+    await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: failing.commandRunner }), { code: "E_PROBE_DEPLOY_KUBECTL" });
+    assert.equal(existsSync(output), false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
