@@ -11,7 +11,7 @@ import {
   FAILED_STAGES,
   PROBE_TARGETS,
   RECORD_KEYS,
-  findInvalidField,
+  findInvalidFields,
   main,
   parseArguments,
   parseRecordLines,
@@ -186,7 +186,7 @@ test("단계를 알 수 없는 오류는 dns로 가장하지 않고 unknown 단�
     assert.deepEqual([record.ok, record.failedStage, record.errorCode], [false, "unknown", "Error"]);
     assert.deepEqual([Number.isFinite(record.dnsMs), Number.isFinite(record.connectMs), record.tlsMs, record.firstByteMs], [true, true, null, null], "이미 잰 앞 단계 값은 남는다");
     assert.ok(FAILED_STAGES.includes("unknown"));
-    assert.equal(findInvalidField({ ...record, target: "kric-open-api", host: "openapi.kric.go.kr", port: 443 }), null, "unknown도 유효한 기록이다");
+    assert.deepEqual(findInvalidFields({ ...record, target: "kric-open-api", host: "openapi.kric.go.kr", port: 443 }), [], "unknown도 유효한 기록이다");
   } finally {
     await close(server);
   }
@@ -369,8 +369,8 @@ test("요약은 상태 코드 분포(2xx/3xx/4xx/5xx)를 보여 주고 실패 �
 
 test("기록 검증은 키·타입·범위·대상 일치·ok와 실패 필드의 일관성을 확인하고 재직렬화한다", () => {
   const good = summaryRecord("2026-10-21T00:00:00.000Z");
-  assert.equal(findInvalidField(good), null);
-  assert.equal(findInvalidField(failedRecord("2026-10-21T00:00:00.000Z")), null);
+  assert.deepEqual(findInvalidFields(good), []);
+  assert.deepEqual(findInvalidFields(failedRecord("2026-10-21T00:00:00.000Z")), []);
   const mutants = [
     ["keys", { extra: "x" }], ["schema", { schema: "OTHER" }], ["observedAt", { observedAt: "2026-10-21 00:00:00" }], ["vantage", { vantage: "Bad Label" }],
     ["round", { round: 0 }], ["round", { round: "1" }], ["target", { host: "evil.example" }], ["target", { port: 80 }], ["target", { target: "unknown" }], ["ok", { ok: "yes" }],
@@ -379,10 +379,10 @@ test("기록 검증은 키·타입·범위·대상 일치·ok와 실패 필드�
     ["errorCode", { errorCode: "x".repeat(65), ok: false, failedStage: "dns", httpStatus: null }],
     ["ok-consistency", { ok: false }], ["ok-consistency", { failedStage: "dns" }], ["ok-consistency", { httpStatus: null }],
   ];
-  for (const [field, overrides] of mutants) assert.equal(findInvalidField({ ...good, ...overrides }), field, JSON.stringify(overrides));
+  for (const [field, overrides] of mutants) assert.equal(findInvalidFields({ ...good, ...overrides })[0], field, JSON.stringify(overrides));
   const { schema: _omitted, ...withoutSchema } = good;
-  assert.equal(findInvalidField(withoutSchema), "keys");
-  for (const notRecord of [null, [], "text", 7]) assert.equal(findInvalidField(notRecord), "record");
+  assert.deepEqual(findInvalidFields(withoutSchema), ["keys"]);
+  for (const notRecord of [null, [], "text", 7]) assert.deepEqual(findInvalidFields(notRecord), ["record"]);
   const shuffled = Object.fromEntries(Object.entries(good).reverse());
   const [parsed] = parseRecordLines(`${JSON.stringify(shuffled)}\n\n`);
   assert.deepEqual(Object.keys(parsed), RECORD_KEYS, "RECORD_KEYS 순서로 다시 만든다");

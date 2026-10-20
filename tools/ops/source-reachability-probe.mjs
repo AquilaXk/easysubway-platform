@@ -28,7 +28,7 @@ const VANTAGE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
 const HTTP_STATUS_LINE = /^HTTP\/1\.[01] ([1-5]\d\d)[ \r\n]/u;
 const MAX_STATUS_LINE_BYTES = 256;
 const ISO_UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u;
-const ERROR_CODE = /^[A-Za-z0-9_]{1,64}$/u;
+const ERROR_CODE = /^\w{1,64}$/u;
 const STAGE_FIELDS = Object.freeze({ dns: "dnsMs", connect: "connectMs", tls: "tlsMs", "first-byte": "firstByteMs" });
 const STAGE_KEYS = Object.freeze(Object.values(STAGE_FIELDS));
 // 단계 이름이 없는 오류는 어느 단계의 것인지 알 수 없으므로 dns로 가장하지 않고 unknown으로 남긴다.
@@ -244,11 +244,11 @@ export async function main(argv, { targets = PROBE_TARGETS, write = (text) => pr
 
 const isNullableMs = (value) => value === null || (Number.isFinite(value) && value >= 0);
 
-/** 기록이 RECORD_KEYS와 정확히 같은 키·타입·값 범위이고 ok와 실패 필드가 서로 맞으면 null, 아니면 어긋난 필드 이름을 돌려준다. */
-export function findInvalidField(record) {
-  if (record === null || typeof record !== "object" || Array.isArray(record)) return "record";
+/** 기록이 RECORD_KEYS와 정확히 같은 키·타입·값 범위이고 ok와 실패 필드가 서로 맞으면 빈 배열, 아니면 어긋난 항목 이름 목록(항상 배열)을 돌려준다. */
+export function findInvalidFields(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return ["record"];
   const keys = Object.keys(record);
-  if (keys.length !== RECORD_KEYS.length || !RECORD_KEYS.every((key) => Object.hasOwn(record, key))) return "keys";
+  if (keys.length !== RECORD_KEYS.length || !RECORD_KEYS.every((key) => Object.hasOwn(record, key))) return ["keys"];
   const target = PROBE_TARGETS.find(({ id }) => id === record.target);
   const failed = record.failedStage !== null || record.errorCode !== null;
   const checks = [
@@ -265,7 +265,7 @@ export function findInvalidField(record) {
     ["errorCode", record.errorCode === null || (typeof record.errorCode === "string" && ERROR_CODE.test(record.errorCode))],
     ["ok-consistency", record.ok ? !failed && record.httpStatus !== null : record.failedStage !== null && record.errorCode !== null && record.httpStatus === null],
   ];
-  return checks.find(([, valid]) => !valid)?.[0] ?? null;
+  return checks.filter(([, valid]) => !valid).map(([name]) => name);
 }
 
 /** JSON Lines 텍스트를 검증해 RECORD_KEYS 순서로 다시 만든 기록 목록을 돌려준다(원문 줄을 그대로 믿지 않는다). */
@@ -277,8 +277,8 @@ export function parseRecordLines(text) {
     } catch {
       return fail("PROBE_RECORD_INVALID", `line ${index + 1} is not JSON`);
     }
-    const invalid = findInvalidField(record);
-    if (invalid !== null) fail("PROBE_RECORD_INVALID", `line ${index + 1}: invalid ${invalid}`);
+    const [invalid] = findInvalidFields(record);
+    if (invalid !== undefined) fail("PROBE_RECORD_INVALID", `line ${index + 1}: invalid ${invalid}`);
     return Object.fromEntries(RECORD_KEYS.map((key) => [key, record[key]]));
   });
 }
