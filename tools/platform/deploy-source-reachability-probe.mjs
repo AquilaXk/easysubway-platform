@@ -36,7 +36,8 @@ const RUNTIME = Object.freeze({
   image: "docker.io/library/node:24.19.0-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43",
   resources: { requests: { cpu: "20m", memory: "48Mi", "ephemeral-storage": "16Mi" }, limits: { cpu: "200m", memory: "128Mi", "ephemeral-storage": "64Mi" } },
 });
-const PRIVATE_CIDRS = Object.freeze(["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"]);
+// 공개 인터넷 egress에서 빼는 사설·링크로컬 대역이다(허용 목록이 아니라 차단 목록).
+const PRIVATE_CIDRS = Object.freeze(["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"]); // NOSONAR
 
 export const OBJECT_NAMES = Object.freeze({
   cronJob: NAME,
@@ -159,7 +160,8 @@ async function deploy({ kubectl, rendered }) {
     ["networkpolicy", OBJECT_NAMES.networkPolicy, rendered.objects.networkPolicy],
     ["cronjob", OBJECT_NAMES.cronJob, rendered.objects.cronJob],
   ]) {
-    const live = parseJson((await kubectl(["get", resource, name, "--namespace", NAMESPACE, "-o", "json"])).stdout, `live ${resource}`);
+    // 읽기 대조는 객체마다 순서대로 한다(첫 불일치에서 멈춘다).
+    const live = parseJson((await kubectl(["get", resource, name, "--namespace", NAMESPACE, "-o", "json"])).stdout, `live ${resource}`); // NOSONAR
     if (!isSubset(wanted, live)) fail("E_PROBE_DEPLOY_READBACK", `live ${resource} differs from the rendered ${resource}`);
   }
   return { kubernetesMutationCount: applied.length };
@@ -189,7 +191,7 @@ async function collect({ kubectl, output }) {
     observed.push(record.observedAt);
   }
   writeFileSync(output, lines.length === 0 ? "" : `${lines.join("\n")}\n`);
-  observed.sort();
+  observed.sort((left, right) => left.localeCompare(right));
   return { kubernetesMutationCount: 0, collected: { pods: pods.length, podPhases: phases, records: lines.length, firstObservedAt: observed[0] ?? null, lastObservedAt: observed.at(-1) ?? null } };
 }
 

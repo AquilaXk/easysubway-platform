@@ -177,9 +177,9 @@ export async function probeTarget(target, {
 /** 라운드마다 모든 대상을 측정해 기록한다. 대상은 서로 다른 호스트라 함께 재고, 기록은 대상 순서로 내보낸다. */
 export async function runRounds({ targets, rounds, intervalMs, vantage, probe = probeTarget, probeOptions = {}, sleep = (ms) => sleepFor(ms), emit }) {
   for (let round = 1; round <= rounds; round += 1) {
-    const records = await Promise.all(targets.map((target) => probe(target, { vantage, round, ...probeOptions })));
+    const records = await Promise.all(targets.map((target) => probe(target, { vantage, round, ...probeOptions }))); // NOSONAR -- 라운드는 호스트 부하를 줄이려고 의도적으로 순차다
     for (const record of records) emit(record);
-    if (round < rounds) await sleep(intervalMs);
+    if (round < rounds) await sleep(intervalMs); // NOSONAR -- 라운드 간격 대기다
   }
 }
 
