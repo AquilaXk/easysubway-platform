@@ -408,7 +408,11 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   )?.[1];
   assert.ok(reviewProgram, 'review state jq program must stay testable');
 
-  const fallbackBody =
+  const aquilaFallbackBody =
+    '**Actionable comments posted: 0**\n<!-- Review source: Aquila fallback; canonical visible structure: PR #1926 Review 4676157515 -->';
+  const aquilaUniversalBody =
+    '**Actionable comments posted: 0**\n<!-- Review source: Aquila Universal Review; engine: aquila-review -->';
+  const codexFallbackBody =
     '**Actionable comments posted: 0**\n<!-- Review source: Codex CLI fallback; canonical visible structure: PR #1926 Review 4676157515 -->';
   const review = (id, state, submittedAt, body = '', overrides = {}) => ({
     id,
@@ -466,7 +470,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   ]) {
     assert.notEqual(
       runReviewFilter([
-        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, { commit_id: 'previous-head' }),
+        review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, { commit_id: 'previous-head' }),
       ], comments),
       0,
     );
@@ -503,12 +507,20 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   );
   // 폴백 리뷰는 규약 양식의 제목줄과 provenance marker를 모두 가져야 한다.
   assert.equal(
-    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)]),
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaUniversalBody)]),
+    0,
+  );
+  assert.notEqual(
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', codexFallbackBody)]),
+    0,
+  );
+  assert.equal(
+    runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody)]),
     0,
   );
   assert.equal(
     runReviewFilter(
-      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody)],
+      [review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody)],
       [marker(), { body: 'x'.repeat(160 * 1024), user: { login: 'commenter' } }],
     ),
     0,
@@ -517,7 +529,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   // 신뢰되지 않는 author_association은 어떤 본문으로도 게이트를 통과하지 못한다.
   assert.notEqual(
     runReviewFilter([
-      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, {
         author_association: 'NONE',
       }),
     ]),
@@ -535,7 +547,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   // login, immutable id, Bot type 중 하나라도 다르면 NONE 리뷰는 신뢰하지 않는다.
   assert.notEqual(
     runReviewFilter([
-      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, {
         ...codeRabbit,
         user: { ...codeRabbit.user, type: 'User' },
       }),
@@ -553,7 +565,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   );
   assert.notEqual(
     runReviewFilter([
-      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, {
         ...codeRabbit,
         user: { ...codeRabbit.user, login: 'other-bot[bot]' },
       }),
@@ -562,7 +574,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   );
   assert.notEqual(
     runReviewFilter([
-      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, {
         ...codeRabbit,
         user: { ...codeRabbit.user, id: 1 },
       }),
@@ -590,7 +602,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
         commit_id: 'previous-head',
         user: { login: 'reviewer-one' },
       }),
-      review(2, 'COMMENTED', '2026-08-01T00:01:00Z', fallbackBody, {
+      review(2, 'COMMENTED', '2026-08-01T00:01:00Z', aquilaFallbackBody, {
         user: { login: 'reviewer-two' },
       }),
     ]),
@@ -618,7 +630,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   );
   assert.equal(
     runReviewFilter([
-      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, {
         commit_id: 'previous-head',
       }),
     ], exactMarker),
@@ -723,7 +735,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   // 신뢰 기준은 author_association 하나다.
   assert.equal(
     runReviewFilter([
-      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', fallbackBody, {
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', aquilaFallbackBody, {
         user: { login: 'pr-author' },
       }),
     ]),
