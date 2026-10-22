@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${EASYSUBWAY_ENV_FILE:-${ROOT_DIR}/.env.example}"
 COMPOSE_FILE="${EASYSUBWAY_COMPOSE_FILE:-${ROOT_DIR}/infra/docker-compose.yml}"
-BACKUP_DIR="${1:-${EASYSUBWAY_DATA_SOURCE_ARCHIVE_DIR:-${ROOT_DIR}/.codex/backups/data-sources}}"
+BACKUP_DIR="${1:-${EASYSUBWAY_DATA_SOURCE_ARCHIVE_DIR:-${ROOT_DIR}/.evidence/backups/data-sources}}"
 
 umask 077
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
