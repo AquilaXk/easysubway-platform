@@ -13,6 +13,9 @@ const workflowUrl = new URL(
 const ciWorkflowUrl = new URL('../../.github/workflows/ci.yml', import.meta.url);
 const workflowsDirUrl = new URL('../../.github/workflows/', import.meta.url);
 
+const COORDINATE_IF =
+  "if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.queue-probe.outputs.labeled == 'true') && (github.event_name != 'pull_request_target' || github.event.label.name == 'automerge') }}";
+
 const readWorkflow = () => readFile(workflowUrl, 'utf8');
 const MARKER_SYNC_RE =
   /# authorization-marker-sync-begin\n([\s\S]*?)\n\s+# authorization-marker-sync-end/;
@@ -128,7 +131,7 @@ test('automerge label 이벤트만 exact-head frozen discovery marker를 발행�
     "EVENT_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}",
     "EVENT_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}",
     "EVENT_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}",
-    "(github.event_name != 'pull_request_target' || github.event.label.name == 'automerge')",
+    COORDINATE_IF,
     'pull_request_target:\n    types: [labeled]',
   ]) {
     assert.ok(workflow.includes(contract), `missing label authorization contract: ${contract}`);
@@ -2917,6 +2920,9 @@ const runQueueProbe = (workflow, { listOutput = '0', listFails = false } = {}) =
   assert.ok(job, 'queue-probe job must precede coordinate');
   const script = job.match(/\n {8}run: \|\n([\s\S]*)$/)?.[1];
   assert.ok(script, 'queue-probe must have one run block');
+  for (const line of script.split('\n').filter((l) => l.trim() !== '')) {
+    assert.ok(line.startsWith(' '.repeat(10)), `probe run line escapes the YAML block scalar: ${line.slice(0, 48)}`);
+  }
   const dir = mkdtempSync(join(tmpdir(), 'automerge-probe-'));
   const log = join(dir, 'gh.log');
   const output = join(dir, 'output');
@@ -2963,7 +2969,7 @@ test('schedule tick이 이벤트 없이도 큐를 다시 판정하고 빈 큐에
   assert.equal(idle.status, 0, idle.stderr);
   assert.equal(idle.output, 'labeled=false\n');
   assert.equal(idle.calls.length, 1);
-  assert.match(idle.calls[0], /^gh pr list --repo o\/r --base main --state open --label automerge --limit 1 /);
+  assert.match(idle.calls[0], /^gh pr list --repo o\/r --base main --state open --label automerge --draft=false --limit 1 /);
 
   assert.equal(runQueueProbe(workflow, { listOutput: '1' }).output, 'labeled=true\n');
 
@@ -2979,13 +2985,9 @@ test('coordinate는 schedule에서 라벨 PR이 있을 때만 돌고 동시성 �
   const head = workflow.match(COORDINATE_HEAD_RE)?.[1] ?? '';
 
   assert.match(head, /\n {4}needs: queue-probe\n/);
-  for (const clause of [
-    '!cancelled()',
-    "(github.event_name != 'schedule' || needs.queue-probe.outputs.labeled == 'true')",
-    "(github.event_name != 'pull_request_target' || github.event.label.name == 'automerge')",
-  ]) {
-    assert.ok(head.includes(clause), `coordinate gate missing: ${clause}`);
-  }
+  // 이 if를 이벤트별로 평가해 볼 수 있는 평가기가 이 저장소에 없다. 첫 &&가 ||로 바뀌면 probe가 실패하거나 라벨 PR이 없다고 답해도
+  // schedule tick이 coordinate를 띄우므로, 식 전체를 한 글자도 다르지 않게 고정한다.
+  assert.equal(head.match(/\n {4}(if: .+)\n/)?.[1], COORDINATE_IF, 'coordinate if must match the pinned expression');
   // 빈 큐 tick이 그룹에 들어가면 대기 중인 라벨 run을 밀어낼 수 있다. 그룹은 coordinate job에만 둔다.
   assert.match(head, /\n {4}concurrency:\n {6}group: automerge-queue\n {6}cancel-in-progress: false\n/);
   assert.doesNotMatch(workflow, /^concurrency:/m);

@@ -43,7 +43,7 @@ on:
 permissions: {}
 
 jobs:
-  # schedule tick은 라벨 PR이 있을 때만 coordinate를 띄운다. 빈 큐 tick은 checkout 없이 목록 조회 한 번으로 끝난다.
+  # schedule tick은 draft가 아닌 라벨 PR이 있을 때만 coordinate를 띄운다(coordinate도 draft는 처리하지 않는다). 빈 큐 tick은 checkout 없이 목록 조회 한 번으로 끝난다.
   queue-probe:
     name: Automerge queue probe
     if: github.event_name == 'schedule'
@@ -61,7 +61,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          count="$(gh pr list --repo "${GITHUB_REPOSITORY}" --base main --state open --label automerge --limit 1 --json number --jq 'length')"
+          count="$(gh pr list --repo "${GITHUB_REPOSITORY}" --base main --state open --label automerge --draft=false --limit 1 --json number --jq 'length')"
           [[ "${count}" =~ ^[0-9]+$ ]]
           if [[ "${count}" -gt 0 ]]; then
             echo "labeled=true" >> "${GITHUB_OUTPUT}"
