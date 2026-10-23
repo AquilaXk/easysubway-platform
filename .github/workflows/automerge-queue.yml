@@ -35,18 +35,48 @@ on:
     branches: [main]
   pull_request_review:
     types: [submitted]
+  # 이벤트가 오지 않는 재평가 공백의 안전망이다(#3036). 정시 혼잡을 피해 분을 비튼다.
+  schedule:
+    - cron: "13,28,43,58 * * * *"
   workflow_dispatch:
 
 permissions: {}
 
-concurrency:
-  group: automerge-queue
-  cancel-in-progress: false
-
 jobs:
+  # schedule tick은 라벨 PR이 있을 때만 coordinate를 띄운다. 빈 큐 tick은 checkout 없이 목록 조회 한 번으로 끝난다.
+  queue-probe:
+    name: Automerge queue probe
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: read
+    outputs:
+      labeled: ${{ steps.probe.outputs.labeled }}
+    steps:
+      - name: Probe labeled pull requests
+        id: probe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          count="$(gh pr list --repo "${GITHUB_REPOSITORY}" --base main --state open --label automerge --limit 1 --json number --jq 'length')"
+          [[ "${count}" =~ ^[0-9]+$ ]]
+          if [[ "${count}" -gt 0 ]]; then
+            echo "labeled=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "labeled=false" >> "${GITHUB_OUTPUT}"
+          fi
+
   coordinate:
     name: Automerge Queue
-    if: github.event_name != 'pull_request_target' || github.event.label.name == 'automerge'
+    needs: queue-probe
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.queue-probe.outputs.labeled == 'true') && (github.event_name != 'pull_request_target' || github.event.label.name == 'automerge') }}
+    # 빈 큐 tick이 대기 중인 라벨 run을 밀어내지 않도록 동시성 그룹은 coordinate job만 점유한다.
+    concurrency:
+      group: automerge-queue
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

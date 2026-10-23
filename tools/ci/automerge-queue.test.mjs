@@ -128,7 +128,7 @@ test('automerge label 이벤트만 exact-head frozen discovery marker를 발행�
     "EVENT_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}",
     "EVENT_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}",
     "EVENT_HEAD: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}",
-    "if: github.event_name != 'pull_request_target' || github.event.label.name == 'automerge'",
+    "(github.event_name != 'pull_request_target' || github.event.label.name == 'automerge')",
     'pull_request_target:\n    types: [labeled]',
   ]) {
     assert.ok(workflow.includes(contract), `missing label authorization contract: ${contract}`);
