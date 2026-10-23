@@ -2897,3 +2897,96 @@ test('코디네이터 base 갱신 기록 뒤 다음 실행은 marker를 재발�
   assert.match(recovered.calls, new RegExp(`gh api --method POST repos/o/r/issues/1/comments -f body=${markerFor(head)}\\nTOKEN=github-token\\n`));
   assert.equal(recovered.mergedPr, 1, 'a recovered marker must satisfy the unchanged review gate in the same run');
 });
+
+// #3036: 큐를 다시 깨울 이벤트가 오지 않는 공백을 schedule tick이 메운다. 한 run이 후보를 일시적 상태(대기 중 check)로
+// 읽고 건너뛰면 그 상태가 풀려도 이 워크플로가 구독하는 이벤트는 나오지 않는다(backend 2026-10-22 #539·#542).
+// 빈 큐 tick은 checkout 없이 목록 조회 한 번으로 끝나야 한다.
+const PROBE_JOB_RE = /\n {2}queue-probe:\n([\s\S]*?)\n {2}coordinate:\n/;
+const COORDINATE_HEAD_RE = /\n {2}coordinate:\n([\s\S]*?)\n {4}steps:\n/;
+
+const scheduleMinutesOf = (workflow) => {
+  const cron = workflow.match(/\n {2}schedule:\n {4}- cron: "([^"]+)"\n/)?.[1];
+  assert.ok(cron, 'schedule cron trigger is missing');
+  const [minute, ...rest] = cron.split(' ');
+  assert.deepEqual(rest, ['*', '*', '*', '*'], 'the tick must fire every hour of every day');
+  return minute.split(',').map(Number);
+};
+
+const runQueueProbe = (workflow, { listOutput = '0', listFails = false } = {}) => {
+  const job = workflow.match(PROBE_JOB_RE)?.[1];
+  assert.ok(job, 'queue-probe job must precede coordinate');
+  const script = job.match(/\n {8}run: \|\n([\s\S]*)$/)?.[1];
+  assert.ok(script, 'queue-probe must have one run block');
+  const dir = mkdtempSync(join(tmpdir(), 'automerge-probe-'));
+  const log = join(dir, 'gh.log');
+  const output = join(dir, 'output');
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      [
+        `GH_LOG=${JSON.stringify(log)}`,
+        `GITHUB_OUTPUT=${JSON.stringify(output)}`,
+        'GITHUB_REPOSITORY=o/r',
+        ': > "$GH_LOG"; : > "$GITHUB_OUTPUT"',
+        'gh() {',
+        '  printf "%s\\n" "gh $*" >> "$GH_LOG"',
+        listFails ? '  return 1' : `  printf "%s\\n" ${JSON.stringify(listOutput)}`,
+        '}',
+        dedent(script),
+      ].join('\n'),
+    ],
+    { encoding: 'utf8' },
+  );
+  return {
+    status: result.status,
+    output: readFileSync(output, 'utf8'),
+    calls: readFileSync(log, 'utf8').split('\n').filter(Boolean),
+  };
+};
+
+test('schedule tick이 이벤트 없이도 큐를 다시 판정하고 빈 큐에서는 목록 조회 한 번으로 끝난다', async () => {
+  const workflow = await readWorkflow();
+
+  const minutes = scheduleMinutesOf(workflow);
+  assert.ok(minutes.every((m) => Number.isInteger(m) && m > 0 && m < 60), 'tick minutes must avoid the top of the hour');
+  const sorted = [...minutes].sort((a, b) => a - b);
+  const gaps = sorted.map((m, i) => (i + 1 < sorted.length ? sorted[i + 1] : sorted[0] + 60) - m);
+  assert.ok(Math.max(...gaps) <= 15, `tick interval must stay within 15 minutes: ${gaps}`);
+
+  const probe = workflow.match(PROBE_JOB_RE)?.[1] ?? '';
+  assert.match(probe, /\n {4}if: github\.event_name == 'schedule'\n/);
+  assert.match(probe, /\n {4}permissions:\n {6}pull-requests: read\n {4}outputs:/);
+  assert.doesNotMatch(probe, /uses:/, 'the probe must not check out or call actions');
+
+  const idle = runQueueProbe(workflow, { listOutput: '0' });
+  assert.equal(idle.status, 0, idle.stderr);
+  assert.equal(idle.output, 'labeled=false\n');
+  assert.equal(idle.calls.length, 1);
+  assert.match(idle.calls[0], /^gh pr list --repo o\/r --base main --state open --label automerge --limit 1 /);
+
+  assert.equal(runQueueProbe(workflow, { listOutput: '1' }).output, 'labeled=true\n');
+
+  for (const broken of [{ listFails: true }, { listOutput: 'oops' }]) {
+    const result = runQueueProbe(workflow, broken);
+    assert.notEqual(result.status, 0, 'an unreadable queue must fail the probe, not report it empty');
+    assert.equal(result.output, '');
+  }
+});
+
+test('coordinate는 schedule에서 라벨 PR이 있을 때만 돌고 동시성 그룹은 coordinate job만 점유한다', async () => {
+  const workflow = await readWorkflow();
+  const head = workflow.match(COORDINATE_HEAD_RE)?.[1] ?? '';
+
+  assert.match(head, /\n {4}needs: queue-probe\n/);
+  for (const clause of [
+    '!cancelled()',
+    "(github.event_name != 'schedule' || needs.queue-probe.outputs.labeled == 'true')",
+    "(github.event_name != 'pull_request_target' || github.event.label.name == 'automerge')",
+  ]) {
+    assert.ok(head.includes(clause), `coordinate gate missing: ${clause}`);
+  }
+  // 빈 큐 tick이 그룹에 들어가면 대기 중인 라벨 run을 밀어낼 수 있다. 그룹은 coordinate job에만 둔다.
+  assert.match(head, /\n {4}concurrency:\n {6}group: automerge-queue\n {6}cancel-in-progress: false\n/);
+  assert.doesNotMatch(workflow, /^concurrency:/m);
+});
