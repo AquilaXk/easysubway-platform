@@ -672,9 +672,9 @@ jobs:
                   (.head_repository | type == "object" and .full_name == $head_repo) and
                   (.actor | dependabot) and (.triggering_actor | dependabot)
                 )) and
-              ($files | flatten) as $changed |
+              (($files | flatten) as $changed |
               ($changed | length == 1 and .[0].filename == "infra/docker-compose.yml" and
-                (.[0]) as $file |
+                ((.[0]) as $file |
                 ($file.patch? | type == "string") and
                 ($file.patch | contains("\n...") | not) and
                 ($file.patch | contains("EASYSUBWAY_BACKEND_IMAGE") | not) and
@@ -682,15 +682,15 @@ jobs:
                  ($file.deletions | type == "number" and floor == . and . >= 0) and
                  ($file.changes | type == "number" and floor == . and . >= 0) and
                  $file.changes == ($file.additions + $file.deletions)) and
-                (content_lines($file.patch)) as $lines |
+                ((content_lines($file.patch)) as $lines |
                 (($lines | map(select(startswith("+"))) | length) == $file.additions) and
                 (($lines | map(select(startswith("-"))) | length) == $file.deletions) and
                 ($lines | length > 0 and all(.[];
                   (test("^[+-][[:space:]]*image:[[:space:]]*[A-Za-z0-9][A-Za-z0-9._-]*(?::[0-9]+)?(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._.-]*@sha256:[a-f0-9]{64}|@sha256:[a-f0-9]{64})[[:space:]]*$")) and
                   ((test("(^|:)latest([[:space:]]|$|@)")) | not) and
-                  ((contains("EASYSUBWAY_BACKEND_IMAGE")) | not)))) and
-              ($commits | flatten) as $commit_set |
-              ($commit_set | length == 1 and .[0].sha == $head and (.[0].author | dependabot))
+                  ((contains("EASYSUBWAY_BACKEND_IMAGE")) | not)))))) and
+              (($commits | flatten) as $commit_set |
+              ($commit_set | length == 1 and .[0].sha == $head and (.[0].author | dependabot))))
             ' <(printf '%s\n' "${rest_pr}") <(printf '%s\n' "${files}") <(printf '%s\n' "${commits}") <(printf '%s\n' "${workflow_runs}") >/dev/null; then
               # 예외(Review·marker 면제)는 지금처럼 CLEAN에만 적용한다. 같은 모양의 BEHIND는
               # 면제하지 않고 아래에서 소유 세션에 handoff한다.
