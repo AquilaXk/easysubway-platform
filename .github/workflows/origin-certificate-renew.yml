@@ -1,8 +1,9 @@
 name: Origin Certificate Renew
 
 # AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
-# Cloudflare가 526을 냈다. CHECK는 인증서와 갱신 타이머 상태만 읽고, RENEW는 갱신 뒤 nginx 설정을
-# 검사하고 다시 읽은 다음 원 서버 인증서의 만료 시각과 공개 health 응답을 확인한다.
+# Cloudflare가 526을 냈다. CHECK는 디스크의 인증서, nginx가 실제로 내보내는 인증서, 갱신 타이머·hook·
+# dry-run 결과를 읽기만 한다. RENEW는 갱신 뒤 nginx 설정을 검사하고 다시 읽은 다음, 내보내는 인증서가
+# 30일 넘게 남고 이 호스트 이름과 맞는지, 공개 readiness가 200인지 확인한다. 어느 하나라도 아니면 실패한다.
 
 on:
   workflow_dispatch:
@@ -29,12 +30,14 @@ jobs:
     environment: production-deploy
     runs-on:
       - self-hosted
+      - Linux
+      - ARM64
       - easysubway-production
     timeout-minutes: 10
     env:
-      MODE: ${{ inputs.mode }}
       CERT_NAME: easysubway-api.aquilaxk.site
-      PUBLIC_HEALTH_URL: https://easysubway-api.aquilaxk.site/actuator/health
+      # 호스트 nginx가 공개로 여는 actuator 경로는 readiness와 liveness뿐이다(infra/nginx/host-easysubway.conf.template).
+      PUBLIC_HEALTH_URL: https://easysubway-api.aquilaxk.site/actuator/health/readiness
     steps:
       - name: Require an authorized dispatcher
         shell: bash
@@ -50,14 +53,52 @@ jobs:
           esac
           [[ "${DEPLOY_REF}" == "refs/heads/main" && "${RUN_ATTEMPT}" == "1" ]] || { echo "deploy must start from main on the first attempt" >&2; exit 1; }
 
+      - name: Checkout Platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Verify production-deploy admission
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
+            --repository "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${RUNNER_TEMP}/admission-receipt.json"
+
       - name: Origin certificate / Read current state
         shell: bash
         run: |
           set -euo pipefail
+          echo "== on-disk lineage"
           sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}"
-          systemctl list-timers --all --no-pager | grep -i -E 'certbot|NEXT' || echo "certbot timer not listed"
-          systemctl status certbot.timer --no-pager || true
-          sudo --non-interactive journalctl -u certbot.service --since "-45 days" --no-pager | tail -n 60 || true
+          echo "== served by nginx on 127.0.0.1:443"
+          served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>&1 | openssl x509 -noout -subject -enddate 2>&1 || true)"
+          echo "${served:-no certificate read}"
+          echo "== renewal timer"
+          echo "certbot.timer enabled: $(systemctl is-enabled certbot.timer 2>&1 || true)"
+          echo "certbot.timer active: $(systemctl is-active certbot.timer 2>&1 || true)"
+          systemctl list-timers certbot.timer --all --no-pager || true
+          echo "== renewal hooks"
+          sudo --non-interactive ls -la /etc/letsencrypt/renewal-hooks/deploy /etc/letsencrypt/renewal-hooks/post || echo "renewal hook directories could not be listed (exit $?)"
+          echo "== renewal dry run"
+          sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --dry-run --no-random-sleep-on-renew || echo "dry run failed (exit $?)"
+          echo "== recent certbot log"
+          if ! log="$(sudo --non-interactive journalctl -u certbot.service --since "-45 days" --no-pager 2>&1)"; then
+            echo "journal could not be read: ${log}"
+          else
+            echo "${log}" | tail -n 60
+          fi
 
       - name: Origin certificate / Renew and reload nginx
         if: ${{ inputs.mode == 'RENEW' }}
@@ -68,22 +109,34 @@ jobs:
           sudo --non-interactive nginx -t
           sudo --non-interactive nginx -s reload
 
-      - name: Origin certificate / Verify origin certificate and public health
+      - name: Origin certificate / Verify served certificate and public readiness
         if: ${{ inputs.mode == 'RENEW' }}
         shell: bash
         run: |
           set -euo pipefail
-          not_after="$(echo | openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)"
-          echo "origin notAfter: ${not_after}"
-          remaining=$(( ( $(date -d "${not_after}" +%s) - $(date +%s) ) / 86400 ))
-          echo "days remaining: ${remaining}"
-          if [[ "${remaining}" -lt 30 ]]; then
-            echo "origin certificate still expires within 30 days" >&2
+          served=""
+          for _ in $(seq 1 10); do
+            served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 2>/dev/null || true)"
+            if [[ -n "${served}" ]] && echo "${served}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null; then
+              break
+            fi
+            served=""
+            sleep 2
+          done
+          if [[ -z "${served}" ]]; then
+            echo "origin does not serve a certificate valid for more than 30 days" >&2
             exit 1
           fi
-          status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${PUBLIC_HEALTH_URL}")"
-          echo "public health: ${status}"
+          echo "${served}" | openssl x509 -noout -subject -enddate
+          echo "${served}" | openssl x509 -noout -checkhost "${CERT_NAME}" | grep -q 'does match' || { echo "served certificate does not match ${CERT_NAME}" >&2; exit 1; }
+          status=""
+          for _ in $(seq 1 10); do
+            status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${PUBLIC_HEALTH_URL}" || true)"
+            [[ "${status}" == "200" ]] && break
+            sleep 3
+          done
+          echo "public readiness: ${status}"
           if [[ "${status}" != "200" ]]; then
-            echo "public health did not return 200 after renewal" >&2
+            echo "public readiness did not return 200 after renewal" >&2
             exit 1
           fi
