@@ -3,7 +3,7 @@ name: Origin Certificate Renew
 # AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
 # Cloudflare가 526을 냈다.
 # check job(CHECK)은 nginx가 서비스하는 호스트마다 내보내는 인증서와 디스크 인증서의 만료를 판정하고,
-# 14일 넘게 유효하지 않거나 이름이 맞지 않으면 실패한다.
+# 남은 유효 기간이 14일 미만이거나 이름이 맞지 않으면 실패한다.
 # renew job(RENEW)은 check에 기대지 않고 혼자 돌며, 갱신하고 nginx 설정을 검사해 다시 읽은 뒤 내보내는
 # 인증서가 호스트마다 30일 넘게 남고 이름이 맞는지, 공개 readiness가 200인지 확인한다.
 # 자동 갱신이 멈춘 원인(타이머·서비스·hook)은 호스트에서 비공개로 확인한다(#270). 이 레포는 공개라
@@ -88,9 +88,10 @@ jobs:
       - name: Origin certificate / Judge served and on-disk expiry
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           failed=0
           # certbot이 30일 남으면 스스로 갱신하므로 CHECK는 그보다 낮은 14일을 기준으로 삼아 정상 호스트를 빨갛게 보지 않는다.
+          # 대신 디스크는 갱신됐는데 nginx가 다시 읽지 않은 상태는 14일 전까지 드러나지 않는다(#270 후속).
           for host in ${SERVED_HOSTS}; do
             if served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${host}" 2>/dev/null | openssl x509 2>/dev/null)"; then
               echo "${host}: served $(echo "${served}" | openssl x509 -noout -enddate)"
@@ -109,12 +110,12 @@ jobs:
           # certbot 메시지는 공개 로그에 원문으로 남기지 않는다. 만료 줄만 쓴다.
           if [[ "${rc}" != 0 ]]; then
             echo "on-disk lineage could not be read (exit ${rc})"; failed=1
-          elif ! expiry="$(echo "${lineage}" | grep -E '^\s*Expiry Date:')"; then
+          elif ! expiry="$(echo "${lineage}" | grep -E '^\s*Expiry Date:' | sed 's/^[[:space:]]*//')"; then
             echo "on-disk lineage has no expiry line"; failed=1
           else
-            echo "on-disk ${expiry#"${expiry%%[![:space:]]*}"}"
+            echo "on-disk ${expiry}"
             # 유효 표시가 있을 때만 통과한다. 문구가 바뀌면 실패로 본다.
-            if ! echo "${expiry}" | grep -q '(VALID: '; then echo "on-disk certificate is not marked valid (RENEW needed)"; failed=1; fi
+            if ! echo "${expiry}" | grep -q '(VALID: '; then echo "on-disk certificate is not marked valid (check the lineage on the host)"; failed=1; fi
           fi
           exit "${failed}"
 

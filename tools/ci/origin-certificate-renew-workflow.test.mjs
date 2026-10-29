@@ -67,7 +67,7 @@ test("공개 로그에 원 서버 주소가 찍힐 수 있는 certbot·journal �
   assert.match(job("renew"), /certbot renew [^\n]*--quiet >\/dev\/null 2>&1 \|\| rc=\$\?\n/u);
   // check는 certbot certificates 출력 중 만료 줄만 남긴다.
   assert.doesNotMatch(job("check"), /echo "\$\{lineage\}"\s*$/mu);
-  assert.match(job("check"), /expiry="\$\(echo "\$\{lineage\}" \| grep -E '\^\\s\*Expiry Date:'\)"/u);
+  assert.match(job("check"), /expiry="\$\(echo "\$\{lineage\}" \| grep -E '\^\\s\*Expiry Date:' \| sed /u);
 });
 
 test("권한은 workflow 수준에서 비우고 job마다 필요한 만큼만 선언한다 (#270)", () => {
@@ -117,14 +117,14 @@ function checkScript() {
 
 const STUBS = {
   timeout: '#!/bin/bash\nshift\nexec "$@"\n',
-  sudo: '#!/bin/bash\n[[ "$*" == "--non-interactive certbot certificates --cert-name ${CERT_NAME}" ]] || exit 99\nprintf "%b" "${STUB_LINEAGE}"\nprintf "%b" "${STUB_LINEAGE}" >&2\nexit "${STUB_LINEAGE_RC}"\n',
+  sudo: '#!/bin/bash\n[[ "$*" == "--non-interactive certbot certificates --cert-name ${CERT_NAME}" ]] || exit 99\nprintf "%b" "${STUB_LINEAGE}"\nprintf "%b" "${STUB_LEAK:-}" >&2\nexit "${STUB_LINEAGE_RC}"\n',
   openssl: [
     "#!/bin/bash",
     'if [[ "$1" == s_client ]]; then [[ "${STUB_SERVED}" == 1 ]] && echo "PEM ${@: -1}"; exit 0; fi',
     'input="$(cat)"; [[ -n "${input}" ]] || exit 1',
     'bad() { [[ -n "${STUB_BAD_HOST:-}" && "${input}" == "PEM ${STUB_BAD_HOST}" ]]; }',
     'case " $* " in',
-    '  *" -checkend "*) bad && [[ "${STUB_BAD}" == expiry ]] && exit 1; exit 0 ;;',
+    '  *" -checkend "*) [[ " $* " == *" -checkend 1209600 "* ]] || exit 98; bad && [[ "${STUB_BAD}" == expiry ]] && exit 1; exit 0 ;;',
     '  *" -checkhost "*) if bad && [[ "${STUB_BAD}" == name ]]; then echo "Hostname ${@: -1} does NOT match certificate"; else echo "Hostname ${@: -1} does match certificate"; fi ;;',
     '  *" -enddate "*) echo "notAfter=Jan 1 00:00:00 2027 GMT" ;;',
     '  *) echo "${input}" ;;',
@@ -161,23 +161,26 @@ function runCheck(overrides) {
 test("check 실행: 건강하면 통과하고 만료·불일치·읽기 실패·만료 줄 없음·INVALID는 실패한다 (#270)", () => {
   const healthy = runCheck({});
   assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
+  assert.equal((healthy.stdout.match(/^on-disk /gmu) ?? []).length, 1);
   assert.match(healthy.stdout, /^on-disk Expiry Date: 2027-01-01/mu);
   assert.doesNotMatch(healthy.stdout + healthy.stderr, /Domains|Certificate Name/u);
   const cases = {
     "first host expiring": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "expiry" }, /^a\.example: served certificate is expired or expires within 14 days \(RENEW needed\)$/mu],
     "second host expiring": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "expiry" }, /^b\.example: served certificate is expired or expires within 14 days/mu],
-    "first host mismatch": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "name" }, /^a\.example: served certificate does not name this host/mu],
-    "second host mismatch": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "name" }, /^b\.example: served certificate does not name this host/mu],
+    "first host mismatch": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "name" }, /^a\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu],
+    "second host mismatch": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "name" }, /^b\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu],
     "nothing served": [{ STUB_SERVED: "0" }, /a\.example: no certificate read/u],
-    "lineage read failed": [{ STUB_LINEAGE: "secret 203.0.113.9 detail\\n", STUB_LINEAGE_RC: "1" }, /on-disk lineage could not be read \(exit 1\)/u],
+    "lineage read failed": [{ STUB_LINEAGE: "secret 203.0.113.9 detail\\n", STUB_LEAK: "secret 203.0.113.9 stderr\\n", STUB_LINEAGE_RC: "1" }, /on-disk lineage could not be read \(exit 1\)/u],
     "no lineage": [{ STUB_LINEAGE: "No certificates found.\\n" }, /on-disk lineage has no expiry line/u],
-    "invalid lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" }, /on-disk certificate is not marked valid/u],
+    "invalid lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" }, /^on-disk certificate is not marked valid \(check the lineage on the host\)$/mu],
     "reworded lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (EXPIRED)\\n" }, /on-disk certificate is not marked valid/u],
-    "lineage timed out": [{ STUB_LINEAGE: "", STUB_LINEAGE_RC: "124" }, /could not be read \(exit 124\)/u],
+    "lineage exits 124": [{ STUB_LINEAGE: "", STUB_LINEAGE_RC: "124" }, /could not be read \(exit 124\)/u],
   };
   for (const [name, [env, line]] of Object.entries(cases)) {
     const run = runCheck(env);
-    assert.notEqual(run.status, 0, name);
+    assert.equal(run.status, 1, name);
+    // RENEW로 고쳐지는 만료만 RENEW를 권한다.
+    if (!/expiring/u.test(name)) assert.doesNotMatch(run.stdout, /RENEW needed/u, name);
     assert.match(run.stdout, line, name);
     assert.doesNotMatch(run.stdout + run.stderr, /203\.0\.113\.9|No certificates found/u, name);
   }
