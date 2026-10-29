@@ -100,18 +100,11 @@ test("공개 health 주소와 서비스 호스트는 nginx 템플릿과 인증�
   assert.equal(hosts[0], cert);
 });
 
-test("check는 호스트마다 만료·30일 안 만료·이름 불일치와 디스크 인증서 읽기 실패·만료 줄 없음·INVALID를 실패로 센다 (#270)", () => {
-  const check = job("check");
-  assert.match(check, /for host in \$\{SERVED_HOSTS\}; do\n/u);
-  assert.match(check, /-checkend \$\(\( 30 \* 86400 \)\) >\/dev\/null \\\n\s*\|\| ! echo "\$\{served\}" \| openssl x509 -noout -checkhost "\$\{host\}" \| grep -q 'does match'; then\n[^\n]*failed=1\n/u);
-  assert.match(check, /no certificate read from 127\.0\.0\.1:443"; failed=1\n/u);
-  assert.match(check, /could not be read \(exit \$\{rc\}\)"; failed=1\n/u);
-  assert.match(check, /has no expiry line"; failed=1\n/u);
-  assert.match(check, /grep -q 'INVALID'; then [^\n]*failed=1; fi\n/u);
-  assert.match(check, /\n\s*exit "\$\{failed\}"\n/u);
-  assert.doesNotMatch(check, /^ {4}concurrency:/mu);
+test("check는 concurrency group 밖에 있고 renew만 group에 있다 (#270)", () => {
+  // check를 group에 넣으면 대기 중인 긴급 renew가 나중 dispatch에 밀려 취소된다.
+  assert.doesNotMatch(job("check"), /^ {4}concurrency:/mu);
   assert.match(job("renew"), /^ {4}concurrency:\n {6}group: origin-certificate-production\n/mu);
-  assert.doesNotMatch(workflow, /systemctl|renewal-hooks/u);
+  assert.doesNotMatch(job("check"), /systemctl|renewal-hooks/u);
 });
 
 // check step을 대역 sudo·openssl·timeout으로 실제 실행해 종료 코드와 출력을 본다.
@@ -124,14 +117,15 @@ function checkScript() {
 
 const STUBS = {
   timeout: '#!/bin/bash\nshift\nexec "$@"\n',
-  sudo: '#!/bin/bash\n[[ "$1" == --non-interactive && "$2" == certbot && "$3" == certificates ]] || exit 99\nprintf "%b" "${STUB_LINEAGE}"\nexit "${STUB_LINEAGE_RC}"\n',
+  sudo: '#!/bin/bash\n[[ "$*" == "--non-interactive certbot certificates --cert-name ${CERT_NAME}" ]] || exit 99\nprintf "%b" "${STUB_LINEAGE}"\nprintf "%b" "${STUB_LINEAGE}" >&2\nexit "${STUB_LINEAGE_RC}"\n',
   openssl: [
     "#!/bin/bash",
-    'if [[ "$1" == s_client ]]; then [[ "${STUB_SERVED}" == 1 ]] && echo PEM; exit 0; fi',
+    'if [[ "$1" == s_client ]]; then [[ "${STUB_SERVED}" == 1 ]] && echo "PEM ${@: -1}"; exit 0; fi',
     'input="$(cat)"; [[ -n "${input}" ]] || exit 1',
+    'bad() { [[ -n "${STUB_BAD_HOST:-}" && "${input}" == "PEM ${STUB_BAD_HOST}" ]]; }',
     'case " $* " in',
-    '  *" -checkend "*) exit "${STUB_CHECKEND_RC}" ;;',
-    '  *" -checkhost "*) echo "Hostname ${@: -1} ${STUB_HOST_MATCH:-does match} certificate" ;;',
+    '  *" -checkend "*) bad && [[ "${STUB_BAD}" == expiry ]] && exit 1; exit 0 ;;',
+    '  *" -checkhost "*) if bad && [[ "${STUB_BAD}" == name ]]; then echo "Hostname ${@: -1} does NOT match certificate"; else echo "Hostname ${@: -1} does match certificate"; fi ;;',
     '  *" -enddate "*) echo "notAfter=Jan 1 00:00:00 2027 GMT" ;;',
     '  *) echo "${input}" ;;',
     "esac",
@@ -151,12 +145,14 @@ function runCheck(overrides) {
       CERT_NAME: "a.example",
       SERVED_HOSTS: "a.example b.example",
       STUB_SERVED: "1",
-      STUB_CHECKEND_RC: "0",
+      STUB_BAD_HOST: "",
+      STUB_BAD: "",
       STUB_LINEAGE: "  Certificate Name: a.example\\n    Domains: a.example b.example\\n    Expiry Date: 2027-01-01 00:00:00+00:00 (VALID: 62 days)\\n",
       STUB_LINEAGE_RC: "0",
       ...overrides,
     };
-    return spawnSync("/bin/bash", ["-c", checkScript()], { encoding: "utf8", env });
+    // GitHub은 `shell: bash` step을 `bash --noprofile --norc -eo pipefail`로 돌린다.
+    return spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", checkScript()], { encoding: "utf8", env });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -166,19 +162,23 @@ test("check 실행: 건강하면 통과하고 만료·불일치·읽기 실패·
   const healthy = runCheck({});
   assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
   assert.match(healthy.stdout, /^on-disk Expiry Date: 2027-01-01/mu);
-  assert.doesNotMatch(healthy.stdout, /Domains|Certificate Name/u);
+  assert.doesNotMatch(healthy.stdout + healthy.stderr, /Domains|Certificate Name/u);
   const cases = {
-    "expired or within 30 days": [{ STUB_CHECKEND_RC: "1" }, /a\.example: served certificate is expired/u],
-    "host mismatch": [{ STUB_HOST_MATCH: "does NOT match" }, /b\.example: served certificate is expired, expires within 30 days, or does not match/u],
+    "first host expiring": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "expiry" }, /^a\.example: served certificate is expired or expires within 14 days \(RENEW needed\)$/mu],
+    "second host expiring": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "expiry" }, /^b\.example: served certificate is expired or expires within 14 days/mu],
+    "first host mismatch": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "name" }, /^a\.example: served certificate does not name this host/mu],
+    "second host mismatch": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "name" }, /^b\.example: served certificate does not name this host/mu],
     "nothing served": [{ STUB_SERVED: "0" }, /a\.example: no certificate read/u],
     "lineage read failed": [{ STUB_LINEAGE: "secret 203.0.113.9 detail\\n", STUB_LINEAGE_RC: "1" }, /on-disk lineage could not be read \(exit 1\)/u],
     "no lineage": [{ STUB_LINEAGE: "No certificates found.\\n" }, /on-disk lineage has no expiry line/u],
-    "invalid lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" }, /on-disk certificate is invalid/u],
+    "invalid lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" }, /on-disk certificate is not marked valid/u],
+    "reworded lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (EXPIRED)\\n" }, /on-disk certificate is not marked valid/u],
+    "lineage timed out": [{ STUB_LINEAGE: "", STUB_LINEAGE_RC: "124" }, /could not be read \(exit 124\)/u],
   };
   for (const [name, [env, line]] of Object.entries(cases)) {
     const run = runCheck(env);
-    assert.equal(run.status, 1, name);
+    assert.notEqual(run.status, 0, name);
     assert.match(run.stdout, line, name);
-    assert.doesNotMatch(run.stdout, /203\.0\.113\.9|No certificates found/u, name);
+    assert.doesNotMatch(run.stdout + run.stderr, /203\.0\.113\.9|No certificates found/u, name);
   }
 });
