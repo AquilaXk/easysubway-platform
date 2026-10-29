@@ -2,16 +2,18 @@ name: Origin Certificate Renew
 
 # AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
 # Cloudflare가 526을 냈다.
-# check job은 nginx가 내보내는 인증서와 디스크 인증서의 만료, 갱신 타이머·hook 상태를 읽어 판정 줄을 출력한다.
-# renew job은 RENEW일 때만 돌며, 갱신하고 nginx 설정을 검사해 다시 읽은 뒤 내보내는 인증서가
-# 30일 넘게 남고 nginx가 서비스하는 두 호스트와 맞는지, 공개 readiness가 200인지 확인한다.
-# 이 레포는 공개라 로그를 누구나 읽는다. 원 서버 주소가 찍힐 수 있는 certbot 로그와 ACME 출력은 남기지 않는다.
+# check job(CHECK)은 nginx가 서비스하는 호스트마다 내보내는 인증서와 디스크 인증서의 만료를 판정하고,
+# 30일 넘게 유효하지 않으면 실패한다.
+# renew job(RENEW)은 check에 기대지 않고 혼자 돌며, 갱신하고 nginx 설정을 검사해 다시 읽은 뒤 내보내는
+# 인증서가 호스트마다 30일 넘게 남고 이름이 맞는지, 공개 readiness가 200인지 확인한다.
+# 자동 갱신이 멈춘 원인(타이머·서비스·hook)은 호스트에서 비공개로 확인한다(#270). 이 레포는 공개라
+# 원 서버 주소가 찍힐 수 있는 certbot 로그와 ACME 출력은 남기지 않는다.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "CHECK reads expiry and timer state only. RENEW renews the certificate and reloads nginx."
+        description: "CHECK judges served and on-disk certificate expiry. RENEW renews the certificate and reloads nginx."
         type: choice
         options:
           - CHECK
@@ -31,9 +33,7 @@ jobs:
   check:
     name: Origin certificate state
     # 허용되지 않은 행위자의 dispatch는 환경·러너를 잡기 전에 job 단계에서 건너뛴다(platform#244 게이트 계약).
-    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'
-    # check는 읽기만 해서 group에 넣지 않는다. 같은 group이면 대기 중인 renew가 나중 dispatch에 밀려 취소된다.
-    # 대신 다른 run의 갱신 도중에 읽으면 잘못된 실패가 날 수 있다.
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk' && inputs.mode == 'CHECK'
     # 영수증 검증기가 Actions run 기록으로 실행자를 확인한다.
     permissions:
       contents: read
@@ -83,73 +83,38 @@ jobs:
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             > "${RUNNER_TEMP}/admission-receipt.json"
 
-      - name: Origin certificate / Read expiry and renewal timer
+      - name: Origin certificate / Judge served and on-disk expiry
         shell: bash
-        env:
-          MODE: ${{ inputs.mode }}
         run: |
           set -uo pipefail
           failed=0
-          echo "== served by nginx on 127.0.0.1:443"
           for host in ${SERVED_HOSTS}; do
             if served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${host}" 2>/dev/null | openssl x509 2>/dev/null)"; then
-              echo "${host}: $(echo "${served}" | openssl x509 -noout -enddate)"
-              if ! echo "${served}" | openssl x509 -noout -checkend 0 >/dev/null; then echo "${host} verdict: EXPIRED (RENEW needed)"
-              elif ! echo "${served}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null; then echo "${host} verdict: expires within 30 days"
-              else echo "${host} verdict: valid for more than 30 days"
+              echo "${host}: served $(echo "${served}" | openssl x509 -noout -enddate)"
+              if ! echo "${served}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null \
+                || ! echo "${served}" | openssl x509 -noout -checkhost "${host}" | grep -q 'does match'; then
+                echo "${host}: served certificate is expired, expires within 30 days, or does not match (RENEW needed)"; failed=1
               fi
             else
               echo "${host}: no certificate read from 127.0.0.1:443"; failed=1
             fi
           done
-          echo "== on-disk lineage"
           rc=0
-          lineage="$(sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}" 2>&1)" || rc=$?
-          # certbot 메시지는 공개 로그에 원문으로 남기지 않는다. 이름·도메인·만료 줄만 쓴다.
+          lineage="$(timeout 60 sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}" 2>&1)" || rc=$?
+          # certbot 메시지는 공개 로그에 원문으로 남기지 않는다. 만료 줄만 쓴다.
           if [[ "${rc}" != 0 ]]; then
-            echo "lineage could not be read (exit ${rc})"; failed=1
-          elif ! echo "${lineage}" | grep -q -E '^\s*Expiry Date:'; then
-            echo "lineage listing has no expiry line"; failed=1
+            echo "on-disk lineage could not be read (exit ${rc})"; failed=1
+          elif ! expiry="$(echo "${lineage}" | grep -E '^\s*Expiry Date:')"; then
+            echo "on-disk lineage has no expiry line"; failed=1
           else
-            echo "${lineage}" | grep -E 'Certificate Name|Domains|Expiry Date'
+            echo "on-disk ${expiry#"${expiry%%[![:space:]]*}"}"
+            if echo "${expiry}" | grep -q 'INVALID'; then echo "on-disk certificate is invalid (RENEW needed)"; failed=1; fi
           fi
-          echo "== renewal timer"
-          timer_ok=0
-          for unit in certbot.timer snap.certbot.renew.timer; do
-            enabled="$(systemctl is-enabled "${unit}" 2>/dev/null)" || true
-            active="$(systemctl is-active "${unit}" 2>/dev/null)" || true
-            echo "${unit}: is-enabled=${enabled:-<empty>} is-active=${active:-<empty>}"
-            [[ "${enabled}" == enabled* && "${active}" == "active" ]] && timer_ok=1
-          done
-          [[ "${timer_ok}" == 1 ]] || { echo "neither certbot.timer nor snap.certbot.renew.timer is enabled and active"; failed=1; }
-          # 타이머가 돌아도 서비스가 매번 실패하면 갱신되지 않는다. Result 값에는 주소가 없다.
-          service_ok=0
-          for unit in certbot.service snap.certbot.renew.service; do
-            result="$(systemctl show "${unit}" -p Result --value 2>/dev/null)" || true
-            echo "${unit}: last result=${result:-<empty>}"
-            [[ "${result}" == "success" ]] && service_ok=1
-          done
-          [[ "${service_ok}" == 1 ]] || { echo "neither certbot.service nor snap.certbot.renew.service finished its last run successfully"; failed=1; }
-          echo "== renewal hooks"
-          for dir in pre deploy post; do
-            path="/etc/letsencrypt/renewal-hooks/${dir}"
-            if [[ ! -e "${path}" ]]; then echo "${dir}: absent"
-            elif [[ ! -r "${path}" || ! -x "${path}" ]]; then echo "${dir}: unreadable"; failed=1
-            elif listing="$(find "${path}" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"; then echo "${dir}: ${listing}"
-            else echo "${dir}: listing failed"; failed=1
-            fi
-          done
-          # CHECK는 진단이 하나라도 실패하면 실패한다. RENEW에서는 진단 실패가 긴급 갱신을 막지 않도록
-          # 경고로 남기고 넘어간다(갱신 성공 여부는 renew job의 검증이 가린다).
-          if [[ "${failed}" == 1 ]]; then
-            if [[ "${MODE}" == "CHECK" ]]; then exit 1; fi
-            echo "::warning::check diagnostics failed; RENEW continues and its verify step decides the outcome"
-          fi
+          exit "${failed}"
 
   renew:
     name: Origin certificate renew
-    # check가 건너뛰어지거나 실패하면 이 job도 돌지 않는다. 실행자 게이트는 이 job에도 그대로 둔다.
-    needs: check
+    # check에 기대지 않는다. 진단이 실패하거나 멈춰도 긴급 갱신은 돈다.
     if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk' && inputs.mode == 'RENEW'
     concurrency:
       group: origin-certificate-production

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 // platform#270: 원 서버 인증서 확인·갱신 workflow의 경계 계약. 이 workflow는 main에서만 돌아 병합 전에 실행해 볼 수 없다.
@@ -18,17 +21,18 @@ function job(name) {
 const jobNames = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([A-Za-z0-9_-]+):\n/gmu)].map((match) => match[1]);
 const sudoTokens = (text) => [...text.matchAll(/\bsudo\b/gu)].length;
 
-test("job은 check와 renew 둘이고 renew는 check 뒤 RENEW에서만 돈다 (#270)", () => {
+test("job은 check와 renew 둘이고 각자 자기 모드에서만, 서로 기대지 않고 돈다 (#270)", () => {
   assert.deepEqual(jobNames, ["check", "renew"]);
+  assert.match(job("check"), /^ {4}if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk' && inputs\.mode == 'CHECK'\n/mu);
+  assert.doesNotMatch(workflow, /^ {4}needs:/mu);
   const renew = job("renew");
-  assert.match(renew, /^ {4}needs: check\n/mu);
   assert.match(renew, /^ {4}if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk' && inputs\.mode == 'RENEW'\n/mu);
   assert.doesNotMatch(renew, /always\(\)|failure\(\)|cancelled\(\)|continue-on-error/u);
 });
 
 test("check job의 sudo는 디스크 인증서 목록을 읽는 한 줄뿐이고 상태를 바꾸는 명령이 없다 (#270)", () => {
   const check = job("check");
-  const allowed = [...check.matchAll(/sudo --non-interactive certbot certificates --cert-name "\$\{CERT_NAME\}" 2>&1\)" \|\| rc=\$\?\n/gu)];
+  const allowed = [...check.matchAll(/"\$\(timeout 60 sudo --non-interactive certbot certificates --cert-name "\$\{CERT_NAME\}" 2>&1\)" \|\| rc=\$\?\n/gu)];
   assert.equal(allowed.length, 1);
   assert.equal(sudoTokens(check), allowed.length);
   assert.doesNotMatch(check.replace(/certbot certificates --cert-name/gu, ""), /\bcertbot\s+\w|\bnginx\s+-|\bsystemctl\s+(?:reload|restart|try-restart|reload-or-restart|start|stop|enable|disable|mask)\b|(?:^|[\s;|&(])service\s+\S+\s+(?:start|stop|restart|reload|force-reload|try-restart)\b|\bkill\b|\bjournalctl\b|\b(?:su|pkexec|doas)\b/u);
@@ -61,8 +65,9 @@ test("두 job 모두 실행자 게이트와 영수증 검증을 모든 sudo보�
 test("공개 로그에 원 서버 주소가 찍힐 수 있는 certbot·journal 출력을 남기지 않는다 (#270)", () => {
   assert.doesNotMatch(workflow, /journalctl|--dry-run/u);
   assert.match(job("renew"), /certbot renew [^\n]*--quiet >\/dev\/null 2>&1 \|\| rc=\$\?\n/u);
-  // check는 certbot certificates 출력 중 이름·도메인·만료 줄만 남긴다.
-  assert.match(job("check"), /grep -E 'Certificate Name\|Domains\|Expiry Date'/u);
+  // check는 certbot certificates 출력 중 만료 줄만 남긴다.
+  assert.doesNotMatch(job("check"), /echo "\$\{lineage\}"\s*$/mu);
+  assert.match(job("check"), /expiry="\$\(echo "\$\{lineage\}" \| grep -E '\^\\s\*Expiry Date:'\)"/u);
 });
 
 test("권한은 workflow 수준에서 비우고 job마다 필요한 만큼만 선언한다 (#270)", () => {
@@ -95,20 +100,85 @@ test("공개 health 주소와 서비스 호스트는 nginx 템플릿과 인증�
   assert.equal(hosts[0], cert);
 });
 
-test("RENEW에서는 check 진단 실패가 갱신을 막지 않고 CHECK에서만 실패한다 (#270)", () => {
+test("check는 호스트마다 만료·30일 안 만료·이름 불일치와 디스크 인증서 읽기 실패·만료 줄 없음·INVALID를 실패로 센다 (#270)", () => {
   const check = job("check");
-  assert.match(check, /if \[\[ "\$\{failed\}" == 1 \]\]; then\n\s*if \[\[ "\$\{MODE\}" == "CHECK" \]\]; then exit 1; fi\n/u);
-  assert.match(check, /MODE: \$\{\{ inputs\.mode \}\}\n/u);
+  assert.match(check, /for host in \$\{SERVED_HOSTS\}; do\n/u);
+  assert.match(check, /-checkend \$\(\( 30 \* 86400 \)\) >\/dev\/null \\\n\s*\|\| ! echo "\$\{served\}" \| openssl x509 -noout -checkhost "\$\{host\}" \| grep -q 'does match'; then\n[^\n]*failed=1\n/u);
+  assert.match(check, /no certificate read from 127\.0\.0\.1:443"; failed=1\n/u);
+  assert.match(check, /could not be read \(exit \$\{rc\}\)"; failed=1\n/u);
+  assert.match(check, /has no expiry line"; failed=1\n/u);
+  assert.match(check, /grep -q 'INVALID'; then [^\n]*failed=1; fi\n/u);
+  assert.match(check, /\n\s*exit "\$\{failed\}"\n/u);
   assert.doesNotMatch(check, /^ {4}concurrency:/mu);
   assert.match(job("renew"), /^ {4}concurrency:\n {6}group: origin-certificate-production\n/mu);
-  assert.match(check, /for host in \$\{SERVED_HOSTS\}; do\n/u);
+  assert.doesNotMatch(workflow, /systemctl|renewal-hooks/u);
 });
 
-test("check는 타이머와 갱신 서비스의 마지막 결과가 모두 건강해야 CHECK에서 통과한다 (#270)", () => {
+// check step을 대역 sudo·openssl·timeout으로 실제 실행해 종료 코드와 출력을 본다.
+function checkScript() {
   const check = job("check");
-  assert.match(check, /\[\[ "\$\{timer_ok\}" == 1 \]\] \|\| \{[^\n]*failed=1; \}\n/u);
-  assert.match(check, /systemctl show "\$\{unit\}" -p Result --value/u);
-  assert.match(check, /\[\[ "\$\{service_ok\}" == 1 \]\] \|\| \{[^\n]*failed=1; \}\n/u);
-  assert.match(check, /elif ! echo "\$\{lineage\}" \| grep -q -E '\^\\s\*Expiry Date:'; then\n\s*echo "lineage listing has no expiry line"; failed=1\n/u);
-  assert.match(check, /then echo "\$\{dir\}: unreadable"; failed=1\n/u);
+  const at = check.indexOf("      - name: Origin certificate / Judge served and on-disk expiry\n");
+  const body = check.slice(check.indexOf("        run: |\n", at) + "        run: |\n".length);
+  return body.split("\n").map((line) => line.replace(/^ {10}/u, "")).join("\n");
+}
+
+const STUBS = {
+  timeout: '#!/bin/bash\nshift\nexec "$@"\n',
+  sudo: '#!/bin/bash\n[[ "$1" == --non-interactive && "$2" == certbot && "$3" == certificates ]] || exit 99\nprintf "%b" "${STUB_LINEAGE}"\nexit "${STUB_LINEAGE_RC}"\n',
+  openssl: [
+    "#!/bin/bash",
+    'if [[ "$1" == s_client ]]; then [[ "${STUB_SERVED}" == 1 ]] && echo PEM; exit 0; fi',
+    'input="$(cat)"; [[ -n "${input}" ]] || exit 1',
+    'case " $* " in',
+    '  *" -checkend "*) exit "${STUB_CHECKEND_RC}" ;;',
+    '  *" -checkhost "*) echo "Hostname ${@: -1} ${STUB_HOST_MATCH:-does match} certificate" ;;',
+    '  *" -enddate "*) echo "notAfter=Jan 1 00:00:00 2027 GMT" ;;',
+    '  *) echo "${input}" ;;',
+    "esac",
+    "",
+  ].join("\n"),
+};
+
+function runCheck(overrides) {
+  const dir = mkdtempSync(join(tmpdir(), "origin-cert-check-"));
+  try {
+    for (const [name, text] of Object.entries(STUBS)) {
+      writeFileSync(join(dir, name), text);
+      chmodSync(join(dir, name), 0o755);
+    }
+    const env = {
+      PATH: `${dir}:${process.env.PATH}`,
+      CERT_NAME: "a.example",
+      SERVED_HOSTS: "a.example b.example",
+      STUB_SERVED: "1",
+      STUB_CHECKEND_RC: "0",
+      STUB_LINEAGE: "  Certificate Name: a.example\\n    Domains: a.example b.example\\n    Expiry Date: 2027-01-01 00:00:00+00:00 (VALID: 62 days)\\n",
+      STUB_LINEAGE_RC: "0",
+      ...overrides,
+    };
+    return spawnSync("/bin/bash", ["-c", checkScript()], { encoding: "utf8", env });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("check 실행: 건강하면 통과하고 만료·불일치·읽기 실패·만료 줄 없음·INVALID는 실패한다 (#270)", () => {
+  const healthy = runCheck({});
+  assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
+  assert.match(healthy.stdout, /^on-disk Expiry Date: 2027-01-01/mu);
+  assert.doesNotMatch(healthy.stdout, /Domains|Certificate Name/u);
+  const cases = {
+    "expired or within 30 days": [{ STUB_CHECKEND_RC: "1" }, /a\.example: served certificate is expired/u],
+    "host mismatch": [{ STUB_HOST_MATCH: "does NOT match" }, /b\.example: served certificate is expired, expires within 30 days, or does not match/u],
+    "nothing served": [{ STUB_SERVED: "0" }, /a\.example: no certificate read/u],
+    "lineage read failed": [{ STUB_LINEAGE: "secret 203.0.113.9 detail\\n", STUB_LINEAGE_RC: "1" }, /on-disk lineage could not be read \(exit 1\)/u],
+    "no lineage": [{ STUB_LINEAGE: "No certificates found.\\n" }, /on-disk lineage has no expiry line/u],
+    "invalid lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" }, /on-disk certificate is invalid/u],
+  };
+  for (const [name, [env, line]] of Object.entries(cases)) {
+    const run = runCheck(env);
+    assert.equal(run.status, 1, name);
+    assert.match(run.stdout, line, name);
+    assert.doesNotMatch(run.stdout, /203\.0\.113\.9|No certificates found/u, name);
+  }
 });
