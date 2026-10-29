@@ -16,8 +16,8 @@ const targets = [
   { file: "cd.yml", job: "preflight", concurrency: null, condition: GATE_IF },
   { file: "data-workflow-scheduler-deploy.yml", job: "scheduler", concurrency: "data-workflow-scheduler-production", condition: GATE_IF },
   { file: "observability-config-deploy.yml", job: "observability", concurrency: "observability-config-production", condition: GATE_IF },
-  { file: "origin-certificate-renew.yml", job: "check", concurrency: "origin-certificate-check-production", condition: GATE_IF },
-  { file: "origin-certificate-renew.yml", job: "renew", concurrency: "origin-certificate-renew-production", condition: "inputs.mode == 'RENEW'" },
+  { file: "origin-certificate-renew.yml", job: "check", concurrency: "origin-certificate-production", condition: GATE_IF },
+  { file: "origin-certificate-renew.yml", job: "renew", concurrency: "origin-certificate-production", condition: `${GATE_IF} && inputs.mode == 'RENEW'` },
   { file: "production-deploy-effective-admission-receipt.yml", job: "receipt", concurrency: null, condition: GATE_IF },
   { file: "source-free-journey-deploy.yml", job: "preview", concurrency: null, condition: "github.ref == 'refs/heads/main' && inputs.mode == 'PREVIEW' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'" },
   { file: "source-reachability-probe-deploy.yml", job: "probe", concurrency: "source-reachability-probe-production", condition: GATE_IF },
@@ -55,7 +55,8 @@ for (const { file, job, concurrency, condition } of targets) {
     const block = jobBlock(workflow, job);
     const header = block.slice(0, block.indexOf("    environment: production-deploy"));
     assert.ok(header.includes(`    if: ${condition}\n`), "job if");
-    assert.equal((workflow.match(/triggering_actor ==/gu) ?? []).length, ALLOWED.length);
+    // job마다 job if에 허용 행위자 비교가 정확히 ALLOWED 수만큼 있다.
+    assert.equal((header.match(/triggering_actor ==/gu) ?? []).length, ALLOWED.length);
     // workflow 수준 concurrency는 건너뛴 job도 슬롯을 차지하므로 job 안에 둔다.
     assert.equal(/^concurrency:/mu.test(workflow), false);
     if (concurrency !== null) {

@@ -22,16 +22,16 @@ test("job은 check와 renew 둘이고 renew는 check 뒤 RENEW에서만 돈다 (
   assert.deepEqual(jobNames, ["check", "renew"]);
   const renew = job("renew");
   assert.match(renew, /^ {4}needs: check\n/mu);
-  assert.match(renew, /^ {4}if: inputs\.mode == 'RENEW'\n/mu);
+  assert.match(renew, /^ {4}if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk' && inputs\.mode == 'RENEW'\n/mu);
   assert.doesNotMatch(renew, /always\(\)|failure\(\)|cancelled\(\)|continue-on-error/u);
 });
 
-test("check job의 sudo는 디스크 인증서 만료를 읽는 한 줄뿐이고 상태를 바꾸는 명령이 없다 (#270)", () => {
+test("check job의 sudo는 디스크 인증서 목록을 읽는 한 줄뿐이고 상태를 바꾸는 명령이 없다 (#270)", () => {
   const check = job("check");
-  const allowed = [...check.matchAll(/sudo --non-interactive openssl x509 -noout -enddate -in "\/etc\/letsencrypt\/live\/\$\{CERT_NAME\}\/cert\.pem" 2>&1\)"; then\n/gu)];
+  const allowed = [...check.matchAll(/sudo --non-interactive certbot certificates --cert-name "\$\{CERT_NAME\}" 2>&1\)" \|\| rc=\$\?\n/gu)];
   assert.equal(allowed.length, 1);
   assert.equal(sudoTokens(check), allowed.length);
-  assert.doesNotMatch(check, /\bcertbot\s+\w|\bnginx\s+-|\bsystemctl\s+(?:reload|restart|start|stop|enable|disable|mask)\b|\bservice\s+\S+\s+\S+|\bkill\b|\bjournalctl\b/u);
+  assert.doesNotMatch(check.replace(/certbot certificates --cert-name/gu, ""), /\bcertbot\s+\w|\bnginx\s+-|\bsystemctl\s+(?:reload|restart|try-restart|reload-or-restart|start|stop|enable|disable|mask)\b|\bservice\s+\S+\s+\S+|\bkill\b|\bjournalctl\b|\b(?:su|pkexec|doas)\b/u);
 });
 
 test("상태를 바꾸는 명령은 renew job에만 있고 그 순서는 갱신, 설정 검사, reload다 (#270)", () => {
@@ -50,18 +50,33 @@ test("두 job 모두 실행자 게이트와 영수증 검증을 모든 sudo보�
     const steps = body.slice(body.indexOf("    steps:\n"));
     assert.ok(steps.startsWith("    steps:\n      - name: Require an authorized dispatcher\n"), name);
     const admission = steps.indexOf("      - name: Verify production-deploy admission\n");
-    assert.ok(admission !== -1 && admission < steps.indexOf("sudo "), name);
+    assert.ok(admission !== -1 && admission < steps.search(/\bsudo\b/u), name);
+    const admissionStep = steps.slice(admission, steps.indexOf("\n      - name:", admission + 1));
+    assert.match(admissionStep, /set -euo pipefail\n\s*node tools\/platform\/verify-production-deploy-effective-admission-receipt\.mjs \\\n/u, name);
+    assert.match(body, /^ {4}permissions:\n {6}contents: read\n {6}actions: read\n/mu, name);
     assert.doesNotMatch(body, /continue-on-error/u, name);
   }
 });
 
 test("공개 로그에 원 서버 주소가 찍힐 수 있는 certbot·journal 출력을 남기지 않는다 (#270)", () => {
   assert.doesNotMatch(workflow, /journalctl|--dry-run/u);
-  assert.match(job("renew"), /certbot renew [^\n]*--quiet >\/dev\/null 2>&1; then\n/u);
+  assert.match(job("renew"), /certbot renew [^\n]*--quiet >\/dev\/null 2>&1 \|\| rc=\$\?\n/u);
+  // check는 certbot certificates 출력 중 이름·도메인·만료 줄만 남긴다.
+  assert.match(job("check"), /grep -E 'Certificate Name\|Domains\|Expiry Date'/u);
 });
 
-test("영수증 검증기가 run 기록을 읽을 권한을 선언한다 (#270)", () => {
-  assert.match(workflow, /^permissions:\n  contents: read\n(?:  #.*\n)?  actions: read\n/mu);
+test("권한은 workflow 수준에서 비우고 job마다 필요한 만큼만 선언한다 (#270)", () => {
+  assert.match(workflow, /^permissions: \{\}\n/mu);
+});
+
+test("renew의 바꾸는 step과 검증 step은 errexit로 돌고 검증은 SERVED_HOSTS 전체를 돈다 (#270)", () => {
+  const renew = job("renew");
+  for (const name of ["Origin certificate / Renew and reload nginx", "Origin certificate / Verify served certificate and public readiness"]) {
+    const at = renew.indexOf(`      - name: ${name}\n`);
+    assert.ok(at !== -1, name);
+    assert.match(renew.slice(at), /run: \|\n\s*set -euo pipefail\n/u, name);
+  }
+  assert.match(renew, /for host in \$\{SERVED_HOSTS\}; do\n/u);
 });
 
 test("공개 health 주소와 서비스 호스트는 nginx 템플릿과 인증서 이름에 맞는다 (#270)", () => {
