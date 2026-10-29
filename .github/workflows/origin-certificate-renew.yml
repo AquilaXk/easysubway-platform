@@ -1,0 +1,89 @@
+name: Origin Certificate Renew
+
+# AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
+# Cloudflare가 526을 냈다. CHECK는 인증서와 갱신 타이머 상태만 읽고, RENEW는 갱신 뒤 nginx 설정을
+# 검사하고 다시 읽은 다음 원 서버 인증서의 만료 시각과 공개 health 응답을 확인한다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "CHECK reads state only. RENEW renews the certificate and reloads nginx."
+        type: choice
+        options:
+          - CHECK
+          - RENEW
+        default: CHECK
+
+permissions:
+  contents: read
+
+jobs:
+  certificate:
+    name: Origin certificate ${{ inputs.mode }}
+    # 허용되지 않은 행위자의 dispatch는 환경·러너를 잡기 전에 job 단계에서 건너뛴다(platform#244 게이트 계약).
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'
+    concurrency:
+      group: origin-certificate-production
+      cancel-in-progress: false
+    environment: production-deploy
+    runs-on:
+      - self-hosted
+      - easysubway-production
+    timeout-minutes: 10
+    env:
+      MODE: ${{ inputs.mode }}
+      CERT_NAME: easysubway-api.aquilaxk.site
+      PUBLIC_HEALTH_URL: https://easysubway-api.aquilaxk.site/actuator/health
+    steps:
+      - name: Require an authorized dispatcher
+        shell: bash
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          DEPLOY_REF: ${{ github.ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          case "${TRIGGERING_ACTOR}" in
+            "AquilaXk") ;;
+            *) echo "deploy dispatcher is not authorized: ${TRIGGERING_ACTOR}" >&2; exit 1 ;;
+          esac
+          [[ "${DEPLOY_REF}" == "refs/heads/main" && "${RUN_ATTEMPT}" == "1" ]] || { echo "deploy must start from main on the first attempt" >&2; exit 1; }
+
+      - name: Origin certificate / Read current state
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}"
+          systemctl list-timers --all --no-pager | grep -i -E 'certbot|NEXT' || echo "certbot timer not listed"
+          systemctl status certbot.timer --no-pager || true
+          sudo --non-interactive journalctl -u certbot.service --since "-45 days" --no-pager | tail -n 60 || true
+
+      - name: Origin certificate / Renew and reload nginx
+        if: ${{ inputs.mode == 'RENEW' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --no-random-sleep-on-renew
+          sudo --non-interactive nginx -t
+          sudo --non-interactive nginx -s reload
+
+      - name: Origin certificate / Verify origin certificate and public health
+        if: ${{ inputs.mode == 'RENEW' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          not_after="$(echo | openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)"
+          echo "origin notAfter: ${not_after}"
+          remaining=$(( ( $(date -d "${not_after}" +%s) - $(date +%s) ) / 86400 ))
+          echo "days remaining: ${remaining}"
+          if [[ "${remaining}" -lt 30 ]]; then
+            echo "origin certificate still expires within 30 days" >&2
+            exit 1
+          fi
+          status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${PUBLIC_HEALTH_URL}")"
+          echo "public health: ${status}"
+          if [[ "${status}" != "200" ]]; then
+            echo "public health did not return 200 after renewal" >&2
+            exit 1
+          fi
