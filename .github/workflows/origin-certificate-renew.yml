@@ -122,6 +122,14 @@ jobs:
             [[ "${enabled}" == enabled* && "${active}" == "active" ]] && timer_ok=1
           done
           [[ "${timer_ok}" == 1 ]] || { echo "neither certbot.timer nor snap.certbot.renew.timer is enabled and active"; failed=1; }
+          # 타이머가 돌아도 서비스가 매번 실패하면 갱신되지 않는다. Result 값에는 주소가 없다.
+          service_ok=0
+          for unit in certbot.service snap.certbot.renew.service; do
+            result="$(systemctl show "${unit}" -p Result --value 2>/dev/null)" || true
+            echo "${unit}: last result=${result:-<empty>}"
+            [[ "${result}" == "success" ]] && service_ok=1
+          done
+          [[ "${service_ok}" == 1 ]] || { echo "neither certbot.service nor snap.certbot.renew.service finished its last run successfully"; failed=1; }
           echo "== renewal hooks"
           for dir in pre deploy post; do
             path="/etc/letsencrypt/renewal-hooks/${dir}"

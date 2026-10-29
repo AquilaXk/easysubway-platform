@@ -31,7 +31,7 @@ test("check job의 sudo는 디스크 인증서 목록을 읽는 한 줄뿐이고
   const allowed = [...check.matchAll(/sudo --non-interactive certbot certificates --cert-name "\$\{CERT_NAME\}" 2>&1\)" \|\| rc=\$\?\n/gu)];
   assert.equal(allowed.length, 1);
   assert.equal(sudoTokens(check), allowed.length);
-  assert.doesNotMatch(check.replace(/certbot certificates --cert-name/gu, ""), /\bcertbot\s+\w|\bnginx\s+-|\bsystemctl\s+(?:reload|restart|try-restart|reload-or-restart|start|stop|enable|disable|mask)\b|\bservice\s+\S+\s+\S+|\bkill\b|\bjournalctl\b|\b(?:su|pkexec|doas)\b/u);
+  assert.doesNotMatch(check.replace(/certbot certificates --cert-name/gu, ""), /\bcertbot\s+\w|\bnginx\s+-|\bsystemctl\s+(?:reload|restart|try-restart|reload-or-restart|start|stop|enable|disable|mask)\b|(?:^|[\s;|&(])service\s+\S+\s+(?:start|stop|restart|reload|force-reload|try-restart)\b|\bkill\b|\bjournalctl\b|\b(?:su|pkexec|doas)\b/u);
 });
 
 test("상태를 바꾸는 명령은 renew job에만 있고 그 순서는 갱신, 설정 검사, reload다 (#270)", () => {
@@ -53,7 +53,7 @@ test("두 job 모두 실행자 게이트와 영수증 검증을 모든 sudo보�
     assert.ok(admission !== -1 && admission < steps.search(/\bsudo\b/u), name);
     const admissionStep = steps.slice(admission, steps.indexOf("\n      - name:", admission + 1));
     assert.match(admissionStep, /set -euo pipefail\n\s*node tools\/platform\/verify-production-deploy-effective-admission-receipt\.mjs \\\n/u, name);
-    assert.match(body, /^ {4}permissions:\n {6}contents: read\n {6}actions: read\n/mu, name);
+    assert.match(body, /^ {4}permissions:\n {6}contents: read\n {6}actions: read\n(?! {6})/mu, name);
     assert.doesNotMatch(body, /continue-on-error/u, name);
   }
 });
@@ -102,4 +102,13 @@ test("RENEW에서는 check 진단 실패가 갱신을 막지 않고 CHECK에서�
   assert.doesNotMatch(check, /^ {4}concurrency:/mu);
   assert.match(job("renew"), /^ {4}concurrency:\n {6}group: origin-certificate-production\n/mu);
   assert.match(check, /for host in \$\{SERVED_HOSTS\}; do\n/u);
+});
+
+test("check는 타이머와 갱신 서비스의 마지막 결과가 모두 건강해야 CHECK에서 통과한다 (#270)", () => {
+  const check = job("check");
+  assert.match(check, /\[\[ "\$\{timer_ok\}" == 1 \]\] \|\| \{[^\n]*failed=1; \}\n/u);
+  assert.match(check, /systemctl show "\$\{unit\}" -p Result --value/u);
+  assert.match(check, /\[\[ "\$\{service_ok\}" == 1 \]\] \|\| \{[^\n]*failed=1; \}\n/u);
+  assert.match(check, /elif ! echo "\$\{lineage\}" \| grep -q -E '\^\\s\*Expiry Date:'; then\n\s*echo "lineage listing has no expiry line"; failed=1\n/u);
+  assert.match(check, /then echo "\$\{dir\}: unreadable"; failed=1\n/u);
 });
