@@ -1,15 +1,15 @@
 name: Origin Certificate Renew
 
 # AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
-# Cloudflare가 526을 냈다. CHECK는 디스크의 인증서, nginx가 실제로 내보내는 인증서, 갱신 타이머·hook·
-# dry-run 결과를 읽기만 한다. RENEW는 갱신 뒤 nginx 설정을 검사하고 다시 읽은 다음, 내보내는 인증서가
+# Cloudflare가 526을 냈다. CHECK는 nginx가 실제로 내보내는 인증서, 디스크의 인증서, 갱신 타이머와 hook을 읽고,
+# 스테이징 CA로 갱신 dry-run을 한다(dry-run은 ACME 확인 파일과 pre·post hook을 실행하므로 읽기 전용은 아니다). RENEW는 갱신 뒤 nginx 설정을 검사하고 다시 읽은 다음, 내보내는 인증서가
 # 30일 넘게 남고 이 호스트 이름과 맞는지, 공개 readiness가 200인지 확인한다. 어느 하나라도 아니면 실패한다.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "CHECK reads state only. RENEW renews the certificate and reloads nginx."
+        description: "CHECK reads state and runs a staging dry run. RENEW renews the certificate and reloads nginx."
         type: choice
         options:
           - CHECK
@@ -18,6 +18,8 @@ on:
 
 permissions:
   contents: read
+  # 영수증 검증기가 Actions run 기록으로 실행자를 확인한다.
+  actions: read
 
 jobs:
   certificate:
@@ -78,26 +80,41 @@ jobs:
 
       - name: Origin certificate / Read current state
         shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
+          echo "== served by nginx on 127.0.0.1:443"
+          handshake_err="$(mktemp)"
+          served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>"${handshake_err}" | openssl x509 -noout -subject -enddate -ext subjectAltName 2>/dev/null || true)"
+          if [[ -n "${served}" ]]; then echo "${served}"; else echo "no certificate read; handshake: $(tail -n 2 "${handshake_err}" | tr '\n' ' ')"; fi
+          rm -f "${handshake_err}"
           echo "== on-disk lineage"
           sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}"
-          echo "== served by nginx on 127.0.0.1:443"
-          served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>&1 | openssl x509 -noout -subject -enddate 2>&1 || true)"
-          echo "${served:-no certificate read}"
-          echo "== renewal timer"
-          echo "certbot.timer enabled: $(systemctl is-enabled certbot.timer 2>&1 || true)"
-          echo "certbot.timer active: $(systemctl is-active certbot.timer 2>&1 || true)"
-          systemctl list-timers certbot.timer --all --no-pager || true
+          echo "== renewal units"
+          systemctl list-unit-files --no-pager '*certbot*' || true
+          systemctl list-timers --all --no-pager | grep -i certbot || echo "no certbot timer is scheduled"
           echo "== renewal hooks"
-          sudo --non-interactive ls -la /etc/letsencrypt/renewal-hooks/deploy /etc/letsencrypt/renewal-hooks/post || echo "renewal hook directories could not be listed (exit $?)"
-          echo "== renewal dry run"
-          sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --dry-run --no-random-sleep-on-renew || echo "dry run failed (exit $?)"
+          for dir in pre deploy post; do
+            path="/etc/letsencrypt/renewal-hooks/${dir}"
+            if [[ -d "${path}" ]]; then
+              echo "${dir}: $(find "${path}" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
+              grep -l -E 'reload|restart|nginx' "${path}"/* 2>/dev/null | sed 's/^/  touches nginx: /' || true
+            else
+              echo "${dir}: absent"
+            fi
+          done
           echo "== recent certbot log"
-          if ! log="$(sudo --non-interactive journalctl -u certbot.service --since "-45 days" --no-pager 2>&1)"; then
+          if ! log="$(sudo --non-interactive journalctl -u 'certbot*' -u 'snap.certbot*' --since "-45 days" --no-pager 2>&1)"; then
             echo "journal could not be read: ${log}"
+          elif [[ -z "${log//[[:space:]]/}" ]]; then
+            echo "no journal entries"
           else
             echo "${log}" | tail -n 60
+          fi
+          if [[ "${MODE}" == "CHECK" ]]; then
+            echo "== renewal dry run (staging CA)"
+            timeout 120 sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --dry-run --no-random-sleep-on-renew || echo "::warning::dry run failed (exit $?)"
           fi
 
       - name: Origin certificate / Renew and reload nginx
@@ -115,20 +132,26 @@ jobs:
         run: |
           set -euo pipefail
           served=""
+          last_seen="no certificate served"
           for _ in $(seq 1 10); do
-            served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 2>/dev/null || true)"
-            if [[ -n "${served}" ]] && echo "${served}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null; then
-              break
+            candidate="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 2>/dev/null || true)"
+            if [[ -n "${candidate}" ]]; then
+              last_seen="$(echo "${candidate}" | openssl x509 -noout -subject -enddate | tr '\n' ' ')"
+              if echo "${candidate}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null; then
+                served="${candidate}"
+                break
+              fi
             fi
-            served=""
             sleep 2
           done
           if [[ -z "${served}" ]]; then
-            echo "origin does not serve a certificate valid for more than 30 days" >&2
+            echo "origin does not serve a certificate valid for more than 30 days; last seen: ${last_seen}" >&2
             exit 1
           fi
           echo "${served}" | openssl x509 -noout -subject -enddate
-          echo "${served}" | openssl x509 -noout -checkhost "${CERT_NAME}" | grep -q 'does match' || { echo "served certificate does not match ${CERT_NAME}" >&2; exit 1; }
+          for host in "${CERT_NAME}" easysubway.aquilaxk.site; do
+            echo "${served}" | openssl x509 -noout -checkhost "${host}" | grep -q 'does match' || { echo "served certificate does not match ${host}" >&2; exit 1; }
+          done
           status=""
           for _ in $(seq 1 10); do
             status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${PUBLIC_HEALTH_URL}" || true)"

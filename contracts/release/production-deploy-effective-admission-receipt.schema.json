@@ -55,6 +55,7 @@
                   "enum": [
                     ".github/workflows/data-workflow-scheduler-deploy.yml",
                     ".github/workflows/observability-config-deploy.yml",
+                    ".github/workflows/origin-certificate-renew.yml",
                     ".github/workflows/production-deploy-effective-admission-receipt.yml",
                     ".github/workflows/source-free-journey-deploy.yml",
                     ".github/workflows/source-free-journey-k3s-deploy.yml",
