@@ -1,15 +1,17 @@
 name: Origin Certificate Renew
 
 # AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
-# Cloudflare가 526을 냈다. CHECK는 nginx가 실제로 내보내는 인증서, 디스크의 인증서, 갱신 타이머와 hook을 읽고,
-# 스테이징 CA로 갱신 dry-run을 한다(dry-run은 ACME 확인 파일과 pre·post hook을 실행하므로 읽기 전용은 아니다). RENEW는 갱신 뒤 nginx 설정을 검사하고 다시 읽은 다음, 내보내는 인증서가
-# 30일 넘게 남고 이 호스트 이름과 맞는지, 공개 readiness가 200인지 확인한다. 어느 하나라도 아니면 실패한다.
+# Cloudflare가 526을 냈다.
+# check job은 nginx가 내보내는 인증서와 디스크 인증서의 만료, 갱신 타이머 상태만 읽는다.
+# renew job은 RENEW일 때만 돌며, 갱신하고 nginx 설정을 검사해 다시 읽은 뒤 내보내는 인증서가
+# 30일 넘게 남고 nginx가 서비스하는 두 호스트와 맞는지, 공개 readiness가 200인지 확인한다.
+# 이 레포는 공개라 로그를 누구나 읽는다. 원 서버 주소가 찍힐 수 있는 certbot 로그와 ACME 출력은 남기지 않는다.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "CHECK reads state and runs a staging dry run. RENEW renews the certificate and reloads nginx."
+        description: "CHECK reads expiry and timer state only. RENEW renews the certificate and reloads nginx."
         type: choice
         options:
           - CHECK
@@ -21,13 +23,20 @@ permissions:
   # 영수증 검증기가 Actions run 기록으로 실행자를 확인한다.
   actions: read
 
+env:
+  CERT_NAME: easysubway-api.aquilaxk.site
+  # nginx가 443에서 같은 인증서로 서비스하는 이름(infra/nginx/host-easysubway.conf.template의 server_name).
+  SERVED_HOSTS: easysubway-api.aquilaxk.site easysubway.aquilaxk.site
+  # 호스트 nginx가 공개로 여는 actuator 경로는 readiness와 liveness뿐이다.
+  PUBLIC_HEALTH_URL: https://easysubway-api.aquilaxk.site/actuator/health/readiness
+
 jobs:
-  certificate:
-    name: Origin certificate ${{ inputs.mode }}
+  check:
+    name: Origin certificate state
     # 허용되지 않은 행위자의 dispatch는 환경·러너를 잡기 전에 job 단계에서 건너뛴다(platform#244 게이트 계약).
     if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'
     concurrency:
-      group: origin-certificate-production
+      group: origin-certificate-check-production
       cancel-in-progress: false
     environment: production-deploy
     runs-on:
@@ -35,11 +44,7 @@ jobs:
       - Linux
       - ARM64
       - easysubway-production
-    timeout-minutes: 10
-    env:
-      CERT_NAME: easysubway-api.aquilaxk.site
-      # 호스트 nginx가 공개로 여는 actuator 경로는 readiness와 liveness뿐이다(infra/nginx/host-easysubway.conf.template).
-      PUBLIC_HEALTH_URL: https://easysubway-api.aquilaxk.site/actuator/health/readiness
+    timeout-minutes: 5
     steps:
       - name: Require an authorized dispatcher
         shell: bash
@@ -78,79 +83,126 @@ jobs:
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             > "${RUNNER_TEMP}/admission-receipt.json"
 
-      - name: Origin certificate / Read current state
+      - name: Origin certificate / Read expiry and renewal timer
         shell: bash
-        env:
-          MODE: ${{ inputs.mode }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          failed=0
           echo "== served by nginx on 127.0.0.1:443"
-          handshake_err="$(mktemp)"
-          served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>"${handshake_err}" | openssl x509 -noout -subject -enddate -ext subjectAltName 2>/dev/null || true)"
-          if [[ -n "${served}" ]]; then echo "${served}"; else echo "no certificate read; handshake: $(tail -n 2 "${handshake_err}" | tr '\n' ' ')"; fi
-          rm -f "${handshake_err}"
+          if served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null)"; then
+            echo "${served}"
+          else
+            echo "no certificate read from 127.0.0.1:443"; failed=1
+          fi
           echo "== on-disk lineage"
-          sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}"
-          echo "== renewal units"
-          systemctl list-unit-files --no-pager '*certbot*' || true
-          systemctl list-timers --all --no-pager | grep -i certbot || echo "no certbot timer is scheduled"
+          if lineage="$(sudo --non-interactive openssl x509 -noout -enddate -in "/etc/letsencrypt/live/${CERT_NAME}/cert.pem" 2>&1)"; then
+            echo "${lineage}"
+          else
+            echo "lineage could not be read (permission or missing file)"; failed=1
+          fi
+          echo "== renewal timer"
+          for unit in certbot.timer snap.certbot.renew.timer; do
+            echo "${unit}: enabled=$(systemctl is-enabled "${unit}" 2>/dev/null || echo no) active=$(systemctl is-active "${unit}" 2>/dev/null || echo no)"
+          done
           echo "== renewal hooks"
           for dir in pre deploy post; do
             path="/etc/letsencrypt/renewal-hooks/${dir}"
-            if [[ -d "${path}" ]]; then
-              echo "${dir}: $(find "${path}" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
-              grep -l -E 'reload|restart|nginx' "${path}"/* 2>/dev/null | sed 's/^/  touches nginx: /' || true
-            else
-              echo "${dir}: absent"
+            if [[ ! -e "${path}" ]]; then echo "${dir}: absent"
+            elif [[ ! -r "${path}" || ! -x "${path}" ]]; then echo "${dir}: unreadable"
+            else echo "${dir}: $(find "${path}" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
             fi
           done
-          echo "== recent certbot log"
-          if ! log="$(sudo --non-interactive journalctl -u 'certbot*' -u 'snap.certbot*' --since "-45 days" --no-pager 2>&1)"; then
-            echo "journal could not be read: ${log}"
-          elif [[ -z "${log//[[:space:]]/}" ]]; then
-            echo "no journal entries"
-          else
-            echo "${log}" | tail -n 60
-          fi
-          if [[ "${MODE}" == "CHECK" ]]; then
-            echo "== renewal dry run (staging CA)"
-            timeout 120 sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --dry-run --no-random-sleep-on-renew || echo "::warning::dry run failed (exit $?)"
-          fi
+          exit "${failed}"
+
+  renew:
+    name: Origin certificate renew
+    # 실행자 게이트는 needs로 이어받는다. check가 건너뛰어지거나 실패하면 이 job도 돌지 않는다(첫 step 게이트는 그대로 둔다).
+    needs: check
+    if: inputs.mode == 'RENEW'
+    concurrency:
+      group: origin-certificate-renew-production
+      cancel-in-progress: false
+    environment: production-deploy
+    runs-on:
+      - self-hosted
+      - Linux
+      - ARM64
+      - easysubway-production
+    timeout-minutes: 8
+    steps:
+      - name: Require an authorized dispatcher
+        shell: bash
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          DEPLOY_REF: ${{ github.ref }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          case "${TRIGGERING_ACTOR}" in
+            "AquilaXk") ;;
+            *) echo "deploy dispatcher is not authorized: ${TRIGGERING_ACTOR}" >&2; exit 1 ;;
+          esac
+          [[ "${DEPLOY_REF}" == "refs/heads/main" && "${RUN_ATTEMPT}" == "1" ]] || { echo "deploy must start from main on the first attempt" >&2; exit 1; }
+
+      - name: Checkout Platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Verify production-deploy admission
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node tools/platform/verify-production-deploy-effective-admission-receipt.mjs \
+            --repository "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF}" \
+            --workflow-sha "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${RUNNER_TEMP}/admission-receipt.json"
 
       - name: Origin certificate / Renew and reload nginx
-        if: ${{ inputs.mode == 'RENEW' }}
         shell: bash
         run: |
           set -euo pipefail
-          sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --no-random-sleep-on-renew
+          # certbot 출력에는 ACME 검증 주소가 찍힐 수 있어 공개 로그에 남기지 않고 종료 코드만 쓴다.
+          if ! sudo --non-interactive certbot renew --cert-name "${CERT_NAME}" --no-random-sleep-on-renew --quiet >/dev/null 2>&1; then
+            echo "certbot renew failed; read /var/log/letsencrypt/letsencrypt.log on the host" >&2
+            exit 1
+          fi
           sudo --non-interactive nginx -t
           sudo --non-interactive nginx -s reload
 
       - name: Origin certificate / Verify served certificate and public readiness
-        if: ${{ inputs.mode == 'RENEW' }}
         shell: bash
         run: |
           set -euo pipefail
-          served=""
-          last_seen="no certificate served"
-          for _ in $(seq 1 10); do
-            candidate="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${CERT_NAME}" 2>/dev/null | openssl x509 2>/dev/null || true)"
-            if [[ -n "${candidate}" ]]; then
-              last_seen="$(echo "${candidate}" | openssl x509 -noout -subject -enddate | tr '\n' ' ')"
-              if echo "${candidate}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null; then
-                served="${candidate}"
-                break
+          for host in ${SERVED_HOSTS}; do
+            served=""
+            last_seen="no certificate served"
+            for _ in $(seq 1 10); do
+              candidate="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${host}" 2>/dev/null | openssl x509 2>/dev/null || true)"
+              if [[ -n "${candidate}" ]]; then
+                last_seen="$(echo "${candidate}" | openssl x509 -noout -enddate)"
+                if echo "${candidate}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null \
+                  && echo "${candidate}" | openssl x509 -noout -checkhost "${host}" | grep -q 'does match'; then
+                  served="${candidate}"
+                  break
+                fi
               fi
+              sleep 2
+            done
+            if [[ -z "${served}" ]]; then
+              echo "${host}: origin does not serve a matching certificate valid for more than 30 days; last seen: ${last_seen}" >&2
+              exit 1
             fi
-            sleep 2
-          done
-          if [[ -z "${served}" ]]; then
-            echo "origin does not serve a certificate valid for more than 30 days; last seen: ${last_seen}" >&2
-            exit 1
-          fi
-          echo "${served}" | openssl x509 -noout -subject -enddate
-          for host in "${CERT_NAME}" easysubway.aquilaxk.site; do
-            echo "${served}" | openssl x509 -noout -checkhost "${host}" | grep -q 'does match' || { echo "served certificate does not match ${host}" >&2; exit 1; }
+            echo "${host}: $(echo "${served}" | openssl x509 -noout -enddate)"
           done
           status=""
           for _ in $(seq 1 10); do
@@ -159,7 +211,4 @@ jobs:
             sleep 3
           done
           echo "public readiness: ${status}"
-          if [[ "${status}" != "200" ]]; then
-            echo "public readiness did not return 200 after renewal" >&2
-            exit 1
-          fi
+          [[ "${status}" == "200" ]] || { echo "public readiness did not return 200 after renewal" >&2; exit 1; }
