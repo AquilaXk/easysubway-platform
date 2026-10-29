@@ -74,7 +74,8 @@ test("renew의 바꾸는 step과 검증 step은 errexit로 돌고 검증은 SERV
   for (const name of ["Origin certificate / Renew and reload nginx", "Origin certificate / Verify served certificate and public readiness"]) {
     const at = renew.indexOf(`      - name: ${name}\n`);
     assert.ok(at !== -1, name);
-    assert.match(renew.slice(at), /run: \|\n\s*set -euo pipefail\n/u, name);
+    const end = renew.indexOf("\n      - name:", at + 1);
+    assert.match(renew.slice(at, end === -1 ? undefined : end), /run: \|\n\s*set -euo pipefail\n/u, name);
   }
   assert.match(renew, /for host in \$\{SERVED_HOSTS\}; do\n/u);
 });
@@ -92,4 +93,13 @@ test("공개 health 주소와 서비스 호스트는 nginx 템플릿과 인증�
   const hosts = workflow.match(/^ {2}SERVED_HOSTS: (.+)$/mu)[1].trim().split(/\s+/u);
   assert.deepEqual(hosts, serverNames);
   assert.equal(hosts[0], cert);
+});
+
+test("RENEW에서는 check 진단 실패가 갱신을 막지 않고 CHECK에서만 실패한다 (#270)", () => {
+  const check = job("check");
+  assert.match(check, /if \[\[ "\$\{failed\}" == 1 \]\]; then\n\s*if \[\[ "\$\{MODE\}" == "CHECK" \]\]; then exit 1; fi\n/u);
+  assert.match(check, /MODE: \$\{\{ inputs\.mode \}\}\n/u);
+  assert.doesNotMatch(check, /^ {4}concurrency:/mu);
+  assert.match(job("renew"), /^ {4}concurrency:\n {6}group: origin-certificate-production\n/mu);
+  assert.match(check, /for host in \$\{SERVED_HOSTS\}; do\n/u);
 });
