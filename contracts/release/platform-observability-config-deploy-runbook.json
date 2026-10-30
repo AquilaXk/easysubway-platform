@@ -7,7 +7,7 @@
   },
   "workflow": ".github/workflows/observability-config-deploy.yml",
   "tool": "tools/platform/deploy-observability-config.mjs",
-  "scope": "compose 프로젝트 easysubway의 prometheus 서비스 하나. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
+  "scope": "compose 프로젝트 easysubway의 prometheus 서비스와, 그 job이 가리키는 origin-certificate-probe 서비스(platform#270, blackbox 설정). 아래 첫 배포 절차는 prometheus만 다룬다. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
   "hostLayout": {
     "root": "/opt/easysubway/observability",
     "releases": "releases/<40자 커밋 SHA> (읽기 전용 복사본, 내용이 다르면 덮어쓰지 않음)",

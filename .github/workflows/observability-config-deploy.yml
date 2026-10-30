@@ -3,7 +3,7 @@ name: Observability Config Deploy
 # AquilaXk/easysubway-platform#227: platform 레포 커밋의 infra/ 관측 설정을 운영 호스트의 Prometheus에 배포하는 영구 경로.
 # PREVIEW는 GitHub-hosted runner에서 promtool 검증과 격리 reference Prometheus의 기대 상태만 만든다(호스트 접근·secret 없음).
 # DEPLOY는 승인 환경(production-deploy)의 self-hosted runner에서만 돌고, 검증을 통과한 설정만 current로 전환해 prometheus
-# compose 서비스 하나를 맞춘 뒤 라이브 /api/v1/status/config·rules·flags를 커밋 기준과 대조하고 receipt를 남긴다. PR 병합만으로 배포되지 않는다.
+# compose 서비스(prometheus와 원 서버 인증서 probe)를 맞춘 뒤 라이브 /api/v1/status/config·rules·flags를 커밋 기준과 대조하고 receipt를 남긴다. PR 병합만으로 배포되지 않는다.
 # 롤백은 직전 배포 커밋을 commit 입력으로 다시 DEPLOY하는 것이다(같은 검증·대조·receipt 경로).
 on:
   workflow_dispatch:

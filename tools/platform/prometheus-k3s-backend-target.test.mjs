@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { k3sCandidateInputFixture } from "./k3s-candidate-input-fixture.mjs";
 import { PRODUCTION_DB_COMPOSE_BACKEND_SERVICES } from "./run-k3s-journey-activation.mjs";
+import { scrapeTargetsByJob } from "./prometheus-scrape-config.mjs";
 
 // Issue #221: K3s 활성화는 compose backend를 drain하고 트래픽을 journey-active Service로 옮긴다.
 // Prometheus backend 수집 대상은 그 활성 Service를 따라가야 하며, drain되는 compose DNS를 가리키면 안 된다.
@@ -24,40 +25,6 @@ function readJson(path) {
 
 function observabilityContract() {
   return readJson("contracts/release/platform-k3s-observability-contract.json");
-}
-
-// prometheus.yml의 scrape_configs에서 job별 static target 문자열을 뽑는다(YAML 의존성 없이 고정 형식만 해석).
-function scrapeTargetsByJob(text) {
-  const jobs = new Map();
-  let current;
-  let inTargets = false;
-  for (const line of text.split("\n")) {
-    const job = line.match(/^  - job_name: "([^"]+)"\s*$/);
-    if (job) {
-      current = job[1];
-      jobs.set(current, []);
-      inTargets = false;
-      continue;
-    }
-    if (!current) continue;
-    if (/^\s+- targets:\s*$/.test(line)) {
-      inTargets = true;
-      continue;
-    }
-    const inline = line.match(/^\s+- targets: \[(.*)\]\s*$/);
-    if (inline) {
-      jobs.get(current).push(...inline[1].split(",").map((entry) => entry.trim().replace(/^"|"$/g, "")));
-      inTargets = false;
-      continue;
-    }
-    const item = line.match(/^\s+- "([^"]+)"\s*$/);
-    if (inTargets && item) {
-      jobs.get(current).push(item[1]);
-      continue;
-    }
-    if (inTargets && line.trim() !== "") inTargets = false;
-  }
-  return jobs;
 }
 
 function targetHost(target) {

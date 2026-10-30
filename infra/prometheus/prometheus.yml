@@ -60,7 +60,7 @@ scrape_configs:
         replacement: public-edge-probe:9115
 
   # 원 서버 인증서 만료 감시(platform#270). 공개 주소는 Cloudflare 엣지 인증서를 보여 주므로 호스트 nginx 443에 직접 붙는다.
-  # host.docker.internal은 public-edge-probe의 extra_hosts(host-gateway)로 docker 네트워크 게이트웨이를 가리킨다.
+  # host.docker.internal은 origin-certificate-probe의 extra_hosts(host-gateway)로 docker 네트워크 게이트웨이를 가리킨다.
   - job_name: "origin_certificate_probe"
     metrics_path: "/probe"
     scrape_interval: 1m
@@ -75,4 +75,4 @@ scrape_configs:
       - source_labels: [__param_target]
         target_label: instance
       - target_label: __address__
-        replacement: public-edge-probe:9115
+        replacement: origin-certificate-probe:9115
