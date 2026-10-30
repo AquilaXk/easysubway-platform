@@ -23,8 +23,8 @@ test("PREVIEW는 호스트를 읽지도 쓰지도 않고 promtool 검증과 refe
     writeFileSync(join(box.sourceRoot, "infra", "prometheus", "nested", "decoy.test.yml"), "tests: []\n");
     const result = await deployObservabilityConfig(base(box, host, { mode: "PREVIEW", deployRoot: undefined }));
     const trail = verbs(host);
-    assert.deepEqual(trail.slice(0, 6), ["git", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
-    assert.ok(trail.slice(6, -1).every((verb) => verb === "exec"), "reference는 exec로 읽기만 한다");
+    assert.deepEqual(trail.slice(0, 7), ["git", "ps:reference", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"], "지난 실행이 남긴 reference 컨테이너만 찾아본 뒤 검증한다");
+    assert.ok(trail.slice(7, -1).every((verb) => verb === "exec"), "reference는 exec로 읽기만 한다");
     for (const forbidden of ["inspect", "ps", "volume", "restart", "compose:up"]) assert.equal(verbs(host).includes(forbidden), false, forbidden);
     assert.equal(trail.at(-1), "rm");
     assert.equal(result.mode, "PREVIEW");

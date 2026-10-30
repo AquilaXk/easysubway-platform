@@ -94,12 +94,12 @@ function hostContext({
   mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale", liveAfterRestore = null, probeExistingId = "a".repeat(64), probeMountedBefore = "current", composeDefines = ["prometheus", PROBE_SERVICE],
   seriesWarmupReads = 0, missingSeries = [], staleSeriesReads = 0, staleSampleAt = EPOCH0 - 20, probeSuccessValue = "1", restoreSeries = {},
   composeNetwork = { exists: true, subnet: COMPOSE_SUBNET }, detachOnFailedUp = false, connectFails = false, composeNetworkConfig = undefined, changeOnRestoreUp = null,
-  forwardUpFails = false, detachedBefore = false, restoreComposeNetworkConfig = undefined,
+  forwardUpFails = false, detachedBefore = false, restoreComposeNetworkConfig = undefined, leftoverReferences = [], probeRunning = true, probeDetached = false,
 } = {}) {
   const state = {
     containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: mountedBefore,
-    probe: { id: probeExistingId, mounted: probeMountedBefore, networks: [COMPOSE_NETWORK_NAME] }, dirs: {}, upAttempts: 0, networks: detachedBefore ? [] : [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
-    composeNetwork: { ...composeNetwork }, detachedReads: 0,
+    probe: { id: probeExistingId, mounted: probeMountedBefore, networks: probeDetached ? [] : [COMPOSE_NETWORK_NAME], running: probeRunning }, dirs: {}, upAttempts: 0, networks: detachedBefore ? [] : [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
+    composeNetwork: { ...composeNetwork }, detachedReads: 0, references: new Set(leftoverReferences),
   };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
@@ -179,6 +179,7 @@ function recreatePrometheus({ state, config }) {
 }
 
 function upProbe(state, recreated) {
+  state.probe.running = true;
   if (state.probe.id === null || recreated) state.probe.id = (9 + state.generation).toString(16).repeat(64);
   if (recreated) state.probe.mounted = realpathSync(state.dirs.current);
 }
@@ -190,12 +191,17 @@ function dockerRun(ctx, args) {
     return ok("SUCCESS");
   }
   ctx.reference = args[args.indexOf("--name") + 1];
+  ctx.state.references.add(ctx.reference);
   return ok("refid\n");
 }
 
+// 삭제는 reference 컨테이너(이번 실행의 것과 지난 실행이 남긴 것)만 허용한다. 남아 있는 reference는 state.references로 본다.
 function dockerRm(ctx, args, line) {
   assert.deepEqual(args.slice(0, 3), ["rm", "-f", "-v"], line);
-  assert.equal(args[3], ctx.reference, `삭제는 reference 컨테이너만: ${line}`);
+  for (const name of args.slice(3)) {
+    assert.ok(ctx.state.references.has(name), `삭제는 reference 컨테이너만: ${line}`);
+    ctx.state.references.delete(name);
+  }
   return ok("");
 }
 
@@ -269,7 +275,7 @@ function prometheusRecord({ state, config }) {
   };
 }
 
-const probeRecord = ({ state }) => ({ Id: state.probe.id, Name: `/${PROBE_CONTAINER}`, Image: "sha256:blackbox", Config: { Image: PROBE_IMAGE, Labels: { "com.docker.compose.service": PROBE_SERVICE } }, State: { Running: true, StartedAt: "2026-10-08T00:00:01Z" }, NetworkSettings: { Networks: Object.fromEntries(state.probe.networks.map((name) => [name, {}])) } });
+const probeRecord = ({ state }) => ({ Id: state.probe.id, Name: `/${PROBE_CONTAINER}`, Image: "sha256:blackbox", Config: { Image: PROBE_IMAGE, Labels: { "com.docker.compose.service": PROBE_SERVICE } }, State: { Running: state.probe.running, StartedAt: "2026-10-08T00:00:01Z" }, NetworkSettings: { Networks: Object.fromEntries(state.probe.networks.map((name) => [name, {}])) } });
 
 const otherRecord = (other) => ({ Id: other.id, Name: `/${other.name}`, Image: other.image, Config: { Image: other.image }, State: { Running: true, StartedAt: other.startedAt } });
 
@@ -287,6 +293,11 @@ function dockerInspect(ctx, args) {
 }
 
 function dockerPs({ state, others }, args) {
+  const nameFilter = args.find((arg) => arg.startsWith("name="));
+  if (nameFilter) {
+    assert.deepEqual(args, ["ps", "-a", "--filter", "name=^easysubway-observability-ref-", "--format", "{{.Names}}"], "이름으로 찾는 것은 reference 컨테이너뿐이다");
+    return ok([...state.references].map((name) => `${name}\n`).join(""));
+  }
   const probeShown = state.probe.id !== null;
   if (args.includes("-q")) return ok([state.containerId, ...(probeShown ? [state.probe.id] : []), ...others.map((other) => other.id)].join("\n"));
   const rows = [["easysubway-prometheus", state.containerId.slice(0, 12)], ...(probeShown ? [[PROBE_CONTAINER, state.probe.id.slice(0, 12)]] : []), ...others.map((other) => [other.name, other.id.slice(0, 12)])];
@@ -324,6 +335,8 @@ const DOCKER_VERBS = new Map([["pull", dockerPull], ["compose", dockerCompose], 
 export function createHost(options) {
   const ctx = hostContext(options);
   const runner = async (command, args, callOptions = {}) => {
+    // lib/process.mjs의 runCommand처럼 이미 중단된 signal로 부른 명령은 시작하지 않는다.
+    if (callOptions.signal?.aborted) throw new Error("host command interrupted before it started");
     ctx.calls.push({ command, args, env: callOptions.env });
     const line = `${command} ${args.join(" ")}`;
     if (command === "git") return ok(`${ctx.config.headCommit}\n`);
@@ -381,6 +394,7 @@ function verbOf({ command, args }) {
   if (args[0] === "compose") return `compose:${args.includes("up") ? "up" : "config"}`;
   if (args[0] === "run") return runVerb(args);
   if (args[0] === "network") return `network:${args[1]}`;
+  if (args[0] === "ps" && args.some((arg) => arg.startsWith("name="))) return "ps:reference";
   return args[0];
 }
 
@@ -409,4 +423,32 @@ export function seedCurrentRelease(box, commit = COMMIT) {
   mkdirSync(join(box.observability, "releases"), { recursive: true });
   cpSync(join(box.sourceRoot, "infra"), release, { recursive: true });
   symlinkSync(join("releases", commit), join(box.observability, "current"));
+}
+
+export const referenceName = (commit, pid = process.pid) => `easysubway-observability-ref-${commit.slice(0, 12)}-${pid}`;
+
+/**
+ * predicate에 맞는 첫 호출을 붙잡는 runner. 그 호출이 시작되면 onPause()를 부르고, 중단 signal을 받을 때까지 끝나지 않는다(실제 명령처럼 signal을
+ * 따른다). 중단이 오지 않으면 PAUSE_LIMIT_MS 뒤 거부해 시험이 멈추지 않는다. 나머지 호출은 가짜 호스트로 보낸다. paused는 붙잡힌 호출의 인자다.
+ */
+const PAUSE_LIMIT_MS = 10_000;
+
+export function pauseOn(host, predicate, onPause) {
+  const paused = [];
+  const runner = (command, args, options = {}) => {
+    if (paused.length > 0 || !predicate(command, args)) return host.runner(command, args, options);
+    host.calls.push({ command, args, env: options.env });
+    paused.push(args);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("paused host command was never interrupted")), PAUSE_LIMIT_MS);
+      const interrupted = () => {
+        clearTimeout(timer);
+        reject(new Error("host command interrupted"));
+      };
+      if (options.signal?.aborted) interrupted();
+      options.signal?.addEventListener("abort", interrupted, { once: true });
+      setImmediate(onPause);
+    });
+  };
+  return { runner, paused };
 }
