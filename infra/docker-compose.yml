@@ -143,6 +143,22 @@ services:
     profiles:
       - observability
 
+  # 호스트 nginx 443의 원 서버 인증서 만료를 읽는 전용 blackbox다(platform#270). 운영 readiness를 보는 public-edge-probe와
+  # 설정·수명을 분리해, 이 설정이 깨져도 readiness 감시가 같이 죽지 않는다.
+  origin-certificate-probe:
+    image: prom/blackbox-exporter:v0.28.0
+    container_name: easysubway-origin-certificate-probe
+    restart: unless-stopped
+    profiles:
+      - observability
+    command:
+      - "--config.file=/etc/blackbox_exporter/origin-certificate.yml"
+    volumes:
+      - ./blackbox/origin-certificate.yml:/etc/blackbox_exporter/origin-certificate.yml:ro
+    # origin_certificate_probe job이 호스트 nginx의 443을 docker 네트워크 게이트웨이로 직접 TLS 연결한다.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   docker-runtime-probe:
     image: ghcr.io/google/cadvisor:v0.60.6
     container_name: easysubway-docker-runtime-probe

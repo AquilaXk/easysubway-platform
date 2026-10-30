@@ -7,7 +7,7 @@
   },
   "workflow": ".github/workflows/observability-config-deploy.yml",
   "tool": "tools/platform/deploy-observability-config.mjs",
-  "scope": "compose 프로젝트 easysubway의 prometheus 서비스 하나. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
+  "scope": "compose 프로젝트 easysubway의 prometheus 서비스와, release가 infra/blackbox를 담을 때 그 job이 가리키는 origin-certificate-probe 서비스(platform#270). origin-certificate-probe의 설정 내용은 이 도구만 맞추고 backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 한다. infra/blackbox가 없는 옛 커밋은 prometheus만 맞추고 probe 컨테이너는 건드리지 않는다. 아래 첫 배포 절차는 prometheus만 다룬다. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
   "hostLayout": {
     "root": "/opt/easysubway/observability",
     "releases": "releases/<40자 커밋 SHA> (읽기 전용 복사본, 내용이 다르면 덮어쓰지 않음)",
@@ -53,17 +53,22 @@
       "run": "gh workflow run observability-config-deploy.yml -R AquilaXk/easysubway-platform --ref main -f mode=DEPLOY"
     }
   ],
+  "postMerge": {
+    "required": "infra/blackbox/** 또는 compose의 origin-certificate-probe 서비스(이미지·command·마운트·환경)를 바꾸는 PR은 병합한 뒤 그 main 커밋을 이 도구로 DEPLOY한다. 실제 DEPLOY와 QA 승인은 위 deploy 절을 따른다.",
+    "why": "origin-certificate-probe의 설정 내용과 이미지는 이 도구만 맞춘다. backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 하고 다시 만들거나 갱신하지 않으며, 이미지 갱신 자동화도 닿지 않는다. 그래서 병합만으로는 운영 probe가 바뀌지 않고, prometheus.yml의 module 이름만 먼저 반영되는 식으로 두 쪽이 어긋나 OriginCertificateProbeFailed가 울릴 수 있다.",
+    "check": "DEPLOY receipt의 units.origin-certificate-probe가 있고 verification.liveSeries의 표본 시각이 verification.convergedAt보다 뒤이며 probe_success 값이 1이다"
+  },
   "verify": [
     {
       "title": "receipt 확인",
-      "check": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/receipt.json에서 statusConfigSha256 == expectedStatusConfigSha256, rulesSha256 일치, absentJobs == [back_worker], targets가 모든 job up, ruleHealth ok == total, untouchedContainers, volume before/after 동일"
+      "check": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/receipt.json에서 statusConfigSha256 == expectedStatusConfigSha256, rulesSha256 일치, absentJobs == [back_worker], targets가 모든 job up, ruleHealth ok == total, untouchedContainers, volume before/after 동일. units는 appliedServices와 같은 서비스를 담는다: units.prometheus와(infra/blackbox가 있는 커밋이면) units.origin-certificate-probe의 idBefore·idAfter·action. verification.liveSeries(origin_certificate_probe의 probe_ssl_earliest_cert_expiry와 probe_success)는 컨테이너 수렴이 끝난 시각(verification.convergedAt) 뒤에 만든 표본이 있고 probe_success 값이 1이어야 통과한 조건이며, 관측한 표본 시각과 값이 그대로 남는다. 자동 복원이 RESTORED로 끝난 failure-receipt.json의 externalSeries는 복원된 probe의 같은 시계열을 관측만 한 결과다. 복원 판정은 복원한 probe의 probe_success에 수렴 뒤 새 표본이 있는지만 보므로(값은 무관) ok가 false여도 복원 실패가 아니다. 이때 detail과 series의 값을 읽는다. probe_success가 0이면 exporter는 scrape되었으나 호스트 443을 읽지 못한 것이라 route와 TLS 쪽이다(이때 만료 시계열은 없는 것이 정상이다). 새 표본이 없다는 detail이면 scrape와 설정 쪽이라 origin-certificate-probe 컨테이너와 prometheus job을 확인한다. Prometheus를 읽지 못했다는 detail이면 Prometheus 응답부터 확인한다. 복원한 probe의 probe_success에 새 표본이 끝내 없으면 restore가 FAILED(E_OBS_DEPLOY_RESTORE)로 남는다"
     },
     {
       "title": "보조 명령",
-      "run": "sudo docker inspect easysubway-prometheus --format '{{.Config.Image}}{{range .Mounts}} {{.Source}}->{{.Destination}}{{end}}'"
+      "run": "sudo docker inspect easysubway-prometheus easysubway-origin-certificate-probe --format '{{.Name}} {{.Config.Image}}{{range .Mounts}} {{.Source}}->{{.Destination}}{{end}}'"
     },
     {
-      "title": "프로젝트 컨테이너 변화는 prometheus 한 줄뿐이어야 한다",
+      "title": "프로젝트 컨테이너 변화는 prometheus와 origin-certificate-probe 줄뿐이어야 한다. 이 도구로 처음 probe를 맞추는 DEPLOY에서는 probe가 새로 생기거나, backend 배포가 레포 체크아웃 기준으로 만든 probe를 이 release 기준으로 한 번 다시 만든다. infra/blackbox가 없는 옛 커밋을 DEPLOY하면 prometheus 한 줄뿐이다",
       "run": "sudo docker ps -a --filter label=com.docker.compose.project=easysubway --format '{{.Names}} {{.ID}}' | sort | diff /tmp/obs-before.txt -"
     }
   ],
@@ -71,7 +76,8 @@
     "laterDeploys": {
       "when": "첫 배포 이후(관리 release가 둘 이상). 자동 복원은 도구가 적용 뒤 검증 실패 시 직전 release로 이미 수행한다",
       "workflowSteps": [
-        "workflow DEPLOY의 commit 입력에 직전 배포 커밋(receipt의 previousCommit)을 넣어 실행한다. 같은 검증·대조·receipt 경로를 탄다"
+        "workflow DEPLOY의 commit 입력에 직전 배포 커밋(receipt의 previousCommit)을 넣어 실행한다. 같은 검증·대조·receipt 경로를 탄다",
+        "infra/blackbox가 없는 platform#270 이전 main 커밋으로 되돌리면 prometheus만 맞추고 origin-certificate-probe 컨테이너는 건드리지 않는다. 그 release에는 origin_certificate_probe job도 원 서버 인증서 경보도 없으므로, 감시를 되살리려면 #270 이후 커밋으로 다시 DEPLOY한다"
       ],
       "manualSteps": [
         {
@@ -79,12 +85,12 @@
           "run": "cd /opt/easysubway/observability && ln -sfn \"$(readlink previous)\" current.new && mv -Tf current.new current"
         },
         {
-          "title": "prometheus 서비스 하나만 맞춘다 (compose 해석용 값은 backend를 건드리지 않는다)",
-          "run": "EASYSUBWAY_BACKEND_ENV_FILE=/dev/null EASYSUBWAY_BACKEND_IMAGE=ghcr.io/aquilaxk/easysubway-backend@sha256:0000000000000000000000000000000000000000000000000000000000000000 sudo -E docker compose -p easysubway --project-directory /opt/easysubway/observability/current -f /opt/easysubway/observability/current/docker-compose.yml --env-file /opt/easysubway/shared/current-env/compose.env --profile observability up -d --no-deps --no-build --pull never --wait prometheus"
+          "title": "release가 담은 서비스만 맞춘다: prometheus와, current에 blackbox가 있으면 origin-certificate-probe (compose 해석용 값은 backend를 건드리지 않는다)",
+          "run": "EASYSUBWAY_BACKEND_ENV_FILE=/dev/null EASYSUBWAY_BACKEND_IMAGE=ghcr.io/aquilaxk/easysubway-backend@sha256:0000000000000000000000000000000000000000000000000000000000000000 sudo -E docker compose -p easysubway --project-directory /opt/easysubway/observability/current -f /opt/easysubway/observability/current/docker-compose.yml --env-file /opt/easysubway/shared/current-env/compose.env --profile observability up -d --no-deps --no-build --pull never --wait prometheus $(test -d /opt/easysubway/observability/current/blackbox && echo origin-certificate-probe)"
         },
         {
           "title": "컨테이너가 재생성되지 않았으면 재시작해 새 current를 다시 읽게 한다",
-          "run": "sudo docker restart easysubway-prometheus"
+          "run": "sudo docker restart easysubway-prometheus $(test -d /opt/easysubway/observability/current/blackbox && echo easysubway-origin-certificate-probe)"
         }
       ]
     },

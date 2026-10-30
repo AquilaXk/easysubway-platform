@@ -75,6 +75,11 @@ BACKEND_ENV="${INCOMING_DIR}/backend.env"
 RUNTIME_SERVICES=(backend)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana alloy)
 OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana alloy)
+# tools/platform/deploy-observability-config.mjs owns these services' content from /opt/easysubway/observability/current.
+# Compose from this checkout yields a different config hash, so any recreate here would undo that deploy. Backend deploys
+# only create them when missing, because the prometheus.yml applied here already scrapes origin-certificate-probe:9115.
+OBSERVABILITY_CREATE_ONLY_SERVICES=(origin-certificate-probe)
+OBSERVABILITY_RUNNING_SERVICES=("${OBSERVABILITY_SERVICES[@]}" "${OBSERVABILITY_CREATE_ONLY_SERVICES[@]}")
 
 # The image content sha (digest hex) replaces the former jar sha256 as the
 # deployed-artifact identity; it flows into the compose metadata label.
@@ -328,13 +333,11 @@ start_observability_services() {
 	local backend_env="$1"
 	local compose_env="$2"
 	local image_tag="$3"
-	local recreate_alertmanager="$4"
-	local recreate_config_services="$5"
+	shift 3
 	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build "${OBSERVABILITY_SERVICES[@]}" || return 1
-	if [[ "${recreate_config_services}" -eq 1 ]]; then
-		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --force-recreate "${OBSERVABILITY_CONFIG_SERVICES[@]}" || return 1
-	elif [[ "${recreate_alertmanager}" -eq 1 ]]; then
-		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --force-recreate alertmanager || return 1
+	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --no-recreate "${OBSERVABILITY_CREATE_ONLY_SERVICES[@]}" || return 1
+	if [[ "$#" -gt 0 ]]; then
+		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --force-recreate "$@" || return 1
 	fi
 }
 
@@ -602,20 +605,18 @@ current_env_hash=""
 if [[ -f "${SHARED_DIR}/current-env/metadata.env" ]]; then
 	current_env_hash="$(sed -n 's/^env_hash=//p' "${SHARED_DIR}/current-env/metadata.env")"
 fi
-recreate_alertmanager=0
-if [[ "${current_env_hash}" != "${target_env_hash}" ]]; then
-	recreate_alertmanager=1
-fi
-recreate_observability_config=0
-if [[ -z "${current_sha}" ]]; then
-	recreate_observability_config=1
-elif ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/prometheus infra/alertmanager/templates infra/loki infra/grafana/provisioning infra/alloy; then
-	recreate_observability_config=1
+# Config files are single-file bind mounts, so a content-only change keeps the old inode until the container is recreated.
+# alertmanager also reads its rendered config from the env set, so an env change recreates it alone.
+recreate_services=()
+if [[ -z "${current_sha}" ]] || ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/prometheus infra/alertmanager/templates infra/loki infra/grafana/provisioning infra/alloy; then
+	recreate_services=("${OBSERVABILITY_CONFIG_SERVICES[@]}")
+elif [[ "${current_env_hash}" != "${target_env_hash}" ]]; then
+	recreate_services=(alertmanager)
 fi
 
 if [[ "${current_sha}" == "${DEPLOY_SHA}" && "${current_env_hash}" == "${target_env_hash}" ]]; then
 	if curl -fsS --connect-timeout 2 --max-time 5 "http://127.0.0.1:${backend_port}/actuator/health/readiness" >/dev/null 2>&1 \
-		&& compose_services_running "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}" \
+		&& compose_services_running "${BACKEND_ENV}" "${COMPOSE_ENV}" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_RUNNING_SERVICES[@]}" \
 		&& runtime_services_hardened "${RUNTIME_SERVICES[@]}"; then
 		write_phase "completed"
 		write_result "noop" "same_sha_same_env_services_ready"
@@ -1093,14 +1094,14 @@ write_standby_state "idle"
 # it was removed (platform Issue #219).
 write_phase "finalizing"
 
-if ! start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${recreate_alertmanager}" "${recreate_observability_config}"; then
+if ! start_observability_services "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${recreate_services[@]}"; then
 	abort_deploy "observability_start_failed"
 	exit 1
 fi
 
 observability_ready=0
 for _ in $(seq 1 12); do
-	if compose_services_running "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}"; then
+	if compose_services_running "${SHARED_DIR}/current-env/backend.env" "${SHARED_DIR}/current-env/compose.env" "${DEPLOY_SHA}" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_RUNNING_SERVICES[@]}"; then
 		observability_ready=1
 		break
 	fi
@@ -1108,7 +1109,7 @@ for _ in $(seq 1 12); do
 done
 
 if [[ "${observability_ready}" -ne 1 ]]; then
-	dump_diagnostics "observability" "observability" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_SERVICES[@]}"
+	dump_diagnostics "observability" "observability" "${RUNTIME_SERVICES[@]}" "${OBSERVABILITY_RUNNING_SERVICES[@]}"
 	abort_deploy "observability_readiness_failed"
 	exit 1
 fi
