@@ -14,54 +14,6 @@ groups:
           impact_ko: "외부에서 API readiness를 확인하는 관측 신호가 멈췄습니다."
           action_ko: "public-edge-probe 컨테이너 상태와 외부 HTTPS readiness 응답을 확인하세요."
 
-      # 원 서버 인증서 만료 감시(platform#270). 만료 시각은 호스트 nginx 443에서 직접 읽은 원 서버 인증서의 것이다
-      # (prometheus.yml의 origin_certificate_probe job). Cloudflare 엣지 인증서가 아니다.
-      # probe가 한 번 실패하면 blackbox는 probe_success 0만 내고 만료 시계열을 내지 않으므로, 30분 안의 마지막 값을 써서
-      # 단발 실패가 긴급 경보를 풀거나 pending을 되돌리지 않게 한다. 구간은 겹치지 않는다: 21일~7일 warning, 7일 미만 critical(이미 만료 포함).
-      - alert: OriginCertificateExpiringSoon
-        expr: |
-          (min(last_over_time(probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}[30m])) - time()) >= 7 * 86400
-          and
-          (min(last_over_time(probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}[30m])) - time()) < 21 * 86400
-        for: 5m
-        labels:
-          severity: warning
-          service: aquila-origin-certificate
-        annotations:
-          summary: Origin certificate expires within 21 days
-          description: The TLS certificate that host nginx serves on 443 expires in 7 to 21 days. Renewal normally replaces it at 30 days, so the renewal has stalled.
-          title_ko: "원 서버 인증서 만료 21일 이내"
-          impact_ko: "원 서버 인증서가 만료되면 Cloudflare가 원 서버에 연결하지 못해 모든 API 요청이 실패합니다."
-          action_ko: "Origin certificate renew workflow를 CHECK로 실행해 출력되는 서비스 인증서 notAfter 줄을 확인하세요. CHECK는 14일 미만일 때만 실패하므로 통과해도 이 경보가 남아 있으면 RENEW로 실행하세요."
-
-      - alert: OriginCertificateExpiryCritical
-        expr: min(last_over_time(probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}[30m])) - time() < 7 * 86400
-        for: 5m
-        labels:
-          severity: critical
-          service: aquila-origin-certificate
-        annotations:
-          summary: Origin certificate expires within 7 days or has expired
-          description: The TLS certificate that host nginx serves on 443 expires in less than 7 days or has already expired. Renewal has not replaced it in time.
-          title_ko: "원 서버 인증서 만료 7일 이내 또는 이미 만료"
-          impact_ko: "원 서버 인증서 만료가 임박했거나 이미 만료되어 Cloudflare가 원 서버에 연결하지 못하면 모든 API 요청이 실패합니다."
-          action_ko: "즉시 Origin certificate renew workflow를 RENEW로 실행하고 certbot 갱신이 멈춘 원인(HTTP-01 응답, 서비스 호스트 목록)을 확인하세요."
-
-      # 만료 경보는 probe가 만료 시각을 못 읽으면 시계열이 없어 조용해진다. 그 무음 자체를 긴급으로 드러낸다(dead-man's switch).
-      # probe_success 0, exporter 부재, TLS 없이 성공한 probe가 모두 만료 시계열 부재라 한 갈래의 absent로 잡히고 라벨도 job 하나다.
-      - alert: OriginCertificateProbeFailed
-        expr: absent(probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"})
-        for: 15m
-        labels:
-          severity: critical
-          service: aquila-origin-certificate
-        annotations:
-          summary: Origin certificate probe is failing
-          description: The blackbox TLS probe to host nginx on 443 has reported no certificate expiry for 15m, so the origin certificate expiry alerts cannot evaluate. Check the origin-certificate-probe container, its blackbox config, and the route from the compose network to host 443.
-          title_ko: "원 서버 인증서 점검 실패"
-          impact_ko: "원 서버 인증서 만료 시각을 읽지 못해 만료 21일·7일 전 경보가 조용히 멈춥니다."
-          action_ko: "origin-certificate-probe 컨테이너와 blackbox 설정(origin_tls_expiry module), compose 네트워크에서 호스트 443으로 가는 경로(방화벽 포함)를 확인하세요."
-
       - alert: AquilaDockerRuntimeProbeScrapeDown
         expr: min(up{job="docker_runtime_probe"}) < 1
         for: 3m
@@ -406,3 +358,60 @@ groups:
           title_ko: "경로 검색 지연 지표 누락"
           impact_ko: "지연 SLO를 계산할 시계열이나 임계 버킷 경계가 없어 경로 검색 지연 경보가 평가되지 않습니다."
           action_ko: "backend가 /actuator/prometheus에 easysubway_journey_search_duration_seconds 히스토그램(mode·outcome 태그, SLO 버킷 0.025·0.25·0.5)을 노출하는지 확인하고, backend 버전과 platform 경보의 버킷 경계가 같은지 대조하세요."
+
+  # 원 서버 인증서 만료 감시(platform#270). 만료 시각은 호스트 nginx 443에서 직접 읽은 원 서버 인증서의 것이다
+  # (prometheus.yml의 origin_certificate_probe job). Cloudflare 엣지 인증서가 아니다.
+  # probe가 한 번 실패하면 blackbox는 probe_success 0만 내고 만료 시계열을 내지 않으므로, 남은 시간은 30분 안의 마지막 값으로
+  # 한 번만 계산한다. 단발 실패가 긴급 경보를 풀거나 pending을 되돌리지 않는다. 30분 넘게 읽지 못하면 이 값도 사라지고
+  # 그 무음은 OriginCertificateProbeFailed가 맡는다. 같은 그룹 안에서 recording rule이 경보보다 먼저 평가된다.
+  - name: easysubway-origin-certificate
+    rules:
+      - record: easysubway:origin_certificate_expiry_seconds_remaining:last30m
+        expr: min(last_over_time(probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}[30m])) - time()
+
+      # 구간은 겹치지 않는다: 21일~7일 warning, 7일 미만 critical(이미 만료 포함). 7일을 지날 때 critical이 pending인 5분 동안
+      # warning이 풀려 복구 메일만 남지 않도록 warning을 5분 더 유지한다.
+      - alert: OriginCertificateExpiringSoon
+        expr: |
+          easysubway:origin_certificate_expiry_seconds_remaining:last30m >= 7 * 86400
+          and
+          easysubway:origin_certificate_expiry_seconds_remaining:last30m < 21 * 86400
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+          service: aquila-origin-certificate
+        annotations:
+          summary: Origin certificate expires within 21 days
+          description: The TLS certificate that host nginx serves on 443 expires in 7 to 21 days. Renewal normally replaces it at 30 days, so the renewal has stalled.
+          title_ko: "원 서버 인증서 만료 21일 이내"
+          impact_ko: "원 서버 인증서가 만료되면 Cloudflare가 원 서버에 연결하지 못해 모든 API 요청이 실패합니다."
+          action_ko: "Origin certificate renew workflow를 CHECK로 실행해 출력되는 서비스 인증서 notAfter 줄을 확인하세요. CHECK는 14일 미만일 때만 실패하므로 통과해도 이 경보가 남아 있으면 RENEW로 실행하세요."
+
+      - alert: OriginCertificateExpiryCritical
+        expr: easysubway:origin_certificate_expiry_seconds_remaining:last30m < 7 * 86400
+        for: 5m
+        labels:
+          severity: critical
+          service: aquila-origin-certificate
+        annotations:
+          summary: Origin certificate expires within 7 days or has expired
+          description: The TLS certificate that host nginx serves on 443 expires in less than 7 days or has already expired. Renewal has not replaced it in time.
+          title_ko: "원 서버 인증서 만료 7일 이내 또는 이미 만료"
+          impact_ko: "원 서버 인증서 만료가 임박했거나 이미 만료되어 Cloudflare가 원 서버에 연결하지 못하면 모든 API 요청이 실패합니다."
+          action_ko: "즉시 Origin certificate renew workflow를 RENEW로 실행하고 certbot 갱신이 멈춘 원인(HTTP-01 응답, 서비스 호스트 목록)을 확인하세요."
+
+      # 만료 경보는 probe가 만료 시각을 못 읽으면 시계열이 없어 조용해진다. 그 무음 자체를 긴급으로 드러낸다(dead-man's switch).
+      # probe_success 0, exporter 부재, TLS 없이 성공한 probe가 모두 만료 시계열 부재라 원시 시계열 하나의 absent로 잡히고 라벨도 job 하나다.
+      - alert: OriginCertificateProbeFailed
+        expr: absent(probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"})
+        for: 15m
+        labels:
+          severity: critical
+          service: aquila-origin-certificate
+        annotations:
+          summary: Origin certificate probe is failing
+          description: The blackbox TLS probe to host nginx on 443 has reported no certificate expiry for 15m, so the origin certificate expiry alerts cannot evaluate. Check the origin-certificate-probe container, its blackbox config, and the route from the compose network to host 443.
+          title_ko: "원 서버 인증서 점검 실패"
+          impact_ko: "원 서버 인증서 만료 시각을 읽지 못해 만료 21일·7일 전 경보가 조용히 멈춥니다."
+          action_ko: "origin-certificate-probe 컨테이너와 blackbox 설정(origin_tls_expiry module), compose 네트워크에서 호스트 443으로 가는 경로(방화벽 포함)를 확인하세요."

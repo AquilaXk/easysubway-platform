@@ -1,0 +1,283 @@
+# promtool test rules infra/prometheus/origin-certificate-alerts.test.yml
+# 원 서버 인증서 만료 경보(platform#270)의 구간·단발 실패 내성·probe 무음 경보를 시뮬레이션으로 검증한다.
+# 인증서 notAfter 값은 eval_time의 time()을 기준으로 정한다. 예: 1728360 = 20일 + 6분이라 6m 평가 때 정확히 20일 남는다.
+# 각 경보의 기대 라벨·주석은 처음 나오는 곳에서 anchor(&warning, &critical, &probe_failed)로 한 번만 적고 이후는 alias로 쓴다.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: origin certificate with 30 days left raises nothing
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '2592360x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+
+  - interval: 1m
+    name: origin certificate with exactly 21 days left raises nothing
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '1814760x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+
+  - interval: 1m
+    name: origin certificate with 20 days left raises the warning only
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '1728360x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts:
+          - &warning
+            exp_labels:
+              severity: warning
+              service: aquila-origin-certificate
+            exp_annotations:
+              summary: Origin certificate expires within 21 days
+              description: The TLS certificate that host nginx serves on 443 expires in 7 to 21 days. Renewal normally replaces it at 30 days, so the renewal has stalled.
+              title_ko: "원 서버 인증서 만료 21일 이내"
+              impact_ko: "원 서버 인증서가 만료되면 Cloudflare가 원 서버에 연결하지 못해 모든 API 요청이 실패합니다."
+              action_ko: "Origin certificate renew workflow를 CHECK로 실행해 출력되는 서비스 인증서 notAfter 줄을 확인하세요. CHECK는 14일 미만일 때만 실패하므로 통과해도 이 경보가 남아 있으면 RENEW로 실행하세요."
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+
+  - interval: 1m
+    name: origin certificate with exactly 7 days left is still the warning band
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '605160x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+
+  - interval: 1m
+    name: origin certificate with 5 days left raises the critical only
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432360x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts:
+          - &critical
+            exp_labels:
+              severity: critical
+              service: aquila-origin-certificate
+            exp_annotations:
+              summary: Origin certificate expires within 7 days or has expired
+              description: The TLS certificate that host nginx serves on 443 expires in less than 7 days or has already expired. Renewal has not replaced it in time.
+              title_ko: "원 서버 인증서 만료 7일 이내 또는 이미 만료"
+              impact_ko: "원 서버 인증서 만료가 임박했거나 이미 만료되어 Cloudflare가 원 서버에 연결하지 못하면 모든 API 요청이 실패합니다."
+              action_ko: "즉시 Origin certificate renew workflow를 RENEW로 실행하고 certbot 갱신이 멈춘 원인(HTTP-01 응답, 서비스 호스트 목록)을 확인하세요."
+
+  - interval: 1m
+    name: origin certificate that already expired raises the critical only
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '-86040x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+
+  - interval: 1m
+    name: a failed probe scrape does not release a firing critical
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432360x6 stale stale stale 432360x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 8m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 9m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 12m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+
+  - interval: 1m
+    name: a failed probe scrape does not release a firing warning
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '1728360x6 stale stale stale 1728360x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 8m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 9m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 12m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+
+  - interval: 1m
+    name: a failed probe scrape does not restart the pending time of the critical
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432360x1 stale stale stale 432360x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+
+  # 605400 = 7일 + 10분: 10m까지 warning 구간, 11m부터 critical 구간이다. critical은 11m부터 5분 pending 뒤 16m에 울린다.
+  # warning은 keep_firing_for로 15m까지 남아 그 사이 어느 평가에서도 둘 다 꺼져 있는 순간이 없다.
+  - interval: 1m
+    name: crossing 7 days keeps the warning firing until the critical fires
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '605400x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 15m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 15m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 16m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+
+  # 마지막 만료 값은 5m이다. 30분 창이 그 값을 놓치는 35m부터 만료 경보는 근거가 없어 풀리고, probe 무음 경보(6m부터 부재)만 남는다.
+  - interval: 1m
+    name: a probe dead for more than 30m in the critical band leaves only the probe alert
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432360x5 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 20m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts:
+          - &probe_failed
+            exp_labels:
+              severity: critical
+              service: aquila-origin-certificate
+              job: origin_certificate_probe
+            exp_annotations:
+              summary: Origin certificate probe is failing
+              description: The blackbox TLS probe to host nginx on 443 has reported no certificate expiry for 15m, so the origin certificate expiry alerts cannot evaluate. Check the origin-certificate-probe container, its blackbox config, and the route from the compose network to host 443.
+              title_ko: "원 서버 인증서 점검 실패"
+              impact_ko: "원 서버 인증서 만료 시각을 읽지 못해 만료 21일·7일 전 경보가 조용히 멈춥니다."
+              action_ko: "origin-certificate-probe 컨테이너와 blackbox 설정(origin_tls_expiry module), compose 네트워크에서 호스트 443으로 가는 경로(방화벽 포함)를 확인하세요."
+
+  - interval: 1m
+    name: failing origin certificate probe without an expiry series raises critical after 15m
+    input_series:
+      - series: 'probe_success{job="origin_certificate_probe"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+
+  - interval: 1m
+    name: succeeding probe without a TLS expiry series raises critical after 15m
+    input_series:
+      - series: 'probe_success{job="origin_certificate_probe"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+
+  - interval: 1m
+    name: missing origin certificate probe series raises critical
+    input_series:
+      - series: 'up{job="public_edge_probe"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+
+  - interval: 1m
+    name: healthy origin certificate probe raises no probe alert
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '2592360x20'
+      - series: 'probe_success{job="origin_certificate_probe"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+
+  - interval: 1m
+    name: a probe outage shorter than 15m raises no probe alert
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '2592360x4 stale stale stale stale stale stale stale 2592360x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
