@@ -540,7 +540,7 @@ async function readSeries(docker, spec) {
   return { ...spec, ...newestSample(result) };
 }
 
-const readSeriesAll = (docker, series) => Promise.all(series.map((spec) => readSeries(docker, spec)));
+const readSeriesAll = (docker, series) => inOrder(series, (spec) => readSeries(docker, spec));
 
 const unreadable = (error) => `live prometheus was not readable: ${message(error)}`;
 

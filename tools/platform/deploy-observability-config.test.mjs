@@ -490,6 +490,23 @@ test("probe 컨테이너만 옛 blackbox 설정을 마운트하고 있으면 pro
   }
 });
 
+test("두 컨테이너가 모두 옛 설정을 마운트하면 prometheus를 끝까지 맞춘 뒤에야 probe를 건드린다", async () => {
+  const box = sandbox();
+  try {
+    seedCurrentRelease(box);
+    const host = createHost({ recreateOnUp: false, liveBefore: snapshot(), mountedBefore: "stale", probeMountedBefore: "stale" });
+    await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
+    const restarts = host.calls.filter((call) => call.args[0] === "restart").map((call) => call.args[1]);
+    assert.deepEqual(restarts, ["easysubway-prometheus", PROBE_CONTAINER]);
+    const up = host.calls.findIndex((call) => call.args[0] === "compose" && call.args.includes("up"));
+    const prometheusRestart = host.calls.findIndex((call) => call.args[0] === "restart" && call.args[1] === "easysubway-prometheus");
+    const firstProbe = host.calls.findIndex((call, index) => index > up && call.args.includes(PROBE_CONTAINER));
+    assert.ok(prometheusRestart < firstProbe, `probe was touched at call ${firstProbe} before prometheus finished at ${prometheusRestart}`);
+  } finally {
+    box.cleanup();
+  }
+});
+
 test("compose가 origin-certificate-probe 서비스를 정의하지 않으면 아무것도 바꾸기 전에 실패한다", async () => {
   const box = sandbox();
   try {
