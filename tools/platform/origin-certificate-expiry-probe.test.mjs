@@ -93,22 +93,36 @@ function runStartObservability(recreate) {
   const script = read("tools/deploy/deploy-backend.sh");
   const arrays = script.split("\n").filter((line) => /^OBSERVABILITY_[A-Z_]+=\(/u.test(line)).join("\n");
   const start = script.match(/^start_observability_services\(\) \{\n[\s\S]*?\n\}$/mu)[0];
-  const program = `${arrays}\ncompose() { shift 3; printf '%s\\n' "$*"; }\n${start}\nstart_observability_services backend.env compose.env tag "$@"\nprintf 'running %s\\n' "\${OBSERVABILITY_RUNNING_SERVICES[*]}"`;
+  const program = `${arrays}\ncompose() { shift 3; printf '%s\\n' "$*"; }\n${start}\nstart_observability_services backend.env compose.env tag "$@"\nprintf 'running %s\\n' "\${OBSERVABILITY_RUNNING_SERVICES[*]}"\nprintf 'config %s\\n' "\${OBSERVABILITY_CONFIG_SERVICES[*]}"`;
   const { status, stdout, stderr } = spawnSync("bash", ["-c", program, "bash", ...recreate], { encoding: "utf8" });
   assert.equal(status, 0, stderr);
   const lines = stdout.trim().split("\n");
-  return { ups: lines.filter((line) => !line.startsWith("running ")).map((line) => line.split(" ")), running: lines.at(-1).split(" ").slice(1) };
+  const tagged = (tag) => lines.find((line) => line.startsWith(`${tag} `)).split(" ").slice(1);
+  return { ups: lines.filter((line) => !/^(running|config) /u.test(line)).map((line) => line.split(" ")), running: tagged("running"), configServices: tagged("config") };
 }
 
-test("backend 배포는 전용 probe를 없을 때 만들기만 하고 다시 만들지 않으며 public-edge-probe는 일반 up으로만 맞춘다 (#270)", () => {
-  for (const recreate of [[], ["alertmanager"], ["alertmanager", "prometheus", "loki", "grafana", "alloy"]]) {
+const upServices = (args) => args.slice(args.indexOf("up") + 1).filter((word) => !word.startsWith("-"));
+
+// platform#273: prometheus와 전용 probe의 내용은 관측 설정 배포 도구만 맞춘다. backend 배포는 레포 체크아웃에서 compose를 돌려 설정 hash가 다르므로
+// 두 컨테이너를 없을 때 만들기만 해야 하고, depends_on으로 prometheus를 끌어오는 서비스도 --no-deps로만 올려야 그 의존성으로 다시 만들지 않는다.
+test("backend 배포는 prometheus와 전용 probe를 없을 때 만들기만 하고 의존성 수렴으로도 다시 만들지 않는다 (#270, #273)", needsDocker, () => {
+  const dependents = Object.entries(composeServices([])).filter(([, service]) => "prometheus" in (service.depends_on ?? {})).map(([name]) => name);
+  assert.ok(dependents.length > 0, "compose에 prometheus를 depends_on으로 가진 서비스가 있다(grafana)");
+  const { configServices } = runStartObservability([]);
+  assert.equal(configServices.includes("prometheus"), false, "설정 변경 강제 재생성 목록에 prometheus가 없다");
+  for (const recreate of [[], ["alertmanager"], configServices]) {
     const { ups, running } = runStartObservability(recreate);
-    const withProbe = ups.filter((args) => args.includes(ORIGIN_SERVICE));
-    assert.deepEqual(withProbe, [["--profile", "observability", "up", "-d", "--no-build", "--no-recreate", ORIGIN_SERVICE]], JSON.stringify(recreate));
+    const label = JSON.stringify(recreate);
+    assert.deepEqual(ups[0], ["--profile", "observability", "up", "-d", "--no-build", "--no-recreate", "prometheus", ORIGIN_SERVICE], `${label}: 만들기만 하는 호출이 처음이라 뒤의 서비스가 의존할 prometheus가 있다`);
+    for (const args of ups.slice(1)) {
+      const services = upServices(args);
+      assert.equal(services.includes("prometheus") || services.includes(ORIGIN_SERVICE), false, `${label}: ${args.join(" ")}`);
+      if (services.some((service) => dependents.includes(service))) assert.ok(args.includes("--no-deps"), `${label}: ${args.join(" ")}`);
+    }
     const forced = ups.filter((args) => args.includes("--force-recreate"));
-    assert.deepEqual(forced.map((args) => args.slice(args.indexOf("--force-recreate") + 1)), recreate.length > 0 ? [recreate] : [], "재생성은 한 번의 호출로 모은다");
-    assert.equal(ups.filter((args) => args.includes(PUBLIC_SERVICE) && !args.includes("--force-recreate") && !args.includes("--no-recreate")).length, 1);
-    assert.ok(running.includes(ORIGIN_SERVICE) && running.includes(PUBLIC_SERVICE), "배포 완료 확인은 두 probe가 떠 있기를 요구한다");
+    assert.deepEqual(forced.map(upServices), recreate.length > 0 ? [recreate] : [], `${label}: 재생성은 한 번의 호출로 모은다`);
+    assert.equal(ups.filter((args) => upServices(args).includes(PUBLIC_SERVICE) && !args.includes("--force-recreate") && !args.includes("--no-recreate")).length, 1);
+    for (const service of ["prometheus", ORIGIN_SERVICE, PUBLIC_SERVICE, ...dependents]) assert.ok(running.includes(service), `${label}: 배포 완료 확인은 ${service}가 떠 있기를 요구한다`);
   }
 });
 

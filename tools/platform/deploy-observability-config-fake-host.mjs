@@ -30,6 +30,9 @@ export const COMMAND = [
 const PROMETHEUS_ORIGIN = "http://127.0.0.1:9090";
 export const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 export const RUN_URL = "https://github.com/AquilaXk/easysubway-platform/actions/runs/123";
+export const COMPOSE_NETWORK_NAME = "easysubway_default";
+export const COMPOSE_SUBNET = "172.18.0.0/16";
+const HOST_GATEWAY = "host.docker.internal:host-gateway";
 
 export function makeSourceTree(root) {
   const infra = join(root, "infra");
@@ -90,8 +93,13 @@ function hostContext({
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
   mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale", liveAfterRestore = null, probeExistingId = "a".repeat(64), probeMountedBefore = "current", composeDefines = ["prometheus", PROBE_SERVICE],
   seriesWarmupReads = 0, missingSeries = [], staleSeriesReads = 0, staleSampleAt = EPOCH0 - 20, probeSuccessValue = "1", restoreSeries = {},
+  composeNetwork = { exists: true, subnet: COMPOSE_SUBNET }, detachOnFailedUp = false, connectFails = false, composeNetworkConfig = undefined, changeOnRestoreUp = null,
 } = {}) {
-  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: mountedBefore, probe: { id: probeExistingId, mounted: probeMountedBefore }, dirs: {}, upCount: 0, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
+  const state = {
+    containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: mountedBefore,
+    probe: { id: probeExistingId, mounted: probeMountedBefore, networks: [COMPOSE_NETWORK_NAME] }, dirs: {}, upCount: 0, networks: [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
+    composeNetwork: { ...composeNetwork },
+  };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
     { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
@@ -104,7 +112,7 @@ function hostContext({
   // 서버에 닿지 않으면(probe_success 0) blackbox는 만료 시계열을 내지 않으므로 그 단계에서 만료 시계열은 비어 있다.
   const applyBehavior = { warmupReads: seriesWarmupReads, missing: missingSeries, staleReads: staleSeriesReads, successValue: probeSuccessValue, unreadable: [] };
   const restoreBehavior = { warmupReads: 0, missing: [], staleReads: 0, successValue: probeSuccessValue, unreadable: [], ...restoreSeries };
-  const config = { recreateOnUp, restartFixesLive, promtoolFails, liveAfter, expected, health, headCommit, volumeAfter, upFails, composeCommand, containerMissing, mounts, changeOthersOnUp, liveWarmupReads, networksAfterUp, extraHostsAfterUp, liveAfterRestore, composeDefines, staleSampleAt, applyBehavior, restoreBehavior };
+  const config = { recreateOnUp, restartFixesLive, promtoolFails, liveAfter, expected, health, headCommit, volumeAfter, upFails, composeCommand, containerMissing, mounts, changeOthersOnUp, liveWarmupReads, networksAfterUp, extraHostsAfterUp, liveAfterRestore, composeDefines, staleSampleAt, applyBehavior, restoreBehavior, detachOnFailedUp, connectFails, composeNetworkConfig, changeOnRestoreUp };
   return { calls: [], state, volume, others, config, reference: null };
 }
 
@@ -133,19 +141,24 @@ function dockerCompose(ctx, args, line) {
   return assert.fail(`unexpected compose subcommand ${line}`);
 }
 
-function composeConfig({ composeDefines, composeCommand }) {
+function composeConfig({ composeDefines, composeCommand, composeNetworkConfig }) {
   const services = Object.fromEntries(composeDefines.map((name) => [name, name === "prometheus" ? { image: IMAGE, command: composeCommand } : { image: PROBE_IMAGE, command: PROBE_COMMAND }]));
-  return ok(JSON.stringify({ services }));
+  return ok(JSON.stringify({ services, ...(composeNetworkConfig ? { networks: { default: composeNetworkConfig } } : {}) }));
 }
 
+// 2026-10-30 사고: 실패한 compose up이 네트워크를 다시 만들려다 prometheus를 떼어 낸 채 끝났다. detachOnFailedUp이 그 상태를 흉내 낸다.
 function composeUp(ctx, args) {
   const { state, config } = ctx;
-  if (config.upFails) throw new Error("compose up failed");
+  if (config.upFails) {
+    if (config.detachOnFailedUp) state.networks = [];
+    throw new Error("compose up failed: error while removing network: network easysubway_default has active endpoints");
+  }
   state.upCount += 1;
   state.clock += CLOCK_STEP;
   if (config.changeOthersOnUp && state.upCount === 1) config.changeOthersOnUp(ctx.others);
   if (config.recreateOnUp) recreatePrometheus(ctx);
   if (args.includes(PROBE_SERVICE)) upProbe(state, config.recreateOnUp);
+  if (config.changeOnRestoreUp && state.upCount === 2) config.changeOnRestoreUp(ctx);
   return ok("");
 }
 
@@ -155,8 +168,10 @@ function recreatePrometheus({ state, config }) {
   state.mounted = realpathSync(state.dirs.current);
   const liveAfterUp = state.upCount >= 2 ? config.liveAfterRestore : config.liveAfter;
   state.live = liveAfterUp ?? config.expected;
-  if (config.networksAfterUp && state.upCount === 1) state.networks = config.networksAfterUp;
-  if (config.extraHostsAfterUp && state.upCount === 1) state.extraHosts = config.extraHostsAfterUp;
+  // 적용(첫 up)만 시나리오의 배선을 쓰고, 복원은 직전 release의 compose대로 원래 배선으로 돌아간다.
+  const applying = state.upCount === 1;
+  state.networks = applying && config.networksAfterUp ? config.networksAfterUp : [COMPOSE_NETWORK_NAME];
+  state.extraHosts = applying && config.extraHostsAfterUp ? config.extraHostsAfterUp : [HOST_GATEWAY];
 }
 
 function upProbe(state, recreated) {
@@ -245,7 +260,7 @@ function prometheusRecord({ state, config }) {
   };
 }
 
-const probeRecord = ({ state }) => ({ Id: state.probe.id, Name: `/${PROBE_CONTAINER}`, Image: "sha256:blackbox", Config: { Image: PROBE_IMAGE }, State: { Running: true, StartedAt: "2026-10-08T00:00:01Z" } });
+const probeRecord = ({ state }) => ({ Id: state.probe.id, Name: `/${PROBE_CONTAINER}`, Image: "sha256:blackbox", Config: { Image: PROBE_IMAGE }, State: { Running: true, StartedAt: "2026-10-08T00:00:01Z" }, NetworkSettings: { Networks: Object.fromEntries(state.probe.networks.map((name) => [name, {}])) } });
 
 const otherRecord = (other) => ({ Id: other.id, Name: `/${other.name}`, Image: other.image, Config: { Image: other.image }, State: { Running: true, StartedAt: other.startedAt } });
 
@@ -275,7 +290,26 @@ function dockerVolume({ calls, config, volume }, args) {
   return ok(JSON.stringify([changed ? config.volumeAfter : volume]));
 }
 
-const DOCKER_VERBS = new Map([["pull", dockerPull], ["compose", dockerCompose], ["run", dockerRun], ["rm", dockerRm], ["exec", dockerExec], ["restart", dockerRestart], ["inspect", dockerInspect], ["ps", dockerPs], ["volume", dockerVolume]]);
+function dockerNetwork({ state, config }, args, line) {
+  const network = state.composeNetwork;
+  const named = args.at(-1) === COMPOSE_NETWORK_NAME;
+  if (args[1] === "ls") return ok(network.exists ? `${COMPOSE_NETWORK_NAME}\n` : "");
+  if (args[1] === "inspect" && named && network.exists) return ok(JSON.stringify([{ Name: COMPOSE_NETWORK_NAME, IPAM: { Config: [{ Subnet: network.subnet }] } }]));
+  if (args[1] === "create" && named && !network.exists) {
+    Object.assign(network, { exists: true, subnet: args[args.indexOf("--subnet") + 1], labels: args.filter((_, index) => args[index - 1] === "--label") });
+    return ok("netid\n");
+  }
+  if (args[1] === "connect") {
+    if (config.connectFails) throw new Error("host command failed (1): Error response from daemon: endpoint create failed");
+    const target = args.at(-1) === PROBE_CONTAINER ? state.probe.networks : state.networks;
+    target.push(args.at(-2));
+    state.connected = [...(state.connected ?? []), args.slice(2)];
+    return ok("");
+  }
+  return assert.fail(`unexpected docker network command: ${line}`);
+}
+
+const DOCKER_VERBS = new Map([["pull", dockerPull], ["compose", dockerCompose], ["run", dockerRun], ["rm", dockerRm], ["exec", dockerExec], ["restart", dockerRestart], ["inspect", dockerInspect], ["ps", dockerPs], ["volume", dockerVolume], ["network", dockerNetwork]]);
 
 // docker·git 호출을 흉내 내는 호스트. calls에 순서대로 남기고, 시나리오 값으로 실패와 상태 전이를 만든다.
 export function createHost(options) {
@@ -289,7 +323,14 @@ export function createHost(options) {
     if (!handler) assert.fail(`unexpected docker command: ${line}`);
     return handler(ctx, args, line);
   };
-  return { calls: ctx.calls, runner, state: ctx.state, volume: ctx.volume, others: ctx.others };
+  // deploy.lock 대역. 잡은 경로와 해제 횟수를 남기고, 잡는 순간까지의 호출 수로 잠금이 어떤 호스트 호출보다 먼저인지 보게 한다.
+  const lock = { paths: [], callsAtAcquire: [], closed: 0 };
+  const acquireDeployLock = async (lockPath) => {
+    lock.paths.push(lockPath);
+    lock.callsAtAcquire.push(ctx.calls.length);
+    return { close: async () => { lock.closed += 1; } };
+  };
+  return { calls: ctx.calls, runner, state: ctx.state, volume: ctx.volume, others: ctx.others, lock, acquireDeployLock };
 }
 
 export function sandbox() {
@@ -304,7 +345,7 @@ export const base = (box, host, overrides = {}) => ({
   ...(Object.assign(host.state.dirs, { current: join(box.observability, "current"), commit: join(box.observability, "releases", COMMIT) }), {}),
   commit: COMMIT, sourceRoot: box.sourceRoot, deployRoot: box.deployRoot, stagingRoot: box.stagingRoot,
   composeEnvFile: "/opt/easysubway/shared/current-env/compose.env", runUrl: RUN_URL, runId: "123",
-  commandRunner: host.runner, sleep: async () => {}, now: () => new Date("2026-10-08T01:02:03.000Z"), ...overrides,
+  commandRunner: host.runner, acquireDeployLock: host.acquireDeployLock, sleep: async () => {}, now: () => new Date("2026-10-08T01:02:03.000Z"), ...overrides,
 });
 function runVerb(args) {
   if (!args.includes("promtool")) return "run:reference";
@@ -315,6 +356,7 @@ function verbOf({ command, args }) {
   if (command === "git") return "git";
   if (args[0] === "compose") return `compose:${args.includes("up") ? "up" : "config"}`;
   if (args[0] === "run") return runVerb(args);
+  if (args[0] === "network") return `network:${args[1]}`;
   return args[0];
 }
 

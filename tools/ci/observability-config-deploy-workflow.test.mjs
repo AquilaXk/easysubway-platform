@@ -108,6 +108,9 @@ test("Platform CI가 새 계약 테스트를 실행한다", () => {
   for (const command of [
     "node --test tools/platform/deploy-observability-config.test.mjs",
     "node --test tools/platform/deploy-observability-config-series.test.mjs",
+    "node --test tools/platform/deploy-observability-config-recovery.test.mjs",
+    "node --test tools/platform/observability-network.test.mjs",
+    "node --test tools/platform/shared-deploy-lock.test.mjs",
     "node --test tools/ci/observability-config-deploy-workflow.test.mjs",
   ]) assert.ok(ci.includes(command), command);
 });
