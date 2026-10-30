@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { interruptibleRunner, runCommand } from "./lib/process.mjs";
@@ -63,6 +66,75 @@ test("출력 한도를 넘거나 시간이 초과된 자식도 종료를 기다�
     await assert.rejects(runCommand(process.execPath, args, options), pattern);
     assert.ok(Date.now() - startedAt >= 300, `${pattern}: SIGTERM 뒤 자식이 끝날 때까지 기다린다`);
   }
+});
+
+// 자식이 띄운 손자가 stdout pipe를 물고 SIGTERM을 무시하면 close가 오지 않는다(platform#274 리뷰). 프로세스 그룹 전체를 끝내고 제한 안에 거부해야 한다.
+const PIPE_HOLDING_GRANDCHILD = `
+const { spawn } = require("node:child_process");
+const grandchild = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"], { stdio: ["ignore", "inherit", "inherit"], detached: process.argv[2] === "escape" });
+require("node:fs").writeFileSync(process.argv[1], String(grandchild.pid));
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`;
+
+const isAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+async function waitUntilGone(pid, deadlineMs) {
+  const startedAt = Date.now();
+  while (isAlive(pid) && Date.now() - startedAt < deadlineMs) {
+    // 종료 신호를 받은 프로세스가 사라지는 시점은 비동기라 짧게 다시 본다.
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+  }
+  return !isAlive(pid);
+}
+
+test("시간 초과·중단은 pipe를 문 손자까지 끝내고 제한 안에 거부하며, 정상 종료는 출력을 끝까지 읽은 뒤 끝난다", async () => {
+  const root = mkdtempSync(join(tmpdir(), "run-command-"));
+  const pidFile = join(root, "grandchild.pid");
+  let grandchild = null;
+  try {
+    for (const [label, options] of [["timeout", { timeoutMs: 300 }], ["abort", { signal: AbortSignal.timeout(300) }]]) {
+      const startedAt = Date.now();
+      const pending = runCommand(process.execPath, ["-e", PIPE_HOLDING_GRANDCHILD, pidFile], { timeoutMs: 10_000, killGraceMs: 300, ...options });
+      const outcome = await Promise.race([
+        pending.then(() => "resolved", (error) => error.message),
+        new Promise((resolve) => { setTimeout(() => resolve("still pending"), 4000).unref(); }),
+      ]);
+      grandchild = Number(readFileSync(pidFile, "utf8"));
+      assert.match(outcome, label === "timeout" ? /timed out/u : /interrupted/u, label);
+      assert.ok(Date.now() - startedAt < 2000, `${label}: SIGTERM 300ms + SIGKILL 유예 300ms + 배수 안에 끝난다`);
+      assert.equal(await waitUntilGone(grandchild, 1000), true, `${label}: pipe를 문 손자도 끝났다`);
+    }
+    const startedAt = Date.now();
+    const escaped = runCommand(process.execPath, ["-e", PIPE_HOLDING_GRANDCHILD, pidFile, "escape"], { timeoutMs: 300, killGraceMs: 300 });
+    await assert.rejects(escaped, /timed out/u);
+    grandchild = Number(readFileSync(pidFile, "utf8"));
+    assert.ok(Date.now() - startedAt < 2000, "그룹 밖으로 나가 pipe를 문 손자가 있어도 SIGKILL 뒤 배수 시간이 지나면 끝낸다");
+    process.kill(grandchild, "SIGKILL");
+    const { stdout } = await runCommand("sh", ["-c", "printf one; sleep 0.2; printf two"]);
+    assert.equal(stdout, "onetwo");
+  } finally {
+    if (grandchild !== null && isAlive(grandchild)) process.kill(grandchild, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("interruptibleRunner.stop은 중단 signal을 무시하는 runner도 정해진 시간 안에 돌아오고 모두 끝났는지를 알린다", async () => {
+  const stuck = interruptibleRunner(() => new Promise(() => {}));
+  stuck.run("never", []);
+  const startedAt = Date.now();
+  assert.equal(await stuck.stop({ deadlineMs: 200 }), false);
+  assert.ok(Date.now() - startedAt < 1000);
+  const settles = interruptibleRunner(runCommand);
+  settles.run("sleep", ["5"]).catch(() => {});
+  assert.equal(await settles.stop({ deadlineMs: 6000 }), true);
 });
 
 test("isSubset은 기대 필드가 모두 같으면 참이고 실제 객체의 추가 필드는 허용하지만 배열은 길이까지 같아야 한다", () => {

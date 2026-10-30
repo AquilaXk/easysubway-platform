@@ -541,6 +541,12 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     if (request.command === "docker" && request.args.includes("ps")) {
       return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
     }
+    if (request.command === "docker" && request.args[0] === "network") {
+      const stdout = request.args[1] === "ls"
+        ? "easysubway_default\n"
+        : JSON.stringify([{ IPAM: { Config: [{ Subnet: "172.18.0.0/16" }] } }]);
+      return { status: 0, signal: null, timedOut: false, stdout, stderr: "" };
+    }
     return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
   };
   const lockEvents = [];
@@ -615,6 +621,8 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
   assert.deepEqual(commands, [
     ["nginx", "-t"],
     ["nginx", "-s", "reload"],
+    ["docker", "network", "ls", "--filter", "name=^easysubway_default$", "--format", "{{.Name}}"],
+    ["docker", "network", "inspect", "easysubway_default"],
     ["docker", "compose", "--project-name", "easysubway", "--env-file", composeEnvPath,
       "-f", baseComposePath, "-f", candidateComposePath, "--profile", "journey-candidate",
       "stop", "--timeout", "30", "backend"],
@@ -636,7 +644,7 @@ test("concrete host holds stable inputs and runs exact Nginx, SIGTERM and Compos
     "verify:/opt/easysubway/deploy.lock",
     "close:/opt/easysubway/deploy.lock",
   ]);
-  assert.equal(dockerEnvironments.length, 5);
+  assert.equal(dockerEnvironments.length, 7);
   assert.equal(
     dockerEnvironments.every((environment) =>
       environment.EASYSUBWAY_BACKEND_IMAGE ===

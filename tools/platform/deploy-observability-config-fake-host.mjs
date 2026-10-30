@@ -94,11 +94,12 @@ function hostContext({
   mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale", liveAfterRestore = null, probeExistingId = "a".repeat(64), probeMountedBefore = "current", composeDefines = ["prometheus", PROBE_SERVICE],
   seriesWarmupReads = 0, missingSeries = [], staleSeriesReads = 0, staleSampleAt = EPOCH0 - 20, probeSuccessValue = "1", restoreSeries = {},
   composeNetwork = { exists: true, subnet: COMPOSE_SUBNET }, detachOnFailedUp = false, connectFails = false, composeNetworkConfig = undefined, changeOnRestoreUp = null,
+  forwardUpFails = false, detachedBefore = false, restoreComposeNetworkConfig = undefined,
 } = {}) {
   const state = {
     containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: mountedBefore,
-    probe: { id: probeExistingId, mounted: probeMountedBefore, networks: [COMPOSE_NETWORK_NAME] }, dirs: {}, upCount: 0, networks: [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
-    composeNetwork: { ...composeNetwork },
+    probe: { id: probeExistingId, mounted: probeMountedBefore, networks: [COMPOSE_NETWORK_NAME] }, dirs: {}, upAttempts: 0, networks: detachedBefore ? [] : [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
+    composeNetwork: { ...composeNetwork }, detachedReads: 0,
   };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
@@ -106,13 +107,13 @@ function hostContext({
     { name: "easysubway-alertmanager", id: "3".repeat(64), image: "sha256:alertmanager", startedAt: "2026-06-30T00:00:01Z" },
     { name: "easysubway-grafana", id: "4".repeat(64), image: "sha256:grafana", startedAt: "2026-06-30T00:00:02Z" },
   ];
-  // 시계열 질의는 `selector[5m]` 범위 질의 하나다. 적용 중(upCount <= 1)과 복원 중(upCount >= 2)의 라이브 시계열 상태를 따로 흉내 낸다.
+  // 시계열 질의는 `selector[5m]` 범위 질의 하나다. 적용 중(첫 compose up 시도까지)과 복원 중(두 번째 시도부터)의 라이브 시계열 상태를 따로 흉내 낸다.
   // 각 단계는 첫 표본이 늦게 나오는 회차(warmupReads), 사라진 시계열(missing), 수렴 전 표본만 남은 회차(staleReads), probe_success 값,
   // 질의 실패(unreadable)를 가진다. 적용 단계는 위 옵션으로, 복원 단계는 restoreSeries로 정하고 복원한 직전 release의 probe는 기본이 정상이다.
   // 서버에 닿지 않으면(probe_success 0) blackbox는 만료 시계열을 내지 않으므로 그 단계에서 만료 시계열은 비어 있다.
   const applyBehavior = { warmupReads: seriesWarmupReads, missing: missingSeries, staleReads: staleSeriesReads, successValue: probeSuccessValue, unreadable: [] };
   const restoreBehavior = { warmupReads: 0, missing: [], staleReads: 0, successValue: probeSuccessValue, unreadable: [], ...restoreSeries };
-  const config = { recreateOnUp, restartFixesLive, promtoolFails, liveAfter, expected, health, headCommit, volumeAfter, upFails, composeCommand, containerMissing, mounts, changeOthersOnUp, liveWarmupReads, networksAfterUp, extraHostsAfterUp, liveAfterRestore, composeDefines, staleSampleAt, applyBehavior, restoreBehavior, detachOnFailedUp, connectFails, composeNetworkConfig, changeOnRestoreUp };
+  const config = { recreateOnUp, restartFixesLive, promtoolFails, liveAfter, expected, health, headCommit, volumeAfter, upFails, composeCommand, containerMissing, mounts, changeOthersOnUp, liveWarmupReads, networksAfterUp, extraHostsAfterUp, liveAfterRestore, composeDefines, staleSampleAt, applyBehavior, restoreBehavior, detachOnFailedUp, connectFails, composeNetworkConfig, changeOnRestoreUp, forwardUpFails, restoreComposeNetworkConfig };
   return { calls: [], state, volume, others, config, reference: null };
 }
 
@@ -120,7 +121,7 @@ function seriesSamples({ state, config }, query) {
   const range = /^(.+)\[5m\]$/u.exec(query);
   assert.ok(range, `시계열 질의는 범위 질의 하나다: ${query}`);
   const selector = range[1];
-  const restoring = state.upCount >= 2;
+  const restoring = state.upAttempts >= 2;
   const behavior = restoring ? config.restoreBehavior : config.applyBehavior;
   const reads = restoring ? state.restoreReads : state.reads;
   reads[selector] = (reads[selector] ?? 0) + 1;
@@ -136,29 +137,32 @@ function seriesSamples({ state, config }, query) {
 const dockerPull = () => ok("");
 
 function dockerCompose(ctx, args, line) {
-  if (args.includes("config")) return composeConfig(ctx.config);
+  if (args.includes("config")) return composeConfig(ctx.config, ctx.state.upAttempts >= 1 ? "restore" : "apply");
   if (args.includes("up")) return composeUp(ctx, args);
   return assert.fail(`unexpected compose subcommand ${line}`);
 }
 
-function composeConfig({ composeDefines, composeCommand, composeNetworkConfig }) {
+// compose config 출력. 기본 네트워크 정의는 적용 단계와 복원 단계(첫 compose up 시도 뒤)에 따로 정할 수 있다.
+function composeConfig({ composeDefines, composeCommand, composeNetworkConfig, restoreComposeNetworkConfig }, phase) {
   const services = Object.fromEntries(composeDefines.map((name) => [name, name === "prometheus" ? { image: IMAGE, command: composeCommand } : { image: PROBE_IMAGE, command: PROBE_COMMAND }]));
-  return ok(JSON.stringify({ services, ...(composeNetworkConfig ? { networks: { default: composeNetworkConfig } } : {}) }));
+  const network = phase === "restore" && restoreComposeNetworkConfig !== undefined ? restoreComposeNetworkConfig : composeNetworkConfig;
+  return ok(JSON.stringify({ services, ...(network ? { networks: { default: network } } : {}) }));
 }
 
 // 2026-10-30 사고: 실패한 compose up이 네트워크를 다시 만들려다 prometheus를 떼어 낸 채 끝났다. detachOnFailedUp이 그 상태를 흉내 낸다.
+// upFails는 모든 시도를, forwardUpFails는 첫 시도(적용)만 실패시킨다. 성공한 up은 떨어진 컨테이너를 재생성할 때만 다시 붙인다.
 function composeUp(ctx, args) {
   const { state, config } = ctx;
-  if (config.upFails) {
+  state.upAttempts += 1;
+  if (config.upFails || (config.forwardUpFails && state.upAttempts === 1)) {
     if (config.detachOnFailedUp) state.networks = [];
     throw new Error("compose up failed: error while removing network: network easysubway_default has active endpoints");
   }
-  state.upCount += 1;
   state.clock += CLOCK_STEP;
-  if (config.changeOthersOnUp && state.upCount === 1) config.changeOthersOnUp(ctx.others);
+  if (config.changeOthersOnUp && state.upAttempts === 1) config.changeOthersOnUp(ctx.others);
   if (config.recreateOnUp) recreatePrometheus(ctx);
   if (args.includes(PROBE_SERVICE)) upProbe(state, config.recreateOnUp);
-  if (config.changeOnRestoreUp && state.upCount === 2) config.changeOnRestoreUp(ctx);
+  if (config.changeOnRestoreUp && state.upAttempts === 2) config.changeOnRestoreUp(ctx);
   return ok("");
 }
 
@@ -166,10 +170,10 @@ function recreatePrometheus({ state, config }) {
   state.generation += 1;
   state.containerId = String(8 + state.generation).repeat(64);
   state.mounted = realpathSync(state.dirs.current);
-  const liveAfterUp = state.upCount >= 2 ? config.liveAfterRestore : config.liveAfter;
+  const liveAfterUp = state.upAttempts >= 2 ? config.liveAfterRestore : config.liveAfter;
   state.live = liveAfterUp ?? config.expected;
   // 적용(첫 up)만 시나리오의 배선을 쓰고, 복원은 직전 release의 compose대로 원래 배선으로 돌아간다.
-  const applying = state.upCount === 1;
+  const applying = state.upAttempts === 1;
   state.networks = applying && config.networksAfterUp ? config.networksAfterUp : [COMPOSE_NETWORK_NAME];
   state.extraHosts = applying && config.extraHostsAfterUp ? config.extraHostsAfterUp : [HOST_GATEWAY];
 }
@@ -221,8 +225,13 @@ function dockerExec(ctx, args) {
   return ok(liveBody(ctx, path));
 }
 
+// 기본 네트워크에서 떨어진 prometheus는 scrape 대상에 닿지 못한다(사고 때 4개 대상 모두 down). 떨어진 채 읽힌 횟수를 detachedReads에 남긴다.
 function liveBody(ctx, path) {
   const { state } = ctx;
+  if (!state.networks.includes(COMPOSE_NETWORK_NAME) && path.startsWith("/api/v1/targets")) {
+    state.detachedReads += 1;
+    return httpBody(path, { ...state.live, targets: state.live.targets.map((item) => ({ ...item, health: "down" })) });
+  }
   if (path.startsWith(QUERY_PATH)) {
     const query = decodeURIComponent(path.slice(QUERY_PATH.length));
     state.queries.push(query);
@@ -244,7 +253,7 @@ function dockerRestart({ state, config }, args) {
     return ok("");
   }
   assert.equal(args[1], "easysubway-prometheus");
-  if (state.upCount >= 2) state.live = config.liveAfterRestore ?? config.expected;
+  if (state.upAttempts >= 2) state.live = config.liveAfterRestore ?? config.expected;
   else if (config.restartFixesLive) state.live = config.liveAfter ?? config.expected;
   state.mounted = realpathSync(state.dirs.current);
   return ok("");
@@ -252,7 +261,7 @@ function dockerRestart({ state, config }, args) {
 
 function prometheusRecord({ state, config }) {
   return {
-    Id: state.containerId, Name: "/easysubway-prometheus", Image: "sha256:prometheus", Config: { Image: IMAGE },
+    Id: state.containerId, Name: "/easysubway-prometheus", Image: "sha256:prometheus", Config: { Image: IMAGE, Labels: { "com.docker.compose.service": "prometheus" } },
     State: { Running: true, StartedAt: "2026-10-08T00:00:00Z", Health: { Status: config.health } },
     Mounts: config.mounts,
     HostConfig: { ExtraHosts: state.extraHosts },
@@ -260,7 +269,7 @@ function prometheusRecord({ state, config }) {
   };
 }
 
-const probeRecord = ({ state }) => ({ Id: state.probe.id, Name: `/${PROBE_CONTAINER}`, Image: "sha256:blackbox", Config: { Image: PROBE_IMAGE }, State: { Running: true, StartedAt: "2026-10-08T00:00:01Z" }, NetworkSettings: { Networks: Object.fromEntries(state.probe.networks.map((name) => [name, {}])) } });
+const probeRecord = ({ state }) => ({ Id: state.probe.id, Name: `/${PROBE_CONTAINER}`, Image: "sha256:blackbox", Config: { Image: PROBE_IMAGE, Labels: { "com.docker.compose.service": PROBE_SERVICE } }, State: { Running: true, StartedAt: "2026-10-08T00:00:01Z" }, NetworkSettings: { Networks: Object.fromEntries(state.probe.networks.map((name) => [name, {}])) } });
 
 const otherRecord = (other) => ({ Id: other.id, Name: `/${other.name}`, Image: other.image, Config: { Image: other.image }, State: { Running: true, StartedAt: other.startedAt } });
 
@@ -324,11 +333,26 @@ export function createHost(options) {
     return handler(ctx, args, line);
   };
   // deploy.lock 대역. 잡은 경로와 해제 횟수를 남기고, 잡는 순간까지의 호출 수로 잠금이 어떤 호스트 호출보다 먼저인지 보게 한다.
-  const lock = { paths: [], callsAtAcquire: [], closed: 0 };
+  // lose()는 holder가 죽은 상태를 만든다: 그 뒤 verify()는 거부하고 closed가 끝난다.
+  const lock = { paths: [], callsAtAcquire: [], closed: 0, lose: () => {} };
   const acquireDeployLock = async (lockPath) => {
     lock.paths.push(lockPath);
     lock.callsAtAcquire.push(ctx.calls.length);
-    return { close: async () => { lock.closed += 1; } };
+    let held = true;
+    let markClosed;
+    const closed = new Promise((resolve) => { markClosed = resolve; });
+    lock.lose = () => {
+      held = false;
+      markClosed();
+    };
+    return {
+      verify: async () => { if (!held) throw new Error("shared deploy lock was lost"); },
+      close: async () => {
+        lock.closed += 1;
+        markClosed();
+      },
+      closed,
+    };
   };
   return { calls: ctx.calls, runner, state: ctx.state, volume: ctx.volume, others: ctx.others, lock, acquireDeployLock };
 }

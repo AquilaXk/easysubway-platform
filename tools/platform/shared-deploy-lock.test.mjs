@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { acquireSharedDeployLock } from "./shared-deploy-lock.mjs";
+import { acquireSharedDeployLock, SharedDeployLockError } from "./shared-deploy-lock.mjs";
 
 // platform#273: 관측 설정 DEPLOY와 후보 기동이 쓰는 deploy.lock은 tools/deploy/deploy-backend.sh의 `exec 9>deploy.lock; flock 9`와
 // 같은 파일의 같은 배타 flock이어야 서로를 막는다. flock(1)이 있는 Linux(CI·운영 호스트)에서 실제 잠금으로 확인한다.
@@ -32,7 +32,7 @@ test("backend 배포가 deploy.lock을 쥐고 있으면 바로 거부하고, 놓
     const backend = holdLikeBackendDeploy(lockPath);
     await backend.held;
     const startedAt = Date.now();
-    await assert.rejects(acquireSharedDeployLock({ lockPath }), /shared deploy lock unavailable/u);
+    await assert.rejects(acquireSharedDeployLock({ lockPath }), (error) => error instanceof SharedDeployLockError && error.contended === true);
     assert.ok(Date.now() - startedAt < 4000, "기다리지 않는다(holder 준비 제한 5초보다 빨리 실패)");
     await backend.release();
 
@@ -42,6 +42,35 @@ test("backend 배포가 deploy.lock을 쥐고 있으면 바로 거부하고, 놓
     await lock.close();
     assert.equal(backendCanLock(lockPath), true, "놓으면 backend 배포가 잡는다");
     await assert.rejects(lock.verify(), /shared deploy lock was lost/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("다른 배포가 쥔 경우가 아닌 획득 실패는 경합으로 보고하지 않고 flock의 종료 코드와 stderr를 남긴다", needsFlock, async () => {
+  const root = mkdtempSync(join(tmpdir(), "shared-deploy-lock-"));
+  try {
+    const missingDirectory = join(root, "missing", "deploy.lock");
+    await assert.rejects(acquireSharedDeployLock({ lockPath: missingDirectory }), (error) => {
+      assert.ok(error instanceof SharedDeployLockError);
+      assert.equal(error.contended, false);
+      assert.match(error.message, /could not be acquired: \/usr\/bin\/flock exited (?!75:)\d+: .*cannot open lock file .*missing\/deploy\.lock/u);
+      return true;
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("잠금 holder가 죽으면 closed가 끝나고 verify()가 잃었다고 거부한다", needsFlock, async () => {
+  const root = mkdtempSync(join(tmpdir(), "shared-deploy-lock-"));
+  const lockPath = join(root, "deploy.lock");
+  try {
+    const lock = await acquireSharedDeployLock({ lockPath, lostError: () => new Error("lost for test") });
+    lock.child.kill("SIGKILL");
+    await lock.closed;
+    await assert.rejects(lock.verify(), /lost for test/u);
+    assert.equal(backendCanLock(lockPath), true, "holder가 죽으면 커널 잠금이 풀린다");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
