@@ -69,10 +69,6 @@ RESULT_FILE="${SHARED_DIR}/last-result.env"
 # file never gates anything, it only makes the standby's state observable.
 STANDBY_STATE_FILE="${SHARED_DIR}/deployment-standby-state.env"
 LOCK_FILE="${DEPLOY_ROOT}/deploy.lock"
-# The compose default network is external in the platform compose file (platform#273), so compose never creates or recreates it.
-# Name and subnet match contracts/release/platform-k3s-observability-contract.json; tools/platform/observability-network.test.mjs pins them.
-COMPOSE_NETWORK_NAME="easysubway_default"
-COMPOSE_NETWORK_SUBNET="172.18.0.0/16"
 
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
@@ -315,21 +311,6 @@ compose() {
 	docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${compose_env}" -f infra/docker-compose.yml "$@"
 }
 
-# Creates the default network when it is absent and fails when it exists with another subnet. The compose labels let a checkout
-# whose compose file still owns the default network adopt it instead of rejecting it for an "incorrect label".
-ensure_compose_network() {
-	local names=""
-	local subnets=""
-	names="$(docker network ls --filter "name=^${COMPOSE_NETWORK_NAME}\$" --format '{{.Name}}')" || return 1
-	if [[ "${names}" != "${COMPOSE_NETWORK_NAME}" ]]; then
-		docker network create --driver bridge --subnet "${COMPOSE_NETWORK_SUBNET}" \
-			--label com.docker.compose.network=default --label "com.docker.compose.project=${DEPLOY_COMPOSE_PROJECT}" \
-			"${COMPOSE_NETWORK_NAME}" >/dev/null || return 1
-	fi
-	subnets="$(docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "${COMPOSE_NETWORK_NAME}")" || return 1
-	[[ "${subnets}" == "${COMPOSE_NETWORK_SUBNET} " ]]
-}
-
 compose_services_running() {
 	local backend_env="$1"
 	local compose_env="$2"
@@ -555,10 +536,14 @@ preflight_legacy_backend_absence() {
 
 preflight_legacy_backend_absence
 
-if ! ensure_compose_network; then
-	write_result "blocked" "compose_network_mismatch"
-	exit 1
-fi
+# The default network is external (platform#273); the shared ensure CLI exits 3 on a subnet mismatch it refuses to change.
+network_status=0
+node tools/platform/ensure-compose-network.mjs --project "${DEPLOY_COMPOSE_PROJECT}" >/dev/null || network_status=$?
+case "${network_status}" in
+	0) ;;
+	3) write_result "blocked" "compose_network_mismatch"; exit 1 ;;
+	*) write_result "failed" "compose_network_unavailable"; exit 1 ;;
+esac
 
 EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
 EASYSUBWAY_BACKEND_IMAGE="${backend_image}" \

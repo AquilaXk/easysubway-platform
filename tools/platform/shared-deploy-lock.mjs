@@ -11,6 +11,17 @@ const READY = "EASYSUBWAY_STANDBY_LOCKED\n";
 const ACQUIRE_TIMEOUT_MS = 5000;
 const FORCE_KILL_GRACE_MS = 1000;
 const FLOCK = "/usr/bin/flock";
+// 다른 실행이 잠금을 쥐고 있을 때 flock이 내는 종료 코드(--conflict-exit-code). sysexits의 EX_TEMPFAIL이다. 다른 종료 코드는 잠금을 잡을 수 없는 환경이다.
+const CONFLICT_EXIT_CODE = 75;
+const STDERR_LIMIT = 600;
+
+/** 잠금을 잡지 못한 이유. contended는 다른 배포가 쥐고 있는 경우, 그 밖(flock 없음, 잠금 파일을 열 수 없음, holder 준비 시간 초과)은 false다. */
+export class SharedDeployLockError extends Error {
+  constructor(contended, detail) {
+    super(contended ? "shared deploy lock is held by another deploy" : `shared deploy lock could not be acquired: ${detail}`);
+    this.contended = contended;
+  }
+}
 
 class SharedDeployLock {
   constructor(child, lostError) {
@@ -43,31 +54,34 @@ class SharedDeployLock {
   }
 }
 
-/** 잠금을 잡으면 SharedDeployLock으로, 다른 실행이 쥐고 있거나 holder가 제때 준비되지 않으면 거부한다. lostError는 verify()가 던질 오류를 만든다. */
+/** 잠금을 잡으면 SharedDeployLock으로, 못 잡으면 SharedDeployLockError로 거부한다. lostError는 verify()가 던질 오류를 만든다. */
 export function acquireSharedDeployLock({ lockPath, env = {}, lostError = () => new Error("shared deploy lock was lost") }) {
   return new Promise((resolveLock, rejectLock) => {
-    const child = spawn(FLOCK, ["--nonblock", "--exclusive", lockPath, process.execPath, fileURLToPath(import.meta.url), HOLDER_ARGUMENT], {
+    const child = spawn(FLOCK, ["--nonblock", "--exclusive", "--conflict-exit-code", String(CONFLICT_EXIT_CODE), lockPath, process.execPath, fileURLToPath(import.meta.url), HOLDER_ARGUMENT], {
       env,
       shell: false,
-      stdio: ["pipe", "pipe", "ignore"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     const lock = new SharedDeployLock(child, lostError);
     let output = "";
+    let stderr = "";
     let settled = false;
-    const fail = () => {
+    const fail = (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.stdin.destroy();
       child.kill("SIGTERM");
-      rejectLock(new Error("shared deploy lock unavailable"));
+      rejectLock(error);
     };
-    const timer = setTimeout(fail, ACQUIRE_TIMEOUT_MS);
+    const unavailable = (detail) => fail(new SharedDeployLockError(false, detail));
+    const timer = setTimeout(() => unavailable(`the lock holder was not ready within ${ACQUIRE_TIMEOUT_MS}ms`), ACQUIRE_TIMEOUT_MS);
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString("utf8")}`.slice(0, STDERR_LIMIT); });
     child.stdout.on("data", (chunk) => {
       if (settled) return;
       output += chunk.toString("utf8");
       if (!READY.startsWith(output)) {
-        fail();
+        unavailable("the lock holder wrote an unexpected handshake");
         return;
       }
       if (output === READY) {
@@ -76,9 +90,10 @@ export function acquireSharedDeployLock({ lockPath, env = {}, lostError = () => 
         resolveLock(lock);
       }
     });
-    child.once("error", fail);
-    child.once("close", () => {
-      if (!settled) fail();
+    child.once("error", (error) => unavailable(`${FLOCK} could not start: ${error.message}`));
+    child.once("close", (code, signal) => {
+      if (code === CONFLICT_EXIT_CODE) fail(new SharedDeployLockError(true));
+      else unavailable(`${FLOCK} exited ${code ?? signal}: ${stderr.trim() || "no stderr"}`);
     });
   });
 }

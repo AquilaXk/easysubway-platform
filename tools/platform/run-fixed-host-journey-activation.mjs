@@ -14,6 +14,7 @@ import { observeJourneyCandidateReadiness } from "./observe-journey-candidate-re
 import { runJourneyCandidateCanary } from "./run-journey-candidate-canary.mjs";
 import { startJourneyComposeCandidates } from "./start-journey-compose-candidates.mjs";
 import { validateJourneyReleaseTupleBytes } from "./bind-journey-release-candidate.mjs";
+import { ensureComposeNetwork } from "./ensure-compose-network.mjs";
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
@@ -260,6 +261,9 @@ export async function createFixedHostJourneyActivationHost({
       }
     },
     async drainAndRecreateCanonical() {
+      // The default network is external (platform#273); ensure it before stopping the canonical backend so a missing or
+      // mismatched network fails while the old backend still serves.
+      await ensureComposeNetwork((args) => invoke("docker", args, 30_000), projectName);
       const startedAt = nowNs();
       await invoke("docker", [
         ...composePrefix, "stop", "--timeout", "30", "backend",

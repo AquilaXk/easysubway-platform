@@ -15,6 +15,8 @@ import {
 import {
   validateJourneyReleaseTupleBytes,
 } from "./bind-journey-release-candidate.mjs";
+import { ensureComposeNetwork } from "./ensure-compose-network.mjs";
+import { runCommand } from "./lib/process.mjs";
 import { acquireSharedDeployLock } from "./shared-deploy-lock.mjs";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -51,6 +53,7 @@ const ERROR_MESSAGES = Object.freeze({
   CANDIDATE_START_LOCKED: "candidate start operation is already running",
   CANDIDATE_START_COMPOSE: "candidate compose start failed",
   CANDIDATE_START_TIMEOUT: "candidate compose start timed out",
+  CANDIDATE_START_NETWORK: "candidate compose network is unavailable",
   CANDIDATE_START_INPUT_UNSTABLE: "candidate start input changed during execution",
 });
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -87,6 +90,7 @@ export async function startJourneyComposeCandidates({
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
   deployLockRunner = acquireCandidateDeployLock,
+  networkEnsurer = ensureHostComposeNetwork,
 }) {
   validateInvocation({
     bindingPath,
@@ -105,6 +109,7 @@ export async function startJourneyComposeCandidates({
     inspectDescriptor,
     composeRunner,
     deployLockRunner,
+    networkEnsurer,
   });
 
   const deployLock = await openSharedDeployLock(
@@ -187,6 +192,12 @@ export async function startJourneyComposeCandidates({
     });
     if (!successful(existing)) throw failure(composeFailureCode(existing));
     if (existing.stdout.trim().length > 0) throw failure("CANDIDATE_START_EXISTS", 2);
+    // The base compose file declares the default network external (platform#273), so up fails unless it exists with the contract subnet.
+    await deployLock.verify();
+    await ensureCandidateNetwork(networkEnsurer, {
+      projectName,
+      env: dockerOperationalEnvironment(ambientEnvironment),
+    });
 
     try {
       await deployLock.verify();
@@ -245,6 +256,7 @@ function validateInvocation(values) {
     typeof values.inspectDescriptor !== "function" ||
     typeof values.composeRunner !== "function" ||
     typeof values.deployLockRunner !== "function" ||
+    typeof values.networkEnsurer !== "function" ||
     (values.candidateEnvironmentConsumer !== undefined &&
       typeof values.candidateEnvironmentConsumer !== "function") ||
     values.ambientEnvironment === null ||
@@ -690,6 +702,21 @@ function dockerOperationalEnvironment(ambientEnvironment) {
       .filter((key) => typeof ambientEnvironment[key] === "string")
       .map((key) => [key, ambientEnvironment[key]]),
   );
+}
+
+function ensureHostComposeNetwork({ projectName, env }) {
+  return ensureComposeNetwork(
+    (args) => runCommand("docker", args, { env, timeoutMs: COMPOSE_TIMEOUT_MS }),
+    projectName,
+  );
+}
+
+async function ensureCandidateNetwork(networkEnsurer, request) {
+  try {
+    await networkEnsurer(request);
+  } catch {
+    throw failure("CANDIDATE_START_NETWORK");
+  }
 }
 
 function sha256Reference(bytes) {
