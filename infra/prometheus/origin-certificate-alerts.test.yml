@@ -184,9 +184,11 @@ tests:
         alertname: OriginCertificateExpiringSoon
         exp_alerts: []
 
-  # 마지막 만료 값은 5m이다. 30분 창이 그 값을 놓치는 35m부터 만료 경보는 근거가 없어 풀리고, probe 무음 경보(6m부터 부재)만 남는다.
+  # 마지막 만료 값은 5m이고 실패한 scrape가 6m에 stale 표시를 남기므로 probe 무음 경보는 6m부터 부재, 15분 뒤인 21m에 울린다.
+  # 30분 창이 그 값을 놓치는 35m부터 만료 시간 계산은 근거가 없어지지만, 긴급 경보는 keep_firing_for 30m으로 65m 직전까지 남는다.
+  # probe 무음 경보가 이미 울린 뒤에도 긴급 경보가 바로 풀려 복구 알림이 나가지 않는다.
   - interval: 1m
-    name: a probe dead for more than 30m in the critical band leaves only the probe alert
+    name: a probe dead for more than 30m in the critical band keeps the critical firing through the probe alert takeover
     input_series:
       - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
         values: '432360x5 stale'
@@ -197,13 +199,7 @@ tests:
       - eval_time: 20m
         alertname: OriginCertificateProbeFailed
         exp_alerts: []
-      - eval_time: 40m
-        alertname: OriginCertificateExpiryCritical
-        exp_alerts: []
-      - eval_time: 40m
-        alertname: OriginCertificateExpiringSoon
-        exp_alerts: []
-      - eval_time: 40m
+      - eval_time: 25m
         alertname: OriginCertificateProbeFailed
         exp_alerts:
           - &probe_failed
@@ -212,11 +208,46 @@ tests:
               service: aquila-origin-certificate
               job: origin_certificate_probe
             exp_annotations:
-              summary: Origin certificate probe is failing
-              description: The blackbox TLS probe to host nginx on 443 has reported no certificate expiry for 15m, so the origin certificate expiry alerts cannot evaluate. Check the origin-certificate-probe container, its blackbox config, and the route from the compose network to host 443.
+              summary: Origin certificate probe has reported no expiry for 15 to 20 minutes
+              description: The blackbox TLS probe to host nginx on 443 has reported no certificate expiry for at least 15 minutes, so the origin certificate expiry alerts cannot evaluate. This alert fires 15 to 20 minutes after the last expiry sample (a failed scrape normally ends the series at once, otherwise the 5 minute sample lookback ends it, then the 15 minute wait). Check the origin-certificate-probe container, its blackbox config, and the route from the compose network to host 443.
               title_ko: "원 서버 인증서 점검 실패"
               impact_ko: "원 서버 인증서 만료 시각을 읽지 못해 만료 21일·7일 전 경보가 조용히 멈춥니다."
               action_ko: "origin-certificate-probe 컨테이너와 blackbox 설정(origin_tls_expiry module), compose 네트워크에서 호스트 443으로 가는 경로(방화벽 포함)를 확인하세요."
+      - eval_time: 25m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 40m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 60m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 40m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+      - eval_time: 70m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+
+  # 표본 뒤 stale 표시가 없으면(예: Prometheus 재시작) 5분 lookback이 끝나는 10m부터 부재, 15분 뒤인 25m에 울린다. 마지막 표본 뒤 20분이 상한이다.
+  - interval: 1m
+    name: a probe series that ends without a stale marker raises the probe alert 20m after the last sample
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '2592360x5'
+    alert_rule_test:
+      - eval_time: 24m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
 
   - interval: 1m
     name: failing origin certificate probe without an expiry series raises critical after 15m

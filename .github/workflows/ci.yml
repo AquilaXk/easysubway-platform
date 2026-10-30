@@ -115,7 +115,7 @@ jobs:
 
       - name: Validate Prometheus alert rules
         run: |
-          docker run --rm --entrypoint promtool -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo prom/prometheus:v3.14.0 test rules infra/prometheus/alerts.test.yml infra/prometheus/origin-certificate-alerts.test.yml
+          docker run --rm --entrypoint promtool -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo prom/prometheus:v3.14.0 test rules infra/prometheus/*.test.yml
 
       - name: Validate Blackbox exporter configuration
         run: |

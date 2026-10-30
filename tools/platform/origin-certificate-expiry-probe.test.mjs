@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 import { scrapeJobSettings, scrapeTargetsByJob } from "./prometheus-scrape-config.mjs";
@@ -112,10 +112,14 @@ test("backend 배포는 전용 probe를 없을 때 만들기만 하고 다시 �
   }
 });
 
-test("CI는 이 계약을 한 번 실행하고 compose와 같은 이미지로 blackbox 설정을, promtool로 원 서버 인증서 경보 시험을 검사한다 (#270)", needsDocker, () => {
+test("CI는 이 계약을 한 번 실행하고 compose와 같은 이미지로 blackbox 설정을, promtool로 infra/prometheus의 모든 규칙 시험을 검사한다 (#270)", needsDocker, () => {
   const ci = read(".github/workflows/ci.yml");
   assert.equal(ci.split("node --test tools/platform/origin-certificate-expiry-probe.test.mjs").length - 1, 1);
   const { image } = composeServices([ORIGIN_SERVICE])[ORIGIN_SERVICE];
   assert.equal(ci.split(`${image} --config.file=/config/origin-certificate.yml --config.check`).length - 1, 1);
-  assert.match(ci, /promtool [^\n]*test rules [^\n]*infra\/prometheus\/origin-certificate-alerts\.test\.yml/u);
+  const ruleTestsOnDisk = readdirSync(new URL("../../infra/prometheus/", import.meta.url)).filter((name) => name.endsWith(".test.yml")).map((name) => `infra/prometheus/${name}`).toSorted();
+  const promtoolLine = ci.split("\n").find((line) => /promtool .*test rules /u.test(line));
+  assert.ok(promtoolLine, "CI의 promtool test rules 단계");
+  const covered = promtoolLine.split(/\s+/u).slice(promtoolLine.split(/\s+/u).indexOf("rules") + 1).flatMap((arg) => (arg === "infra/prometheus/*.test.yml" ? ruleTestsOnDisk : [arg])).toSorted();
+  assert.deepEqual(covered, ruleTestsOnDisk, "CI는 infra/prometheus의 *.test.yml을 하나도 빼지 않고 시험한다");
 });
