@@ -497,32 +497,34 @@ const containerIds = (projectContainers, units) => Object.fromEntries(units.map(
 async function convergeContainers({ docker, sleep, root, composeEnvFile, files, units, idsBefore }) {
   await docker.composeUp(join(root, "current"), composeEnvFile, units.map((unit) => unit.service));
   const idsAfter = containerIds(await readProjectContainers(docker), units);
-  const converged = {};
-  for (const unit of units) {
-    const idAfter = idsAfter[unit.service];
-    await waitReady(docker, sleep, unit);
-    let restarted = false;
-    let stale = mountMismatch(await readMountedDigests(docker, unit), files, unit);
-    if (stale.length > 0) {
-      await docker.docker(["restart", unit.container]);
-      restarted = true;
-      await waitReady(docker, sleep, unit);
-      stale = mountMismatch(await readMountedDigests(docker, unit), files, unit);
-      if (stale.length > 0) fail("E_OBS_DEPLOY_VERIFY", `mounted config files differ from the release after restart (${unit.container}: ${stale.join(",")})`);
-    }
-    const idBefore = idsBefore[unit.service];
-    let action = idAfter === idBefore ? "unchanged" : "recreated";
-    if (restarted) action = "restarted";
-    converged[unit.service] = { container: unit.container, idBefore, idAfter, action };
-  }
-  return converged;
+  const converged = await inOrder(units, (unit) => convergeUnit({ docker, sleep, files, unit, idBefore: idsBefore[unit.service], idAfter: idsAfter[unit.service] }));
+  return Object.fromEntries(converged);
 }
 
-const durationMs = (text) => [...text.matchAll(/(\d+)(ms|[smhdwy])/gu)].reduce((sum, [, value, unit]) => sum + Number(value) * DURATION_UNIT_MS[unit], 0);
+async function convergeUnit({ docker, sleep, files, unit, idBefore, idAfter }) {
+  await waitReady(docker, sleep, unit);
+  let restarted = false;
+  let stale = mountMismatch(await readMountedDigests(docker, unit), files, unit);
+  if (stale.length > 0) {
+    await docker.docker(["restart", unit.container]);
+    restarted = true;
+    await waitReady(docker, sleep, unit);
+    stale = mountMismatch(await readMountedDigests(docker, unit), files, unit);
+    if (stale.length > 0) fail("E_OBS_DEPLOY_VERIFY", `mounted config files differ from the release after restart (${unit.container}: ${stale.join(",")})`);
+  }
+  let action = idAfter === idBefore ? "unchanged" : "recreated";
+  if (restarted) action = "restarted";
+  return [unit.service, { container: unit.container, idBefore, idAfter, action }];
+}
+
+/** 앞 항목이 끝난 뒤 다음 항목을 시작한다. docker 조작은 컨테이너마다 순서가 의미를 가지므로 병렬로 하지 않는다. */
+const inOrder = (items, step) => items.reduce(async (previous, item) => [...(await previous), await step(item)], Promise.resolve([]));
+
+const durationMs = (text) => [...text.matchAll(/(?<!\d)(\d+)(ms|[smhdwy])/gu)].reduce((sum, [, value, unit]) => sum + Number(value) * DURATION_UNIT_MS[unit], 0);
 
 /** 라이브 검증 반복 횟수. 기대 설정(/api/v1/status/config는 job마다 주기를 채워 준다)의 가장 긴 scrape·평가 주기 두 배를 덮는다. */
 function verifyAttempts(statusConfigYaml) {
-  const intervals = [...statusConfigYaml.matchAll(/^\s*(?:scrape|evaluation)_interval: (\S+)$/gmu)].map(([, value]) => durationMs(value));
+  const intervals = [...statusConfigYaml.matchAll(/^[ \t]*(?:scrape|evaluation)_interval: (\S+)$/gmu)].map(([, value]) => durationMs(value));
   return Math.max(VERIFY_MIN_ATTEMPTS, Math.ceil((2 * Math.max(0, ...intervals)) / VERIFY_INTERVAL_MS) + 1);
 }
 
@@ -533,15 +535,12 @@ const SAMPLE_LOOKBACK = "5m";
 
 /** 시계열 하나의 가장 최근 표본. `selector[5m]` 범위 질의 하나가 표본의 실제 scrape 시각과 값을 함께 돌려준다. */
 async function readSeries(docker, spec) {
-  const { result } = await promData(docker, PROMETHEUS.container, `/api/v1/query?query=${encodeURIComponent(`${spec.selector}[${SAMPLE_LOOKBACK}]`)}`);
+  const query = `${spec.selector}[${SAMPLE_LOOKBACK}]`;
+  const { result } = await promData(docker, PROMETHEUS.container, `/api/v1/query?query=${encodeURIComponent(query)}`);
   return { ...spec, ...newestSample(result) };
 }
 
-async function readSeriesAll(docker, series) {
-  const readings = [];
-  for (const spec of series) readings.push(await readSeries(docker, spec));
-  return readings;
-}
+const readSeriesAll = (docker, series) => Promise.all(series.map((spec) => readSeries(docker, spec)));
 
 const unreadable = (error) => `live prometheus was not readable: ${message(error)}`;
 

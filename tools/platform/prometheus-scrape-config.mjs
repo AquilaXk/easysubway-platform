@@ -6,7 +6,7 @@ export function scrapeTargetsByJob(text) {
   let current;
   let inTargets = false;
   for (const line of text.split("\n")) {
-    const job = line.match(/^  - job_name: "([^"]+)"\s*$/);
+    const job = line.match(/^ {2}- job_name: "([^"]+)"\s*$/);
     if (job) {
       current = job[1];
       jobs.set(current, []);
@@ -40,7 +40,7 @@ export function scrapeJobSettings(text) {
   let current;
   let addressRelabel = false;
   for (const line of text.split("\n")) {
-    const job = line.match(/^  - job_name: "([^"]+)"\s*$/);
+    const job = line.match(/^ {2}- job_name: "([^"]+)"\s*$/);
     if (job) {
       current = { module: null, address: null };
       jobs.set(job[1], current);
