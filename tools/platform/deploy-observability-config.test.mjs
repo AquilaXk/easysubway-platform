@@ -72,7 +72,7 @@ test("처음 배포: 검증 → release 설치 → current 전환 → prometheus
     const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
     const trail = verbs(host);
     const up = trail.indexOf("compose:up");
-    assert.deepEqual(trail.slice(0, 6), ["git", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
+    assert.deepEqual(trail.slice(0, 7), ["git", "ps:reference", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
     assert.ok(trail.indexOf("promtool:test") < trail.indexOf("inspect") && trail.indexOf("inspect") < up, "검증과 읽기가 상태 변경보다 먼저");
     assert.equal(trail.filter((verb) => verb === "compose:up").length, 1);
     assert.equal(trail.includes("restart"), false, "컨테이너가 재생성되면 재시작하지 않는다");

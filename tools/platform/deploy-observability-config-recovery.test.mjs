@@ -438,7 +438,7 @@ test("reference 컨테이너를 기다리는 동안 잠금을 잃어도 그 refe
       const paused = pauseOn(host, isReferenceExec(referenceCommit), () => host.lock.lose());
       await assert.rejects(deploy(box, host, { commandRunner: paused.runner }), (error) => error.code === "E_OBS_DEPLOY_LOCK_LOST", label);
       assert.equal(paused.paused.length, 1, `${label}: reference를 읽는 도중 잠금을 잃었다`);
-      assert.deepEqual(removedReferences(host), [referenceName(referenceCommit)], label);
+      assert.equal(removedReferences(host).at(-1), referenceName(referenceCommit), `${label}: 끊긴 reference를 지웠다`);
       assert.deepEqual([...host.state.references], [], `${label}: reference 컨테이너가 남지 않는다`);
     } finally {
       box.cleanup();

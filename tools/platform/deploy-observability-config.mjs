@@ -93,7 +93,12 @@ async function holdDeployLock(acquireDeployLock, deployRoot) {
   }
 }
 
-const lockLostError = () => new DeployError("E_OBS_DEPLOY_LOCK_LOST", `the deploy.lock holder exited, so another deploy may be running; stopped before the next host change (runbook: ${RUNBOOK_PATH})`);
+/** 잠금 상실 오류. cause가 있으면(잠금을 잃은 뒤 드러난 오류) 그 원인을 문장 끝에 남긴다. */
+function lockLostError(cause = null) {
+  if (cause?.code === "E_OBS_DEPLOY_LOCK_LOST") return cause;
+  const forward = cause === null ? "" : `; forward failure ${forwardOf(cause).code}: ${forwardOf(cause).detail}`;
+  return new DeployError("E_OBS_DEPLOY_LOCK_LOST", `the deploy.lock holder exited, so another deploy may be running; stopped before the next host change (runbook: ${RUNBOOK_PATH})${forward}`);
+}
 
 async function lockHeld(lock) {
   try {
@@ -199,8 +204,22 @@ function expectedFlagKeys(command) {
   return command.filter((item) => item.startsWith("--")).map((item) => item.slice(2).split("=")[0]);
 }
 
-async function collectReference({ docker, image, command, stagedPrometheus, commit, sleep }) {
-  const name = `easysubway-observability-ref-${commit.slice(0, 12)}-${process.pid}`;
+const REFERENCE_PREFIX = "easysubway-observability-ref-";
+const REFERENCE_NAME = /^easysubway-observability-ref-[0-9a-f]{12}-(\d+)$/u;
+
+/** 강제 종료된 지난 실행이 남긴 reference 컨테이너를 지운다. 이름 형식이 맞고 이름의 pid가 죽은 것만 지운다(다른 실행이 쓰는 중일 수 있다). */
+async function reapStaleReferences({ docker, cleanup, isProcessAlive }) {
+  const { stdout } = await docker.docker(["ps", "-a", "--filter", `name=^${REFERENCE_PREFIX}`, "--format", "{{.Names}}"]);
+  const stale = stdout.split("\n").map((line) => line.trim()).filter((name) => {
+    const match = REFERENCE_NAME.exec(name);
+    return match !== null && !isProcessAlive(Number(match[1]));
+  });
+  if (stale.length > 0) await cleanup.docker(["rm", "-f", "-v", ...stale]);
+}
+
+/** reference 컨테이너 삭제는 cleanup runner로 한다. 중단·잠금 상실로 끊긴 뒤에도 돌아야 자기 컨테이너를 남기지 않는다. */
+async function collectReference({ docker, cleanup, image, command, stagedPrometheus, commit, sleep }) {
+  const name = `${REFERENCE_PREFIX}${commit.slice(0, 12)}-${process.pid}`;
   let snapshot;
   let primary = null;
   try {
@@ -213,14 +232,14 @@ async function collectReference({ docker, image, command, stagedPrometheus, comm
   } catch (error) {
     primary = error;
   }
-  let cleanup = null;
+  let removal = null;
   try {
-    await docker.docker(["rm", "-f", "-v", name]);
+    await cleanup.docker(["rm", "-f", "-v", name]);
   } catch (error) {
-    cleanup = error;
+    removal = error;
   }
   if (primary) fail("E_OBS_DEPLOY_REFERENCE", message(primary));
-  if (cleanup) fail("E_OBS_DEPLOY_REFERENCE", `reference container ${name} was not removed: ${message(cleanup)}`);
+  if (removal) fail("E_OBS_DEPLOY_REFERENCE", `reference container ${name} was not removed: ${message(removal)}`);
   return snapshot;
 }
 
@@ -433,27 +452,30 @@ export async function deployObservabilityConfig(options = {}) {
   } = options;
   if (typeof commandRunner !== "function") fail("E_OBS_DEPLOY_USAGE", "commandRunner must be a function");
   const children = interruptibleRunner(commandRunner);
-
-  const head = (await children.run("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {})).stdout.trim();
-  if (head !== commit) fail("E_OBS_DEPLOY_SOURCE", `source checkout is at ${head}, expected ${commit}`);
-
-  if (mode === "PREVIEW") return previewRelease({ docker: createDocker(children.run), commit, sourceRoot, stagingRoot, composeEnvFile, sleep });
-  const lock = await holdDeployLock(acquireDeployLock, deployRoot);
-  // holder가 사라지면 커널 잠금이 풀려 다른 배포가 시작할 수 있다. 진행 중인 명령을 멈춰 겹치는 시간을 줄인다(다음 명령은 lockedRunner가 막는다).
-  lock.closed.then(() => children.stop());
-  const context = {
-    docker: createDocker(lockedRunner(lock, children.run)),
-    // 검증과 격리 reference 컨테이너용. 공유 상태를 바꾸지 않으므로 잠금 확인 없이 돈다(잠금을 잃어도 자기 reference 컨테이너는 지운다).
-    scratchDocker: createDocker(children.run),
-    // 중단 뒤 연결 확인용. 중단 signal에 묶이지 않지만 잠금은 똑같이 확인하고 명령마다 짧은 제한을 둔다.
-    recoveryDocker: createDocker(lockedRunner(lock, (command, args, callOptions) => commandRunner(command, args, { ...callOptions, ...INTERRUPT_COMMAND_LIMITS }))),
-    lock, children, sleep: abortableSleep(sleep, children.signal), now, signalSource,
-  };
+  // 중단 signal은 어느 단계에서 와도 진행 중인 명령(자기 프로세스 그룹의 자식)을 멈춘다. 무엇을 치우고 남길지는 그 단계의 catch가 정한다.
+  const guard = installInterruptGuard({ signalSource, onSignal: () => children.stop() });
+  // docker 호출은 세 종류다. scratch는 잠금을 확인하지 않고 중단에 끊긴다. cleanup은 잠금을 확인하지 않고 중단에 끊기지 않으며 명령마다 짧은 제한을 둔다
+  // (자기 reference 컨테이너 삭제). DEPLOY의 docker(잠금 확인, 중단에 끊김)와 recoveryDocker(잠금 확인, cleanup 제한)는 잠근 뒤에 만든다.
+  const boundedRunner = (command, args, callOptions) => commandRunner(command, args, { ...callOptions, ...INTERRUPT_COMMAND_LIMITS });
+  const runners = { children, boundedRunner, scratchDocker: createDocker(children.run), cleanupDocker: createDocker(boundedRunner) };
   try {
+    const head = (await children.run("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {})).stdout.trim();
+    if (head !== commit) fail("E_OBS_DEPLOY_SOURCE", `source checkout is at ${head}, expected ${commit}`);
+    if (mode === "PREVIEW") return await previewRelease({ ...runners, commit, sourceRoot, stagingRoot, composeEnvFile, sleep, isProcessAlive });
+    const lock = await holdDeployLock(acquireDeployLock, deployRoot);
+    // holder가 사라지면 커널 잠금이 풀려 다른 배포가 시작할 수 있다. 진행 중인 명령을 멈춰 겹치는 시간을 줄인다(다음 명령은 lockedRunner가 막는다).
+    lock.closed.then(() => children.stop());
+    const context = {
+      ...runners, docker: createDocker(lockedRunner(lock, children.run)), recoveryDocker: createDocker(lockedRunner(lock, boundedRunner)),
+      lock, guard, sleep: abortableSleep(sleep, children.signal), now,
+    };
     return await releaseAfter(lock, () => deployRelease({ ...context, commit, sourceRoot, deployRoot, composeEnvFile, runUrl, runId, isProcessAlive }));
   } catch (error) {
-    if (error instanceof InterruptedDeploy) exit(error.exitCode);
-    throw error;
+    const final = guard.signal !== null && !(error instanceof InterruptedDeploy) ? new InterruptedDeploy(guard.signal, `${guard.signal} received before any host change`) : error;
+    if (final instanceof InterruptedDeploy) exit(final.exitCode);
+    throw final;
+  } finally {
+    guard.dispose();
   }
 }
 
@@ -491,13 +513,13 @@ const releaseSummary = (preview) => ({
   configDigest: preview.tree.configDigest,
 });
 
-async function previewRelease({ docker, commit, sourceRoot, stagingRoot, composeEnvFile, sleep }) {
+async function previewRelease({ scratchDocker, cleanupDocker, commit, sourceRoot, stagingRoot, composeEnvFile, sleep, isProcessAlive }) {
   const ownedStagingBase = stagingRoot === undefined ? mkdtempSync(join(tmpdir(), "obs-deploy-")) : null;
   const stagingBase = stagingRoot ?? ownedStagingBase;
   mkdirSync(stagingBase, { recursive: true });
   const stagingDir = stagingDirOf(stagingBase, commit);
   try {
-    const preview = await preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep });
+    const preview = await preflight({ docker: scratchDocker, cleanup: cleanupDocker, commit, sourceRoot, stagingDir, composeEnvFile, sleep, isProcessAlive });
     return {
       schemaVersion: "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_PREVIEW_V1",
       mode: "PREVIEW",
@@ -518,39 +540,68 @@ async function previewRelease({ docker, commit, sourceRoot, stagingRoot, compose
 }
 
 /**
- * 검증(preflight)이 실패하면 호스트를 바꾸지 않았으므로 receipt 없이 끝난다. 그 뒤 current 전환 전의 실패는 restore NOT_STARTED로,
- * 전환 뒤의 실패는 settleFailedApply가 FAILED나 INTERRUPTED로 남긴다.
+ * 검증(preflight)이 커밋을 거부하면 호스트를 바꾸지 않았으므로 receipt 없이 끝난다. 중단·잠금 상실로 끊긴 실행과 current 전환 전의 실패는
+ * restore NOT_STARTED로, 전환 뒤의 실패는 settleFailedApply가 FAILED나 INTERRUPTED로 남긴다.
  */
 async function deployRelease({ commit, sourceRoot, deployRoot, composeEnvFile, isProcessAlive, runId, runUrl, ...context }) {
   const root = join(deployRoot, "observability");
   mkdirSync(join(root, "releases"), { recursive: true, mode: 0o755 });
   reapStaleArtifacts(root, isProcessAlive);
   const stagingDir = stagingDirOf(join(root, "releases"), commit);
+  const facts = { previousCommit: null, composeNetwork: null, baselineAttachment: null, configDigest: null };
+  const receipts = receiptsFor({ deployRoot, runId, runUrl, commit, now: context.now, facts });
+  const notStarted = async (error, { verdictIsFinal }) => {
+    rmSync(stagingDir, { recursive: true, force: true });
+    const aborted = await abortCause(context, error);
+    if (aborted === null && verdictIsFinal) return error;
+    receipts.failure({ outcome: "FAILED", error: forwardOf(aborted ?? error), restore: "NOT_STARTED" });
+    return aborted ?? error;
+  };
   let preview;
   try {
-    preview = await preflight({ docker: context.scratchDocker, commit, sourceRoot, stagingDir, composeEnvFile, sleep: context.sleep });
+    preview = await preflight({ docker: context.scratchDocker, cleanup: context.cleanupDocker, commit, sourceRoot, stagingDir, composeEnvFile, sleep: context.sleep, isProcessAlive });
   } catch (error) {
-    rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
+    throw await notStarted(error, { verdictIsFinal: true });
   }
-  const receipts = receiptsFor({ deployRoot, runId, runUrl, commit, now: context.now, configDigest: preview.tree.configDigest });
-  const facts = { previousCommit: null, composeNetwork: null, baselineAttachment: null };
+  facts.configDigest = preview.tree.configDigest;
   let prepared;
   try {
     prepared = await prepareSwitch({ ...context, root, commit, stagingDir, preview, facts });
   } catch (error) {
-    receipts.failure({ outcome: "FAILED", ...facts, error: forwardOf(error), restore: "NOT_STARTED" });
-    throw error;
+    throw await notStarted(error, { verdictIsFinal: false });
   }
   return switchAndVerify({ ...context, root, commit, composeEnvFile, runUrl, preview, prepared, receipts });
 }
 
-async function preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep }) {
+/**
+ * current 전환 전 실패가 중단 signal이나 잠금 상실 때문이면 그 원인으로 바꾼 오류, 아니면 null. 진행 중인 명령이 끝나기를 기다린 뒤 판정한다.
+ * 잠금을 잃은 뒤 나온 오류(검증·네트워크·reference 무엇이든)는 모두 E_OBS_DEPLOY_LOCK_LOST다.
+ */
+async function abortCause({ lock, guard, children }, error) {
+  if (guard.signal !== null) {
+    const stopped = await guard.stopped;
+    return new InterruptedDeploy(guard.signal, `${guard.signal} received before the release switch; ${stoppedNote(stopped)}; current was not switched; rerun the same DEPLOY (runbook: ${RUNBOOK_PATH})`);
+  }
+  if (await lockHeld(lock)) return null;
+  await children.stop();
+  return lockLostError(error);
+}
+
+const stoppedNote = (stopped) => (stopped ? "in-flight host commands were stopped" : "in-flight host commands did not stop within the deadline");
+
+/** 파일 변경(release 설치·current 전환) 직전 확인. 잠금을 잃었거나 중단되었으면 바꾸지 않는다. */
+async function assertMayChange({ lock, children }) {
+  if (!(await lockHeld(lock))) throw lockLostError();
+  if (children.signal.aborted) throw new Error("host command interrupted");
+}
+
+async function preflight({ docker, cleanup, commit, sourceRoot, stagingDir, composeEnvFile, sleep, isProcessAlive }) {
+  await reapStaleReferences({ docker, cleanup, isProcessAlive });
   const tree = stageRelease(sourceRoot, stagingDir);
   const { image, command } = await readReleaseCompose(docker, stagingDir, composeEnvFile, tree.units);
   const stagedPrometheus = join(stagingDir, "prometheus");
   const validation = await validateWithPromtool({ docker, image, stagedPrometheus, ruleTests: ruleTestsOf(tree.files) });
-  const expected = await collectReference({ docker, image, command, stagedPrometheus, commit, sleep });
+  const expected = await collectReference({ docker, cleanup, image, command, stagedPrometheus, commit, sleep });
   if (REMOVED_JOBS.some((job) => expected.jobs.includes(job))) fail("E_OBS_DEPLOY_VALIDATE", `the commit still configures a removed job: ${REMOVED_JOBS.join(",")}`);
   const unscraped = tree.units.map((unit) => unit.job).filter((job) => job !== null && !expected.jobs.includes(job));
   if (unscraped.length > 0) fail("E_OBS_DEPLOY_VALIDATE", `the release deploys a unit whose prometheus job is not configured: ${unscraped.join(",")}`);
@@ -576,36 +627,32 @@ async function readLowestTimestamp(docker) {
 }
 
 /** release를 설치한다. 같은 커밋 release가 이미 있으면 내용이 같을 때만 그대로 쓰고, 다르면 덮어쓰지 않는다. */
-async function installRelease({ lock, releaseDir, stagingDir, files, commit }) {
+async function installRelease({ context, releaseDir, stagingDir, files, commit }) {
   if (existsSync(releaseDir)) {
     if (JSON.stringify(describeTree(releaseDir).files) !== JSON.stringify(files)) fail("E_OBS_DEPLOY_RELEASE_IMMUTABLE", `releases/${commit} already exists with different content`);
     rmSync(stagingDir, { recursive: true, force: true });
     return;
   }
-  if (!(await lockHeld(lock))) throw lockLostError();
+  await assertMayChange(context);
   renameSync(stagingDir, releaseDir);
 }
 
 /**
  * current를 바꾸기 전의 준비: 기본 네트워크 보장, 기준선(떨어진 관리 컨테이너를 다시 붙인 뒤), release 설치. 설치가 마지막 단계라 실패는 늘
- * 설치 전이다. facts는 실패 receipt가 남길 값을 단계마다 채운다.
+ * 설치 전이다. facts는 실패 receipt가 남길 값을 단계마다 채운다. 실패하면 호출자가 staging을 지운다.
  */
-async function prepareSwitch({ docker, lock, root, commit, stagingDir, preview, facts }) {
-  try {
-    facts.composeNetwork = await ensureNetwork(docker);
-    facts.previousCommit = readManagedLink(root, "current");
-    const baseline = await readBaseline(docker, preview.tree.units);
-    facts.baselineAttachment = baseline.attachment;
-    const lowestBefore = await readLowestTimestamp(docker);
-    await installRelease({ lock, releaseDir: join(root, "releases", commit), stagingDir, files: preview.tree.files, commit });
-    return { ...baseline, lowestBefore, previousCommit: facts.previousCommit, composeNetwork: facts.composeNetwork };
-  } catch (error) {
-    rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
-  }
+async function prepareSwitch({ root, commit, stagingDir, preview, facts, ...context }) {
+  const { docker } = context;
+  facts.composeNetwork = await ensureNetwork(docker);
+  facts.previousCommit = readManagedLink(root, "current");
+  const baseline = await readBaseline(docker, preview.tree.units);
+  facts.baselineAttachment = baseline.attachment;
+  const lowestBefore = await readLowestTimestamp(docker);
+  await installRelease({ context, releaseDir: join(root, "releases", commit), stagingDir, files: preview.tree.files, commit });
+  return { ...baseline, lowestBefore, previousCommit: facts.previousCommit, composeNetwork: facts.composeNetwork };
 }
 
-/** SIGTERM·SIGINT(workflow 취소·타임아웃)를 받으면 진행 중인 명령을 멈추게만 한다. 무엇을 되돌리고 남길지는 적용 경로의 catch가 정한다. */
+/** SIGTERM·SIGINT(workflow 취소·타임아웃)를 받으면 진행 중인 명령을 멈추게만 한다. 무엇을 되돌리고 남길지는 그 단계의 catch가 정한다. */
 function installInterruptGuard({ signalSource, onSignal }) {
   const guard = { signal: null, stopped: null, dispose: null };
   const listeners = Object.keys(SIGNAL_EXIT_CODES).map((name) => [name, () => {
@@ -619,17 +666,14 @@ function installInterruptGuard({ signalSource, onSignal }) {
 }
 
 async function switchAndVerify(context) {
-  const { lock, root, commit, prepared, children, signalSource } = context;
-  const guard = installInterruptGuard({ signalSource, onSignal: () => children.stop() });
+  const { root, commit, prepared } = context;
   try {
-    if (!(await lockHeld(lock))) throw lockLostError();
+    await assertMayChange(context);
     if (prepared.previousCommit !== null && prepared.previousCommit !== commit) atomicSymlink(root, "previous", join("releases", prepared.previousCommit));
     atomicSymlink(root, "current", join("releases", commit));
     return await convergeAndRecord(context);
   } catch (error) {
-    throw await settleFailedApply(context, guard, error);
-  } finally {
-    guard.dispose();
+    throw await settleFailedApply(context, error);
   }
 }
 
@@ -669,24 +713,24 @@ async function convergeAndRecord({ docker, sleep, now, root, composeEnvFile, com
 }
 
 const forwardOf = (error) => ({ code: error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY", detail: message(error) });
-const preparedFacts = (prepared) => ({ previousCommit: prepared.previousCommit, composeNetwork: prepared.composeNetwork, baselineAttachment: prepared.attachment });
 
 /**
  * current 전환 뒤 실패의 단 한 곳. 잠금을 잃었으면 아무것도 더 바꾸지 않고 기록만 한다. 중단 signal이 없으면 복원하고 FAILED를 남긴다.
  * signal이 적용이나 복원 도중에 왔으면 finishInterrupted가 INTERRUPTED를 한 번 남긴다. 복원 중에도 signal이 올 수 있어 복원 뒤에 다시 본다.
  */
-async function settleFailedApply(context, guard, error) {
-  const { receipts, prepared } = context;
+async function settleFailedApply(context, error) {
+  const { receipts, guard } = context;
   if (!(await lockHeld(context.lock))) {
-    const lost = lockLostError();
-    receipts.failure({ outcome: "FAILED", ...preparedFacts(prepared), error: forwardOf(error), restore: "LOCK_LOST", restoreError: forwardOf(lost) });
-    return new DeployError(lost.code, `${lost.detail}; forward failure: ${message(error)}`);
+    const lost = lockLostError(error);
+    receipts.failure({ outcome: "FAILED", error: forwardOf(lost), restore: "LOCK_LOST", restoreError: forwardOf(lost) });
+    return lost;
   }
-  if (guard.signal !== null) return finishInterrupted(context, guard, { forward: null });
+  if (guard.signal !== null) return finishInterrupted(context, { forward: null });
   const recovery = await recoverFailedApply(context, error);
-  if (guard.signal !== null) return finishInterrupted(context, guard, { forward: recovery.receipt.error });
-  receipts.failure({ outcome: "FAILED", ...preparedFacts(prepared), ...recovery.receipt });
-  return recovery.error;
+  if (guard.signal !== null) return finishInterrupted(context, { forward: recovery.receipt.error });
+  receipts.failure({ outcome: "FAILED", ...recovery.receipt });
+  // 복구 도중 잠금을 잃었으면 receipt는 복원 원인(restoreError)에 그것을 남기고, 끝 오류도 같은 코드로 낸다.
+  return (await lockHeld(context.lock)) ? recovery.error : lockLostError(error);
 }
 
 /** 되돌릴 직전 release가 없으면 그 이유의 라벨, 있으면 null. */
@@ -704,18 +748,17 @@ function interruptRestoreLabel({ previousCommit, commit, held }) {
  * 제한된 연결 확인으로 떨어진 관리 컨테이너를 다시 붙이고, INTERRUPTED를 남긴다. 컨테이너 상태는 알 수 없으므로 같은 DEPLOY를 다시 실행하라고 알린다.
  * forward는 복원 도중 중단이면 정방향 실패, 적용 도중 중단이면 null이다(그때는 중단 자체가 error다).
  */
-async function finishInterrupted({ lock, root, commit, prepared, recoveryDocker, receipts }, guard, { forward }) {
+async function finishInterrupted({ lock, root, commit, prepared, recoveryDocker, receipts, guard }, { forward }) {
   const allStopped = await guard.stopped;
   const held = await lockHeld(lock);
   const { previousCommit } = prepared;
   const restore = interruptRestoreLabel({ previousCommit, commit, held });
   if (restore === "LINK_RESTORED") atomicSymlink(root, "current", join("releases", previousCommit));
   const reattach = await reattachDetached(recoveryDocker, prepared.managedBefore);
-  const stopped = allStopped ? "in-flight host commands were stopped" : "in-flight host commands did not stop within the deadline";
-  const detail = `${guard.signal} received while ${forward === null ? "applying" : "restoring"}; ${stopped}; container state is unknown; rerun the same DEPLOY to converge (runbook: ${RUNBOOK_PATH})`;
+  const detail = `${guard.signal} received while ${forward === null ? "applying" : "restoring"}; ${stoppedNote(allStopped)}; container state is unknown; rerun the same DEPLOY to converge (runbook: ${RUNBOOK_PATH})`;
   const interrupted = { code: "E_OBS_DEPLOY_INTERRUPTED", detail };
   receipts.failure({
-    outcome: "INTERRUPTED", ...preparedFacts(prepared), error: forward ?? interrupted, restore, restoreError: forward === null ? null : interrupted, networkAttachment: { reattach, recheck: null },
+    outcome: "INTERRUPTED", error: forward ?? interrupted, restore, restoreError: forward === null ? null : interrupted, networkAttachment: { reattach, recheck: null },
   });
   return new InterruptedDeploy(guard.signal, detail);
 }
@@ -801,7 +844,9 @@ async function restorePrevious(context) {
     atomicSymlink(root, "current", join("releases", previousCommit));
     return await convergePrevious(context);
   } catch (restoreError) {
-    const code = restoreError instanceof DeployError ? restoreError.code : "E_OBS_DEPLOY_RESTORE";
+    const lost = !(await lockHeld(lock));
+    const fallbackCode = restoreError instanceof DeployError ? restoreError.code : "E_OBS_DEPLOY_RESTORE";
+    const code = lost ? "E_OBS_DEPLOY_LOCK_LOST" : fallbackCode;
     return { restore: "FAILED", restoreError: { code, detail: `restore verification failed for previous release ${previousCommit}: ${message(restoreError)} (runbook: ${RUNBOOK_PATH})` }, externalSeries: null, note: null };
   }
 }
@@ -810,7 +855,7 @@ async function restorePrevious(context) {
  * current가 직전 release를 가리킨 뒤 컨테이너를 맞추고 대조한다. 맞추기 전에 관리 unit 밖의 호스트(다른 컨테이너·volume)가 이미 바뀌었으면
  * 복원으로 되돌릴 수 없으므로 컨테이너를 건드리지 않고 SKIPPED_SCOPE_CHANGED로 남긴다(current는 직전 release를 가리킨 채다).
  */
-async function convergePrevious({ docker, scratchDocker, sleep, now, root, composeEnvFile, preview, prepared }) {
+async function convergePrevious({ docker, scratchDocker, cleanupDocker, sleep, now, root, composeEnvFile, preview, prepared }) {
   const { previousCommit, before } = prepared;
   const previousDir = join(root, "releases", previousCommit);
   const previousTree = describeTree(previousDir);
@@ -823,7 +868,7 @@ async function convergePrevious({ docker, scratchDocker, sleep, now, root, compo
     return { restore: "SKIPPED_SCOPE_CHANGED", restoreError: { code: scopeError.code, detail: `restore of previous release ${previousCommit} was skipped, current points at it but its containers were not converged, because the host outside the managed units already changed: ${message(scopeError)} (runbook: ${RUNBOOK_PATH})` }, externalSeries: null, note: null };
   }
   const { image, command } = await readReleaseCompose(docker, join(root, "current"), composeEnvFile, units);
-  const expected = await collectReference({ docker: scratchDocker, image, command, stagedPrometheus: join(previousDir, "prometheus"), commit: previousCommit, sleep });
+  const expected = await collectReference({ docker: scratchDocker, cleanup: cleanupDocker, image, command, stagedPrometheus: join(previousDir, "prometheus"), commit: previousCommit, sleep });
   await convergeContainers({ docker, sleep, root, composeEnvFile, files: previousTree.files, units, idsBefore: containerIds(scope.projectContainers, units) });
   const convergedAt = epochSeconds(now());
   const series = liveSeriesOf(units);
@@ -868,16 +913,16 @@ function receiptDirectory(deployRoot, commit, runId) {
 }
 
 /** 이 실행의 receipt 디렉터리에 성공 receipt.json과 실패 failure-receipt.json을 쓴다. 실패 receipt의 필드 집합은 outcome과 무관하게 같다. */
-function receiptsFor({ deployRoot, runId, runUrl, commit, now, configDigest }) {
+function receiptsFor({ deployRoot, runId, runUrl, commit, now, facts }) {
   const write = (name, receipt) => writeFileSync(join(receiptDirectory(deployRoot, commit, runId), name), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
   return {
     success: (receipt) => write("receipt.json", receipt),
-    failure: ({ outcome, previousCommit, composeNetwork, baselineAttachment, error, restore, restoreError = null, networkAttachment = null, externalSeries = null }) => write("failure-receipt.json", {
+    failure: ({ outcome, error, restore, restoreError = null, networkAttachment = null, externalSeries = null }) => write("failure-receipt.json", {
       schemaVersion: FAILURE_RECEIPT_SCHEMA_VERSION,
       mode: "DEPLOY",
       outcome,
       commit,
-      previousCommit,
+      previousCommit: facts.previousCommit,
       runUrl,
       recordedAt: now().toISOString(),
       error,
@@ -885,9 +930,9 @@ function receiptsFor({ deployRoot, runId, runUrl, commit, now, configDigest }) {
       restoreError,
       networkAttachment,
       externalSeries,
-      composeNetwork,
-      baselineAttachment,
-      configDigest,
+      composeNetwork: facts.composeNetwork,
+      baselineAttachment: facts.baselineAttachment,
+      configDigest: facts.configDigest,
     }),
   };
 }
