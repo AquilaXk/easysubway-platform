@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { COMPOSE_NETWORK } from "./ensure-compose-network.mjs";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,8 +31,9 @@ export const COMMAND = [
 const PROMETHEUS_ORIGIN = "http://127.0.0.1:9090";
 export const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 export const RUN_URL = "https://github.com/AquilaXk/easysubway-platform/actions/runs/123";
-export const COMPOSE_NETWORK_NAME = "easysubway_default";
-export const COMPOSE_SUBNET = "172.18.0.0/16";
+// 이름과 서브넷은 실제 코드와 같은 계약 파일 값이다.
+export const COMPOSE_NETWORK_NAME = COMPOSE_NETWORK.name;
+export const COMPOSE_SUBNET = COMPOSE_NETWORK.subnet;
 const HOST_GATEWAY = "host.docker.internal:host-gateway";
 
 export function makeSourceTree(root) {
@@ -293,8 +295,7 @@ function dockerInspect(ctx, args) {
 }
 
 function dockerPs({ state, others }, args) {
-  const nameFilter = args.find((arg) => arg.startsWith("name="));
-  if (nameFilter) {
+  if (args.some((arg) => arg.startsWith("name="))) {
     assert.deepEqual(args, ["ps", "-a", "--filter", "name=^easysubway-observability-ref-", "--format", "{{.Names}}"], "이름으로 찾는 것은 reference 컨테이너뿐이다");
     return ok([...state.references].map((name) => `${name}\n`).join(""));
   }

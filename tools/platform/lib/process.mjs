@@ -57,14 +57,17 @@ export function runCommand(command, args, { input, env = {}, timeoutMs = 120_000
       }
       callback();
     };
+    // SIGKILL 뒤 stdio가 닫히지 않아도(pipe를 물려받은 자손) 짧게 기다린 뒤 끝낸다.
+    const rejectAfterDrain = () => settle(() => reject(stopReason));
+    const killAfterGrace = () => {
+      signalGroup(child, "SIGKILL");
+      timers.push(setTimeout(rejectAfterDrain, STDIO_DRAIN_MS));
+    };
     const stop = (reason) => {
       if (stopReason !== null) return;
       stopReason = reason;
       signalGroup(child, "SIGTERM");
-      timers.push(setTimeout(() => {
-        signalGroup(child, "SIGKILL");
-        timers.push(setTimeout(() => settle(() => reject(stopReason)), STDIO_DRAIN_MS));
-      }, killGraceMs));
+      timers.push(setTimeout(killAfterGrace, killGraceMs));
     };
     const onAbort = () => stop(new HostCommandError("host command interrupted"));
     timers.push(setTimeout(() => stop(new HostCommandError("host command timed out")), timeoutMs));
@@ -110,7 +113,7 @@ export function interruptibleRunner(runner) {
     controller.abort();
     let timer;
     const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(false), deadlineMs); });
-    const stopped = await Promise.race([Promise.allSettled([...inflight]).then(() => true), deadline]);
+    const stopped = await Promise.race([Promise.allSettled(inflight).then(() => true), deadline]);
     clearTimeout(timer);
     return stopped;
   };

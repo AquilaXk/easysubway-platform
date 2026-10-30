@@ -943,13 +943,15 @@ async function main() {
 }
 
 if (isMainModule()) {
-  main().catch((error) => {
+  try {
+    await main();
+  } catch (error) {
     const typed = error instanceof CandidateStartError
       ? error
       : failure("CANDIDATE_START_COMPOSE");
     process.stderr.write(`${typed.code} ${typed.message}\n`);
     process.exitCode = typed.exitCode;
-  });
+  }
 }
 
 function isMainModule() {
