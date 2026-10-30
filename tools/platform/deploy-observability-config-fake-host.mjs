@@ -84,28 +84,36 @@ export function createHost({
   liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
   headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
   mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale", liveAfterRestore = null, probeExistingId = "a".repeat(64), probeMountedBefore = "current", composeDefines = ["prometheus", PROBE_SERVICE],
-  seriesWarmupReads = 0, missingSeries = [], staleSeriesReads = 0, staleSampleAt = EPOCH0 - 20, probeSuccessValue = "1",
+  seriesWarmupReads = 0, missingSeries = [], staleSeriesReads = 0, staleSampleAt = EPOCH0 - 20, probeSuccessValue = "1", restoreSeries = {},
 } = {}) {
   const calls = [];
-  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, clock: EPOCH0, mounted: mountedBefore, probe: { id: probeExistingId, mounted: probeMountedBefore }, dirs: {}, upCount: 0, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
+  const state = { containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: mountedBefore, probe: { id: probeExistingId, mounted: probeMountedBefore }, dirs: {}, upCount: 0, networks: ["easysubway_default"], extraHosts: ["host.docker.internal:host-gateway"] };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
   const others = projectContainers ?? [
     { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
     { name: "easysubway-alertmanager", id: "3".repeat(64), image: "sha256:alertmanager", startedAt: "2026-06-30T00:00:01Z" },
     { name: "easysubway-grafana", id: "4".repeat(64), image: "sha256:grafana", startedAt: "2026-06-30T00:00:02Z" },
   ];
-  // timestamp(selector)는 표본 시각을, selector는 값을 돌려준다. 시각 질의가 selector마다 검증 회차당 한 번 오므로 그 횟수를 회차로 센다.
-  // 적용 중(upCount <= 1)에는 사라진 시계열(missingSeries)과 수렴 전 표본(staleSeriesReads회차)을 흉내 낸다. 복원한 직전 release의 probe는 정상이다.
+  // 시계열 질의는 `selector[5m]` 범위 질의 하나다. 적용 중(upCount <= 1)과 복원 중(upCount >= 2)의 라이브 시계열 상태를 따로 흉내 낸다.
+  // 각 단계는 첫 표본이 늦게 나오는 회차(warmupReads), 사라진 시계열(missing), 수렴 전 표본만 남은 회차(staleReads), probe_success 값,
+  // 질의 실패(unreadable)를 가진다. 적용 단계는 위 옵션으로, 복원 단계는 restoreSeries로 정하고 복원한 직전 release의 probe는 기본이 정상이다.
+  // 서버에 닿지 않으면(probe_success 0) blackbox는 만료 시계열을 내지 않으므로 그 단계에서 만료 시계열은 비어 있다.
+  const applyBehavior = { warmupReads: seriesWarmupReads, missing: missingSeries, staleReads: staleSeriesReads, successValue: probeSuccessValue, unreadable: [] };
+  const restoreBehavior = { warmupReads: 0, missing: [], staleReads: 0, successValue: probeSuccessValue, unreadable: [], ...restoreSeries };
   const seriesSamples = (query) => {
-    const timestamped = /^timestamp\((.+)\)$/u.exec(query);
-    const selector = timestamped ? timestamped[1] : query;
-    if (timestamped) state.reads[selector] = (state.reads[selector] ?? 0) + 1;
-    const round = state.reads[selector];
-    const applying = state.upCount <= 1;
-    if (round <= seriesWarmupReads || (applying && missingSeries.includes(selector))) return [];
-    const sampleTime = applying && round <= staleSeriesReads ? staleSampleAt : state.clock + 1;
-    const value = selector === PROBE_SUCCESS_SERIES ? probeSuccessValue : "1728360";
-    return [{ metric: {}, value: [0, timestamped ? String(sampleTime) : value] }];
+    const range = /^(.+)\[5m\]$/u.exec(query);
+    assert.ok(range, `시계열 질의는 범위 질의 하나다: ${query}`);
+    const selector = range[1];
+    const restoring = state.upCount >= 2;
+    const behavior = restoring ? restoreBehavior : applyBehavior;
+    const reads = restoring ? state.restoreReads : state.reads;
+    reads[selector] = (reads[selector] ?? 0) + 1;
+    if (behavior.unreadable.includes(selector)) throw new Error("host command failed (1): prometheus query failed");
+    const noExpiry = selector === PROBE_EXPIRY_SERIES && behavior.successValue === "0";
+    if (reads[selector] <= behavior.warmupReads || behavior.missing.includes(selector) || noExpiry) return [];
+    const value = selector === PROBE_SUCCESS_SERIES ? behavior.successValue : "1728360";
+    const samples = reads[selector] <= behavior.staleReads ? [[staleSampleAt, value]] : [[staleSampleAt, value], [state.clock + 1, value]];
+    return [{ metric: {}, values: samples }];
   };
   let reference = null;
   const runner = async (command, args, options = {}) => {
@@ -169,7 +177,7 @@ export function createHost({
       if (path.startsWith("/api/v1/query?query=")) {
         const query = decodeURIComponent(path.slice("/api/v1/query?query=".length));
         state.queries.push(query);
-        return { stdout: JSON.stringify({ status: "success", data: { resultType: "vector", result: seriesSamples(query) } }), stderr: "" };
+        return { stdout: JSON.stringify({ status: "success", data: { resultType: "matrix", result: seriesSamples(query) } }), stderr: "" };
       }
       if ((path.startsWith("/api/v1/targets") || path === "/api/v1/rules") && state.generation > 0 && state.warmup < liveWarmupReads) {
         if (path === "/api/v1/rules") state.warmup += 1;
@@ -254,6 +262,9 @@ export function seedPreviousRelease(box, { commit = PREVIEW_COMMIT_FOR_SEED } = 
   return release;
 }
 export const PREVIEW_COMMIT_FOR_SEED = PREVIOUS;
+
+// now()를 가짜 호스트의 시계로 돌린다. 수렴 시각이 compose up·restart마다 흐르는 시계 위에서 정해지는 시험에 쓴다.
+export const clockOf = (host) => () => new Date(host.state.clock * 1000);
 
 // 재시작 여부는 symlink 이력이 아니라 컨테이너가 실제로 마운트한 파일 내용으로 정한다(F1).
 export function seedCurrentRelease(box, commit = COMMIT) {

@@ -107,6 +107,7 @@ test("Platform CI가 새 계약 테스트를 실행한다", () => {
   const ci = readFileSync(ciUrl, "utf8");
   for (const command of [
     "node --test tools/platform/deploy-observability-config.test.mjs",
+    "node --test tools/platform/deploy-observability-config-series.test.mjs",
     "node --test tools/ci/observability-config-deploy-workflow.test.mjs",
   ]) assert.ok(ci.includes(command), command);
 });

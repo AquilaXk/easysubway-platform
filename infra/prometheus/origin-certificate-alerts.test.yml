@@ -185,10 +185,10 @@ tests:
         exp_alerts: []
 
   # 마지막 만료 값은 5m이고 실패한 scrape가 6m에 stale 표시를 남기므로 probe 무음 경보는 6m부터 부재, 15분 뒤인 21m에 울린다.
-  # 30분 창이 그 값을 놓치는 35m부터 만료 시간 계산은 근거가 없어지지만, 긴급 경보는 keep_firing_for 30m으로 65m 직전까지 남는다.
-  # probe 무음 경보가 이미 울린 뒤에도 긴급 경보가 바로 풀려 복구 알림이 나가지 않는다.
+  # recording rule은 3일 창의 마지막 표본을 쓰므로 probe가 죽어 있는 내내 마지막 notAfter로 긴급 경보가 유지된다.
+  # 그래서 probe 무음 경보가 울리는 21m 전후와 2시간 뒤에도 긴급 경보는 한 번도 풀리지 않는다.
   - interval: 1m
-    name: a probe dead for more than 30m in the critical band keeps the critical firing through the probe alert takeover
+    name: a probe dead for 2h in the critical band keeps the critical firing while the probe alert fires too
     input_series:
       - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
         values: '432360x5 stale'
@@ -219,21 +219,93 @@ tests:
       - eval_time: 40m
         alertname: OriginCertificateExpiryCritical
         exp_alerts: [*critical]
-      - eval_time: 60m
+      - eval_time: 70m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 120m
         alertname: OriginCertificateExpiryCritical
         exp_alerts: [*critical]
       - eval_time: 40m
         alertname: OriginCertificateExpiringSoon
         exp_alerts: []
-      - eval_time: 40m
+      - eval_time: 120m
         alertname: OriginCertificateProbeFailed
         exp_alerts: [*probe_failed]
+
+  - interval: 1m
+    name: a probe dead for 2h in the warning band keeps the warning firing while the probe alert fires too
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '1728360x5 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 25m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+      - eval_time: 25m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
       - eval_time: 70m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 120m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 120m
         alertname: OriginCertificateExpiryCritical
         exp_alerts: []
-      - eval_time: 70m
+
+  # 갱신되어 21일을 넘는 새 표본이 들어오면 긴급 경보는 그 평가에서 바로 풀린다. 긴 창은 마지막 표본을 쓰므로 복구를 늦추지 않는다.
+  - interval: 1m
+    name: a renewed certificate resolves the critical on the first evaluation after the new sample
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432360x9 2592360x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 10m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+
+  - interval: 1m
+    name: a renewed certificate resolves the critical even when the probe was dead for 30m before it
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432360x5 stale _x33 2592360x20'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 40m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 39m
         alertname: OriginCertificateProbeFailed
         exp_alerts: [*probe_failed]
+      - eval_time: 40m
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+
+  # 경고는 7일 교차를 메우려고 5분 더 유지되므로 갱신 뒤 복구도 그만큼 늦다. 마지막으로 참인 평가가 9m라 14m까지 남고 15m에 풀린다.
+  - interval: 1m
+    name: a renewed certificate resolves the warning after its 5m hold
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '1728360x9 2592360x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 14m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 15m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
 
   # 표본 뒤 stale 표시가 없으면(예: Prometheus 재시작) 5분 lookback이 끝나는 10m부터 부재, 15분 뒤인 25m에 울린다. 마지막 표본 뒤 20분이 상한이다.
   - interval: 1m

@@ -18,8 +18,9 @@
 // 같은 이미지의 격리 reference Prometheus로 기대 상태 수집 → release 설치 → current 전환 → release가 담은 MANAGED_UNITS 서비스만 compose up
 // → 마운트 내용 확인·필요하면 재시작 → 라이브 상태(설정·규칙·target·probe 시계열·네트워크·다른 컨테이너·volume)를 기대와 대조 → receipt.
 // probe 시계열은 컨테이너 수렴이 끝난 시각보다 새 표본이어야 한다(수렴 전 마지막 scrape가 lookback 안에 남아 있는 동안은 통과시키지 않는다).
-// 적용 뒤 대조가 실패하면 직전 release로 되돌리고 같은 기준으로 다시 대조한 뒤 실패로 끝난다(실패 receipt를 남김). 복원은 설정·규칙·target·마운트를
-// 대조하고, 호스트 443 도달에 달린 probe 시계열은 결과만 externalSeries로 기록해 복원 성공 여부를 가르지 않는다.
+// 적용 뒤 대조가 실패하면 직전 release로 되돌리고 같은 기준으로 다시 대조한 뒤 실패로 끝난다(실패 receipt를 남김). 복원은 설정·규칙·target·마운트와
+// 복원한 probe가 수렴 뒤 scrape되었다는 증거(probe_success의 새 표본, 값은 무관)를 대조한다. 호스트 443 도달에 달린 값은 externalSeries로 기록만 하고
+// 복원 성공 여부를 가르지 않는다. 서버에 닿지 않으면 blackbox는 probe_success 0만 내고 만료 시계열을 내지 않는다.
 // 컨테이너를 맞추는 서비스는 MANAGED_UNITS(prometheus와 원 서버 인증서 만료 probe, platform#270)뿐이다. origin-certificate-probe의 내용은
 // 이 도구만 맞춘다. backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 한다.
 // Alertmanager·Grafana·Loki·Alloy는 release에 담기지만 이 도구는 컨테이너를 건드리지 않는다(이슈 #227 범위 밖).
@@ -31,6 +32,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { codepointCompare } from "../lib/codepoint-compare.mjs";
+import { externalVerdict, isoOfEpoch, liveSeriesOf, newestSample, seriesReceipt, staleSeriesOf, unhealthySeriesOf } from "./observability-series.mjs";
 
 const MODES = Object.freeze(["PREVIEW", "DEPLOY"]);
 const RECEIPT_SCHEMA_VERSION = "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RECEIPT_V2";
@@ -45,8 +47,9 @@ const MATERIALIZED_ONLY_DIRS = Object.freeze(["alertmanager", "alloy", "grafana"
 // mounts는 컨테이너 안 경로와 release 안 원천 파일의 짝이다. optional unit은 그 디렉터리가 없는 트리(그 unit 이전의 main 커밋)에서
 // 빠진다. 그래서 옛 커밋으로 되돌리는 DEPLOY·PREVIEW·자동 복원이 모두 같은 규칙으로 prometheus만 맞추고 probe는 건드리지 않는다.
 // job은 그 unit이 읽히는 Prometheus job으로, release의 prometheus.yml이 담아야 한다. liveSeries는 검증 때 라이브 Prometheus에서
-// 컨테이너 수렴 뒤의 새 표본이 나와야 하는 시계열이다(value가 있으면 그 값이어야 한다). blackbox는 probe가 실패해도 /probe에
-// 200으로 답해 target이 up이므로, probe가 실제로 원 서버 인증서를 읽었는지는 이 시계열로만 가린다(platform#270).
+// 컨테이너 수렴 뒤의 새 표본이 나와야 하는 시계열이다({metric, value?}, value가 있으면 그 값이어야 하고 selector는 job으로 만든다).
+// scrapeProof는 호스트 상태와 무관하게 exporter가 scrape마다 내는 metric으로, 복원이 요구하는 것은 이 새 표본의 존재뿐이다.
+// blackbox는 probe가 실패해도 /probe에 200으로 답해 target이 up이므로, probe가 실제로 원 서버 인증서를 읽었는지는 liveSeries로만 가린다(platform#270).
 const PROMETHEUS = Object.freeze({
   service: "prometheus",
   container: "easysubway-prometheus",
@@ -58,10 +61,9 @@ const PROMETHEUS = Object.freeze({
     ["/etc/prometheus/alerts.yml", "prometheus/alerts.yml"],
   ]),
   job: null,
+  scrapeProof: null,
   liveSeries: Object.freeze([]),
 });
-const ORIGIN_PROBE_JOB = "origin_certificate_probe";
-const originSeries = (metric, value) => Object.freeze({ selector: `${metric}{job="${ORIGIN_PROBE_JOB}"}`, value });
 const MANAGED_UNITS = Object.freeze([
   PROMETHEUS,
   Object.freeze({
@@ -71,13 +73,15 @@ const MANAGED_UNITS = Object.freeze([
     optional: true,
     healthy: false,
     mounts: Object.freeze([["/etc/blackbox_exporter/origin-certificate.yml", "blackbox/origin-certificate.yml"]]),
-    job: ORIGIN_PROBE_JOB,
-    liveSeries: Object.freeze([originSeries("probe_ssl_earliest_cert_expiry", null), originSeries("probe_success", "1")]),
+    job: "origin_certificate_probe",
+    scrapeProof: "probe_success",
+    liveSeries: Object.freeze([Object.freeze({ metric: "probe_ssl_earliest_cert_expiry" }), Object.freeze({ metric: "probe_success", value: "1" })]),
   }),
 ]);
 const CONFIG_DIRS = Object.freeze([...MATERIALIZED_ONLY_DIRS, ...MANAGED_UNITS.flatMap((unit) => unit.configDirs)].toSorted(codepointCompare));
 const OPTIONAL_DIRS = Object.freeze(MANAGED_UNITS.filter((unit) => unit.optional).flatMap((unit) => unit.configDirs));
-const RULE_TEST_SUFFIX = ".test.yml";
+// CI는 `promtool test rules infra/prometheus/*.test.yml`로 한 단계만 본다. 배포 게이트도 같은 집합이어야 한다.
+const RULE_TEST_PATTERN = /^prometheus\/[^/]+\.test\.yml$/u;
 // 이슈 #220이 레포에서 제거한 대상. 라이브에 남아 있으면 상시 경보를 내므로 reference 대조와 별개로 이름을 명시해 막는다.
 const REMOVED_JOBS = Object.freeze(["back_worker"]);
 // compose 해석용 값이다. compose는 프로젝트 전체를 해석하므로 backend 서비스의 필수 변수가 필요하지만(CI의 compose config 검증과 같은 방식),
@@ -410,10 +414,8 @@ async function collectReference({ docker, image, command, stagedPrometheus, comm
   return snapshot;
 }
 
-/** promtool test rules에 넘길 규칙 시험 파일. release의 prometheus 디렉터리에 있는 *.test.yml 전부다(커밋마다 있는 파일이 다르다). */
-const ruleTestsOf = (files) => Object.keys(files)
-  .filter((file) => file.startsWith("prometheus/") && file.endsWith(RULE_TEST_SUFFIX))
-  .map((file) => `/etc/${file}`);
+/** promtool test rules에 넘길 규칙 시험 파일. release의 prometheus 디렉터리 바로 아래 *.test.yml 전부다(커밋마다 있는 파일이 다르다). */
+const ruleTestsOf = (files) => Object.keys(files).filter((file) => RULE_TEST_PATTERN.test(file)).map((file) => `/etc/${file}`);
 
 async function validateWithPromtool({ docker, image, stagedPrometheus, ruleTests }) {
   const run = (...args) => docker.docker(["run", "--rm", "--network", "none", "--entrypoint", "promtool", "-v", `${stagedPrometheus}:/etc/prometheus:ro`, image, ...args]);
@@ -525,71 +527,55 @@ function verifyAttempts(statusConfigYaml) {
 }
 
 const epochSeconds = (date) => date.getTime() / 1000;
-const isoOfEpoch = (seconds) => new Date(seconds * 1000).toISOString();
 
-/**
- * 시계열 하나의 라이브 표본 시각과 값. 표본 시각은 selector에 바로 붙인 timestamp()만 실제 scrape 시각을 돌려주므로(다른 식은 평가 시각)
- * 값과 시각을 따로 읽는다. 표본이 없으면 둘 다 null이다. selector가 여러 시계열을 고르면 가장 오래된 표본 시각을 쓴다.
- */
-async function readSeries(docker, { selector }) {
-  const instant = async (expression) => (await promData(docker, PROMETHEUS.container, `/api/v1/query?query=${encodeURIComponent(expression)}`)).result;
-  const [times, values] = [await instant(`timestamp(${selector})`), await instant(selector)];
-  if (times.length === 0 || values.length === 0) return { selector, sampleTime: null, value: null };
-  return { selector, sampleTime: Math.min(...times.map((sample) => Number(sample.value[1]))), value: values.map((sample) => sample.value[1]).join(",") };
+// Prometheus의 표본 lookback과 같은 5분. 이보다 오래된 표본은 현재 시계열이 아니다.
+const SAMPLE_LOOKBACK = "5m";
+
+/** 시계열 하나의 가장 최근 표본. `selector[5m]` 범위 질의 하나가 표본의 실제 scrape 시각과 값을 함께 돌려준다. */
+async function readSeries(docker, spec) {
+  const { result } = await promData(docker, PROMETHEUS.container, `/api/v1/query?query=${encodeURIComponent(`${spec.selector}[${SAMPLE_LOOKBACK}]`)}`);
+  return { ...spec, ...newestSample(result) };
 }
 
-/**
- * 시계열이 notBefore(컨테이너 수렴이 끝난 시각, epoch 초) 뒤의 표본을 갖고 있는지(stale)와 기대한 값인지(unhealthy)를 가른다.
- * 수렴 전 마지막 scrape가 lookback 안에 남아 있는 동안은 값이 맞아도 새 설정을 증명하지 못하므로 stale이다.
- */
-async function inspectSeries(docker, series, notBefore) {
+async function readSeriesAll(docker, series) {
   const readings = [];
-  for (const spec of series) readings.push({ ...await readSeries(docker, spec), expectedValue: spec.value });
-  const stale = readings.flatMap(({ selector, sampleTime }) => {
-    if (sampleTime === null) return [`${selector} returned no sample`];
-    return sampleTime > notBefore ? [] : [`${selector} newest sample ${isoOfEpoch(sampleTime)} is not newer than the container convergence at ${isoOfEpoch(notBefore)}`];
-  });
-  const unhealthy = readings.filter(({ sampleTime, value, expectedValue }) => sampleTime !== null && expectedValue !== null && value !== expectedValue)
-    .map(({ selector, value, expectedValue }) => `${selector} is ${value}, expected ${expectedValue}`);
-  return { readings, stale, unhealthy };
+  for (const spec of series) readings.push(await readSeries(docker, spec));
+  return readings;
 }
-
-const seriesReceipt = (readings) => readings.map(({ selector, sampleTime, value }) => ({ series: selector, sampleTime: sampleTime === null ? null : isoOfEpoch(sampleTime), value }));
 
 const unreadable = (error) => `live prometheus was not readable: ${message(error)}`;
 
-/** series가 있으면 notBefore도 필요하다. 복원 검증은 외부 상태에 달린 시계열을 여기서 빼고 observeExternalSeries로 따로 기록한다. */
-async function verifyLive({ docker, sleep, expected, flagKeys, series = [], notBefore = null }) {
-  const result = await poll(sleep, verifyAttempts(expected.yaml), VERIFY_INTERVAL_MS, async () => {
+/**
+ * 라이브 Prometheus를 검증 창 동안 다시 읽는 유일한 poll. 설정·규칙·target은 기대와 대조하고(configProblems), freshness의 시계열은
+ * notBefore 뒤의 새 표본인지(staleSeries)와 기대한 값인지(unhealthySeries)를 가른다. 셋이 모두 비면 done이다.
+ * freshness는 필수다: 시계열 검증이 없으면 null, 있으면 notBefore가 반드시 따라와야 한다(없으면 신선도 검사가 조용히 꺼진다).
+ */
+export async function pollLive({ docker, sleep, expected, flagKeys, freshness }) {
+  if (freshness !== null && !Number.isFinite(freshness?.notBefore)) fail("E_OBS_DEPLOY_USAGE", "freshness must be null or carry the numeric notBefore of the convergence");
+  const { series = [], notBefore = 0 } = freshness ?? {};
+  return poll(sleep, verifyAttempts(expected.yaml), VERIFY_INTERVAL_MS, async () => {
     try {
       const live = await readSnapshot(docker, PROMETHEUS.container);
-      const { readings, stale, unhealthy } = await inspectSeries(docker, series, notBefore);
-      const problems = [...compareSnapshots(expected, live, flagKeys), ...stale, ...unhealthy];
-      return { done: problems.length === 0, live, readings, problems };
+      const readings = await readSeriesAll(docker, series);
+      const result = { live, readings, configProblems: compareSnapshots(expected, live, flagKeys), staleSeries: staleSeriesOf(readings, notBefore), unhealthySeries: unhealthySeriesOf(readings) };
+      return { ...result, done: unsettledProblems(result).length === 0 };
     } catch (error) {
-      return { done: false, live: null, readings: [], problems: [unreadable(error)] };
+      return { done: false, live: null, readings: [], configProblems: [unreadable(error)], staleSeries: [], unhealthySeries: [] };
     }
   });
-  if (!result.done) fail("E_OBS_DEPLOY_VERIFY", result.problems.join("; "));
-  return { live: result.live, readings: result.readings, hostAfter: await readHostState(docker) };
 }
 
-/**
- * 복원 뒤 시계열 관측. 만료·성공 시계열은 compose 네트워크에서 호스트 443에 닿는지에 달려 있어 복원이 통제하지 못한다.
- * 그래서 복원 성공 여부를 가르지 않고 결과(ok와 detail)만 돌려준다. 새 표본이 나오면 값이 나쁘더라도 거기서 멈춘다.
- */
-async function observeExternalSeries({ docker, sleep, expected, series, notBefore }) {
+const unsettledProblems = ({ configProblems, staleSeries, unhealthySeries }) => [...configProblems, ...staleSeries, ...unhealthySeries];
+
+/** 복원 뒤 외부 상태에 달린 시계열을 한 번 읽어 기록한다. 게이트가 아니다. 읽지 못해도 설정한 selector는 표본 없음으로 남긴다. */
+async function recordExternalSeries({ docker, series, notBefore }) {
   if (series.length === 0) return null;
-  const result = await poll(sleep, verifyAttempts(expected.yaml), VERIFY_INTERVAL_MS, async () => {
-    try {
-      const inspected = await inspectSeries(docker, series, notBefore);
-      return { done: inspected.stale.length === 0, ...inspected };
-    } catch (error) {
-      return { done: false, readings: [], stale: [unreadable(error)], unhealthy: [] };
-    }
-  });
-  const problems = [...result.stale, ...result.unhealthy];
-  return { ok: problems.length === 0, detail: problems.length === 0 ? "every series has a sample newer than the restore and the expected value" : problems.join("; "), series: seriesReceipt(result.readings) };
+  try {
+    const readings = await readSeriesAll(docker, series);
+    return { ...externalVerdict(readings, notBefore), series: seriesReceipt(readings) };
+  } catch (error) {
+    return { ok: false, detail: unreadable(error), series: seriesReceipt(series.map((spec) => ({ ...spec, sampleTime: null, value: null }))) };
+  }
 }
 
 function compareSnapshots(expected, live, flagKeys) {
@@ -788,7 +774,9 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
     try {
       converged = await convergeContainers({ docker, sleep, root, composeEnvFile, files: preview.tree.files, units, idsBefore });
       convergedAt = epochSeconds(now());
-      verified = await verifyLive({ docker, sleep, expected: preview.expected, flagKeys: preview.flagKeys, series: units.flatMap((unit) => unit.liveSeries), notBefore: convergedAt });
+      const settled = await pollLive({ docker, sleep, expected: preview.expected, flagKeys: preview.flagKeys, freshness: { series: liveSeriesOf(units), notBefore: convergedAt } });
+      if (!settled.done) fail("E_OBS_DEPLOY_VERIFY", unsettledProblems(settled).join("; "));
+      verified = { live: settled.live, readings: settled.readings, hostAfter: await readHostState(docker) };
       assertScopeAndVolume(before, verified.hostAfter, units);
       assertRuntimeWiring(before, verified.hostAfter);
     } catch (error) {
@@ -906,8 +894,13 @@ async function restorePrevious({ docker, sleep, now, root, composeEnvFile, previ
     const idsBefore = containerIds(await readProjectContainers(docker), units);
     await convergeContainers({ docker, sleep, root, composeEnvFile, files: previousTree.files, units, idsBefore });
     const convergedAt = epochSeconds(now());
-    await verifyLive({ docker, sleep, expected, flagKeys: expectedFlagKeys(command) });
-    externalSeries = await observeExternalSeries({ docker, sleep, expected, series: units.flatMap((unit) => unit.liveSeries), notBefore: convergedAt });
+    const series = liveSeriesOf(units);
+    // 복원이 요구하는 것은 복원한 probe가 수렴 뒤 scrape되었다는 증거(값은 무관)뿐이다. 만료 시계열과 성공 값은 호스트 443에 달려 있어 기록만 한다.
+    const scrapeProof = series.filter((spec) => spec.scrapeProof).map((spec) => ({ ...spec, expectedValue: null }));
+    const settled = await pollLive({ docker, sleep, expected, flagKeys: expectedFlagKeys(command), freshness: { series: scrapeProof, notBefore: convergedAt } });
+    if (!settled.done) fail("E_OBS_DEPLOY_VERIFY", [...settled.configProblems, ...settled.staleSeries.map((problem) => `the restored probe is not being scraped (${problem})`)].join("; "));
+    await readHostState(docker);
+    externalSeries = await recordExternalSeries({ docker, series, notBefore: convergedAt });
   } catch (restoreError) {
     return { error: new DeployError("E_OBS_DEPLOY_RESTORE", `${cause}; restore verification failed for previous release ${previousCommit}: ${message(restoreError)} (runbook: ${RUNBOOK_PATH})`), restore: "FAILED", externalSeries: null };
   }

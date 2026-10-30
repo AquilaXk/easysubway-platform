@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { scrapeJobSettings, scrapeTargetsByJob } from "./prometheus-scrape-config.mjs";
@@ -112,14 +112,17 @@ test("backend 배포는 전용 probe를 없을 때 만들기만 하고 다시 �
   }
 });
 
-test("CI는 이 계약을 한 번 실행하고 compose와 같은 이미지로 blackbox 설정을, promtool로 infra/prometheus의 모든 규칙 시험을 검사한다 (#270)", needsDocker, () => {
+test("CI는 이 계약을 한 번 실행하고 compose와 같은 이미지로 blackbox 설정을 검사한다 (#270)", needsDocker, () => {
   const ci = read(".github/workflows/ci.yml");
   assert.equal(ci.split("node --test tools/platform/origin-certificate-expiry-probe.test.mjs").length - 1, 1);
   const { image } = composeServices([ORIGIN_SERVICE])[ORIGIN_SERVICE];
   assert.equal(ci.split(`${image} --config.file=/config/origin-certificate.yml --config.check`).length - 1, 1);
-  const ruleTestsOnDisk = readdirSync(new URL("../../infra/prometheus/", import.meta.url)).filter((name) => name.endsWith(".test.yml")).map((name) => `infra/prometheus/${name}`).toSorted();
-  const promtoolLine = ci.split("\n").find((line) => /promtool .*test rules /u.test(line));
-  assert.ok(promtoolLine, "CI의 promtool test rules 단계");
-  const covered = promtoolLine.split(/\s+/u).slice(promtoolLine.split(/\s+/u).indexOf("rules") + 1).flatMap((arg) => (arg === "infra/prometheus/*.test.yml" ? ruleTestsOnDisk : [arg])).toSorted();
-  assert.deepEqual(covered, ruleTestsOnDisk, "CI는 infra/prometheus의 *.test.yml을 하나도 빼지 않고 시험한다");
+});
+
+// 배포 게이트가 같은 집합을 돌린다는 점(하위 디렉터리 제외)은 deploy-observability-config.test.mjs의 PREVIEW 시험이 확인한다.
+test("CI는 promtool로 infra/prometheus 바로 아래의 *.test.yml 전부를 glob 하나로 시험한다 (#270)", () => {
+  const promtoolLines = read(".github/workflows/ci.yml").split("\n").filter((line) => /promtool .*test rules /u.test(line));
+  assert.equal(promtoolLines.length, 1, "CI의 promtool test rules 단계는 하나다");
+  const words = promtoolLines[0].trim().split(/\s+/u);
+  assert.deepEqual(words.slice(words.indexOf("rules") + 1), ["infra/prometheus/*.test.yml"], "시험 파일을 나열하지 않고 glob 하나만 넘긴다");
 });

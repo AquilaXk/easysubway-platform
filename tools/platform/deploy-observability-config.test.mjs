@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { deployObservabilityConfig } from "./deploy-observability-config.mjs";
 import {
-  COMMIT, EPOCH0, IMAGE, PREVIOUS, PROBE_COMMAND, PROBE_CONTAINER, PROBE_EXPIRY_SERIES, PROBE_IMAGE, PROBE_SERIES, PROBE_SERVICE, PROBE_SUCCESS_SERIES, RUN_URL,
+  COMMIT, IMAGE, PREVIOUS, PROBE_COMMAND, PROBE_CONTAINER, PROBE_EXPIRY_SERIES, PROBE_IMAGE, PROBE_SERIES, PROBE_SERVICE, PROBE_SUCCESS_SERIES, RUN_URL,
   base, createHost, failureReceipt, receiptPath, repoRoot, sandbox, seedCurrentRelease, seedPreviousRelease, sha256, snapshot, verbs, walk,
 } from "./deploy-observability-config-fake-host.mjs";
 
@@ -19,6 +19,8 @@ test("PREVIEW는 호스트를 읽지도 쓰지도 않고 promtool 검증과 refe
   const box = sandbox();
   try {
     const host = createHost();
+    mkdirSync(join(box.sourceRoot, "infra", "prometheus", "nested"));
+    writeFileSync(join(box.sourceRoot, "infra", "prometheus", "nested", "decoy.test.yml"), "tests: []\n");
     const result = await deployObservabilityConfig(base(box, host, { mode: "PREVIEW", deployRoot: undefined }));
     const trail = verbs(host);
     assert.deepEqual(trail.slice(0, 6), ["git", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
@@ -31,7 +33,8 @@ test("PREVIEW는 호스트를 읽지도 쓰지도 않고 promtool 검증과 refe
     assert.equal(result.image, IMAGE);
     assert.deepEqual(result.validation, { checkConfig: "passed", testRules: "passed" });
     const ruleTest = host.calls.find((call) => call.args.includes("promtool") && call.args.includes("test"));
-    assert.deepEqual(ruleTest.args.slice(ruleTest.args.indexOf("rules") + 1), ["/etc/prometheus/alerts.test.yml", "/etc/prometheus/origin-certificate-alerts.test.yml"], "release의 규칙 시험 파일을 모두 돌린다");
+    const ciSet = readdirSync(join(repoRoot, "infra", "prometheus")).filter((name) => name.endsWith(".test.yml")).toSorted().map((name) => `/etc/prometheus/${name}`);
+    assert.deepEqual(ruleTest.args.slice(ruleTest.args.indexOf("rules") + 1), ciSet, "CI glob(infra/prometheus/*.test.yml)과 같은 한 단계 집합만 돌린다: 하위 디렉터리의 시험은 돌지 않는다");
     assert.equal(result.expected.statusConfigSha256, sha256(snapshot().yaml));
     assert.deepEqual(result.expected.jobs, ["backend_app_metrics", "docker_runtime_probe", "easysubway-backend", "origin_certificate_probe", "public_edge_probe"]);
     assert.equal(existsSync(box.observability), false, "PREVIEW는 관리 디렉터리를 만들지 않는다");
@@ -90,7 +93,7 @@ test("처음 배포: 검증 → release 설치 → current 전환 → prometheus
       prometheus: { container: "easysubway-prometheus", idBefore: "1".repeat(64), idAfter: "9".repeat(64), action: "recreated" },
       [PROBE_SERVICE]: { container: PROBE_CONTAINER, idBefore: null, idAfter: "a".repeat(64), action: "recreated" },
     }, "처음 배포에서는 probe 컨테이너가 아직 없다");
-    assert.deepEqual(host.state.queries, PROBE_SERIES.flatMap((series) => [`timestamp(${series})`, series]), "probe가 원 서버 인증서를 실제로 읽었는지 라이브 시계열의 표본 시각과 값으로 확인한다");
+    assert.deepEqual(host.state.queries, PROBE_SERIES.map((series) => `${series}[5m]`), "probe가 원 서버 인증서를 실제로 읽었는지 시계열마다 범위 질의 하나로 표본 시각과 값을 읽는다");
     assert.deepEqual(result.verification.liveSeries, [
       { series: PROBE_EXPIRY_SERIES, sampleTime: "2026-10-08T01:02:09.000Z", value: "1728360" },
       { series: PROBE_SUCCESS_SERIES, sampleTime: "2026-10-08T01:02:09.000Z", value: "1" },
@@ -543,139 +546,6 @@ test("blackbox 설정이 없는 옛 main 커밋도 PREVIEW·DEPLOY가 통과하�
     } finally {
       box.cleanup();
     }
-  }
-});
-
-test("probe target이 up이어도 만료 시계열이나 probe 성공이 없으면 검증이 실패하고 직전 release로 복원한다", async () => {
-  for (const missing of PROBE_SERIES) {
-    const box = sandbox();
-    try {
-      seedPreviousRelease(box);
-      const host = createHost({ missingSeries: [missing] });
-      await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), (error) => error.code === "E_OBS_DEPLOY_VERIFY" && error.message.includes(`${missing} returned no sample`) && error.message.includes("restored previous release"), missing);
-      assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS), missing);
-      assert.equal(failureReceipt(box).restore, "RESTORED", missing);
-    } finally {
-      box.cleanup();
-    }
-  }
-});
-
-test("probe_success가 0이면 표본이 새것이어도 검증이 실패한다", async () => {
-  const box = sandbox();
-  try {
-    seedPreviousRelease(box);
-    const host = createHost({ probeSuccessValue: "0" });
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), (error) => error.code === "E_OBS_DEPLOY_VERIFY" && error.message.includes(`${PROBE_SUCCESS_SERIES} is 0, expected 1`));
-  } finally {
-    box.cleanup();
-  }
-});
-
-test("검증 창은 설정의 가장 긴 scrape 주기 두 배라 1m job의 첫 probe 시계열이 늦게 나와도 통과하고, 15s 설정에서 같은 지연은 실패한다", async () => {
-  const slowFirstScrapeRounds = 30;
-  const minute = sandbox();
-  try {
-    const host = createHost({ expected: snapshot({ jobScrapeInterval: "1m" }), seriesWarmupReads: slowFirstScrapeRounds });
-    const result = await deployObservabilityConfig(base(minute, host, { mode: "DEPLOY" }));
-    assert.equal(result.units.prometheus.action, "recreated");
-    assert.ok(host.state.reads[PROBE_SUCCESS_SERIES] > slowFirstScrapeRounds);
-  } finally {
-    minute.cleanup();
-  }
-  const short = sandbox();
-  try {
-    const host = createHost({ seriesWarmupReads: slowFirstScrapeRounds });
-    await assert.rejects(deployObservabilityConfig(base(short, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY.*returned no sample/su);
-  } finally {
-    short.cleanup();
-  }
-});
-
-// 재시작 전 마지막 scrape가 lookback 안에 남아 있으면 값이 맞아도 새 설정을 증명하지 못한다. 수렴이 끝난 뒤의 표본만 인정한다.
-test("수렴 전 표본만 남아 있으면 검증 창 내내 새 표본을 기다리다 실패하고 직전 release로 복원한다", async () => {
-  const box = sandbox();
-  try {
-    seedPreviousRelease(box);
-    const host = createHost({ staleSeriesReads: 1000 });
-    await assert.rejects(
-      deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })),
-      (error) => error.code === "E_OBS_DEPLOY_VERIFY" && error.message.includes(`${PROBE_EXPIRY_SERIES} newest sample`) && error.message.includes("is not newer than the container convergence") && error.message.includes("restored previous release"),
-    );
-    assert.equal(host.state.reads[PROBE_EXPIRY_SERIES] >= 20, true, "검증 창 동안 다시 읽는다");
-    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
-    const failure = failureReceipt(box);
-    assert.equal(failure.restore, "RESTORED");
-    assert.equal(failure.externalSeries.ok, true, "복원한 release의 probe는 새 표본을 낸다");
-  } finally {
-    box.cleanup();
-  }
-});
-
-test("수렴 뒤 새 표본이 나오면 통과하고 receipt에 표본 시각과 값을 남긴다", async () => {
-  const box = sandbox();
-  try {
-    const host = createHost({ staleSeriesReads: 7 });
-    const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
-    assert.equal(host.state.reads[PROBE_EXPIRY_SERIES], 8, "일곱 회차는 옛 표본을 보고 여덟 번째에 통과");
-    assert.equal(result.verification.convergedAt, "2026-10-08T01:02:03.000Z");
-    assert.deepEqual(result.verification.liveSeries, [
-      { series: PROBE_EXPIRY_SERIES, sampleTime: new Date((host.state.clock + 1) * 1000).toISOString(), value: "1728360" },
-      { series: PROBE_SUCCESS_SERIES, sampleTime: new Date((host.state.clock + 1) * 1000).toISOString(), value: "1" },
-    ]);
-    assert.ok(host.state.clock + 1 > EPOCH0, "표본은 수렴 시각 뒤다");
-  } finally {
-    box.cleanup();
-  }
-});
-
-// probe를 재시작하기 전에 옛 설정으로 한 scrape도 수렴 시각보다 앞선 것이다. compose up 앞에서 시각을 재면 이 표본이 통과한다.
-test("compose up과 probe 재시작 사이에 옛 설정으로 만든 표본은 인정하지 않는다", async () => {
-  const box = sandbox();
-  try {
-    seedCurrentRelease(box);
-    const host = createHost({ recreateOnUp: false, liveBefore: snapshot(), mountedBefore: "current", probeMountedBefore: "stale", staleSeriesReads: 1000, staleSampleAt: EPOCH0 + 2 });
-    const clock = () => new Date(host.state.clock * 1000);
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", now: clock })), /E_OBS_DEPLOY_VERIFY.*is not newer than the container convergence/su);
-    assert.equal(host.calls.filter((call) => call.args[0] === "restart").length >= 1, true);
-  } finally {
-    box.cleanup();
-  }
-});
-
-// 443에 닿는지는 release가 통제하지 못한다. 복원이 설정·규칙·target·마운트를 맞췄다면 복원 성공이고, probe 시계열은 결과로만 남는다.
-test("외부 상태 때문에 probe 성공이 계속 0이면 직전 release에서도 같으므로 복원은 RESTORED이고 externalSeries만 ok false로 남는다", async () => {
-  const box = sandbox();
-  try {
-    seedPreviousRelease(box);
-    const host = createHost({ probeSuccessValue: "0" });
-    await assert.rejects(
-      deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })),
-      (error) => error.code === "E_OBS_DEPLOY_VERIFY" && error.message.includes("restored previous release") && error.message.includes(`${PROBE_SUCCESS_SERIES} is 0, expected 1`),
-    );
-    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
-    const failure = failureReceipt(box);
-    assert.equal(failure.restore, "RESTORED");
-    assert.equal(failure.error.code, "E_OBS_DEPLOY_VERIFY");
-    assert.equal(failure.externalSeries.ok, false);
-    assert.match(failure.externalSeries.detail, /probe_success.* is 0, expected 1/u);
-    assert.deepEqual(failure.externalSeries.series.map((reading) => reading.series), PROBE_SERIES);
-  } finally {
-    box.cleanup();
-  }
-});
-
-test("외부 상태와 무관한 복원 검증(라이브 설정 대조)이 실패하면 E_OBS_DEPLOY_RESTORE다", async () => {
-  const box = sandbox();
-  try {
-    seedPreviousRelease(box);
-    const host = createHost({ probeSuccessValue: "0", liveAfter: snapshot({ revision: "old" }), liveAfterRestore: snapshot({ revision: "unexpected" }) });
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_RESTORE.*restore verification/su);
-    const failure = failureReceipt(box);
-    assert.equal(failure.restore, "FAILED");
-    assert.equal(failure.externalSeries, null);
-  } finally {
-    box.cleanup();
   }
 });
 
