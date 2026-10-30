@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { deployObservabilityConfig } from "./deploy-observability-config.mjs";
 import {
-  COMMIT, IMAGE, PREVIOUS, PROBE_COMMAND, PROBE_CONTAINER, PROBE_EXPIRY_SERIES, PROBE_IMAGE, PROBE_SERIES, PROBE_SERVICE, PROBE_SUCCESS_SERIES, RUN_URL,
+  COMMIT, COMPOSE_NETWORK_NAME, IMAGE, PREVIOUS, PROBE_COMMAND, PROBE_CONTAINER, PROBE_EXPIRY_SERIES, PROBE_IMAGE, PROBE_SERIES, PROBE_SERVICE, PROBE_SUCCESS_SERIES, RUN_URL,
   base, createHost, failureReceipt, receiptPath, repoRoot, sandbox, seedCurrentRelease, seedPreviousRelease, sha256, snapshot, verbs, walk,
 } from "./deploy-observability-config-fake-host.mjs";
 
@@ -23,8 +23,8 @@ test("PREVIEW는 호스트를 읽지도 쓰지도 않고 promtool 검증과 refe
     writeFileSync(join(box.sourceRoot, "infra", "prometheus", "nested", "decoy.test.yml"), "tests: []\n");
     const result = await deployObservabilityConfig(base(box, host, { mode: "PREVIEW", deployRoot: undefined }));
     const trail = verbs(host);
-    assert.deepEqual(trail.slice(0, 6), ["git", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
-    assert.ok(trail.slice(6, -1).every((verb) => verb === "exec"), "reference는 exec로 읽기만 한다");
+    assert.deepEqual(trail.slice(0, 7), ["git", "ps:reference", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"], "지난 실행이 남긴 reference 컨테이너만 찾아본 뒤 검증한다");
+    assert.ok(trail.slice(7, -1).every((verb) => verb === "exec"), "reference는 exec로 읽기만 한다");
     for (const forbidden of ["inspect", "ps", "volume", "restart", "compose:up"]) assert.equal(verbs(host).includes(forbidden), false, forbidden);
     assert.equal(trail.at(-1), "rm");
     assert.equal(result.mode, "PREVIEW");
@@ -72,7 +72,7 @@ test("처음 배포: 검증 → release 설치 → current 전환 → prometheus
     const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
     const trail = verbs(host);
     const up = trail.indexOf("compose:up");
-    assert.deepEqual(trail.slice(0, 6), ["git", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
+    assert.deepEqual(trail.slice(0, 7), ["git", "ps:reference", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
     assert.ok(trail.indexOf("promtool:test") < trail.indexOf("inspect") && trail.indexOf("inspect") < up, "검증과 읽기가 상태 변경보다 먼저");
     assert.equal(trail.filter((verb) => verb === "compose:up").length, 1);
     assert.equal(trail.includes("restart"), false, "컨테이너가 재생성되면 재시작하지 않는다");
@@ -126,9 +126,11 @@ test("receipt는 닫힌 필드 집합이고 compose.env 값이나 secret이 들�
     const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
     assert.deepEqual(Object.keys(result), [
       "schemaVersion", "mode", "commit", "previousCommit", "runUrl", "deployedAt", "image", "composeProject", "appliedServices", "materializedOnly",
-      "validation", "files", "directoryDigests", "configDigest", "units", "verification",
+      "validation", "files", "directoryDigests", "configDigest", "composeNetwork", "baselineAttachment", "units", "verification",
     ]);
-    assert.equal(result.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RECEIPT_V2");
+    assert.equal(result.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RECEIPT_V3");
+    assert.deepEqual(result.composeNetwork, { name: COMPOSE_NETWORK_NAME, subnet: "172.18.0.0/16", action: "present" }, "네트워크 보장 결과를 남긴다");
+    assert.deepEqual(result.baselineAttachment.map((entry) => [entry.service, entry.action, entry.running]), [["prometheus", "ATTACHED", true], [PROBE_SERVICE, "ATTACHED", true]]);
     assert.equal(result.composeProject, "easysubway");
     assert.deepEqual(Object.keys(result.units), ["prometheus", PROBE_SERVICE]);
     for (const unit of Object.values(result.units)) assert.deepEqual(Object.keys(unit), ["container", "idBefore", "idAfter", "action"]);
@@ -301,7 +303,7 @@ test("복원 가능한 상태에서 라이브 scrape·규칙·네트워크가 �
     ["target down", { liveAfter: snapshot({ targets: jobs.map((job) => ({ scrapePool: job, health: job === "backend_app_metrics" ? "down" : "up" })) }) }, /E_OBS_DEPLOY_VERIFY.*backend_app_metrics/su],
     ["job의 target 없음", { liveAfter: snapshot({ targets: jobs.slice(0, 3).map((job) => ({ scrapePool: job, health: "up" })) }) }, /E_OBS_DEPLOY_VERIFY.*public_edge_probe/su],
     ["규칙 health err", { liveAfter: snapshot({ ruleHealth: "err" }) }, /E_OBS_DEPLOY_VERIFY.*rule/su],
-    ["네트워크 변경", { networksAfterUp: ["bridge"] }, /E_OBS_DEPLOY_VERIFY.*network/su],
+    ["네트워크 변경", { networksAfterUp: ["bridge", COMPOSE_NETWORK_NAME] }, /E_OBS_DEPLOY_VERIFY: network changed \(easysubway_default -> bridge,easysubway_default\)/u],
     ["extra_hosts 변경", { extraHostsAfterUp: [] }, /E_OBS_DEPLOY_VERIFY.*extra_hosts/su],
   ];
   for (const [label, options, pattern] of cases) {
@@ -355,7 +357,8 @@ test("보존 flag가 라이브에 적용되지 않으면 실패한다", async ()
   }
 });
 
-test("prometheus 외 프로젝트 컨테이너가 바뀌면(ID·이미지·시작 시각 중 하나라도) 복원하고 실패 receipt를 남기며 실패한다", async () => {
+// 다른 컨테이너의 변화는 복원이 되돌릴 수 없다. 복원은 컨테이너를 맞추기 전에 배포 전 상태 대비 범위를 보고, 이미 바뀌었으면 맞추지 않고 그 사실을 남긴다(#273).
+test("prometheus 외 프로젝트 컨테이너가 바뀌면(ID·이미지·시작 시각 중 하나라도) current만 되돌리고 복원 compose는 건너뛰며 두 원인을 모두 남긴다", async () => {
   const changes = [
     ["ID", (others) => { others[0].id = "f".repeat(64); }, /E_OBS_DEPLOY_SCOPE.*easysubway-postgres/su],
     ["이미지", (others) => { others[1].image = "sha256:other-image"; }, /E_OBS_DEPLOY_SCOPE.*easysubway-alertmanager/su],
@@ -369,12 +372,14 @@ test("prometheus 외 프로젝트 컨테이너가 바뀌면(ID·이미지·시�
       seedPreviousRelease(box);
       const host = createHost({ changeOthersOnUp: change });
       await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), pattern, label);
-      assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS), `${label}: 복원`);
-      assert.equal(verbs(host).filter((verb) => verb === "compose:up").length, 2, `${label}: 복원도 compose를 거친다`);
+      assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS), `${label}: current는 직전 release`);
+      assert.equal(verbs(host).filter((verb) => verb === "compose:up").length, 1, `${label}: 범위가 이미 깨졌으면 복원 compose를 돌리지 않는다`);
       const failure = failureReceipt(box);
       assert.equal(failure.outcome, "FAILED", label);
       assert.equal(failure.error.code, "E_OBS_DEPLOY_SCOPE", label);
-      assert.equal(failure.restore, "RESTORED", label);
+      assert.equal(failure.restore, "SKIPPED_SCOPE_CHANGED", label);
+      assert.equal(failure.restoreError.code, "E_OBS_DEPLOY_SCOPE", label);
+      assert.match(failure.restoreError.detail, /restore of previous release b{40} was skipped/u, label);
       assert.equal(existsSync(receiptPath(box)), false, `${label}: 성공 receipt는 없다`);
     } finally {
       box.cleanup();
@@ -382,18 +387,20 @@ test("prometheus 외 프로젝트 컨테이너가 바뀌면(ID·이미지·시�
   }
 });
 
-test("데이터 volume 정체가 바뀌면 복원하고 실패 receipt를 남기며 실패한다", async () => {
+test("데이터 volume 정체가 바뀌면 current만 되돌리고 복원 compose는 건너뛰며 두 원인을 모두 남긴다", async () => {
   const box = sandbox();
   try {
     seedPreviousRelease(box);
     const probe = createHost();
     const changed = { ...probe.volume, CreatedAt: "2026-10-08T00:00:00Z" };
     const host = createHost({ volumeAfter: changed });
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VOLUME/u);
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_RESTORE: forward failure E_OBS_DEPLOY_VOLUME.*restore of previous release b{40} was skipped/su);
     assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
+    assert.equal(verbs(host).filter((verb) => verb === "compose:up").length, 1);
     const failure = failureReceipt(box);
     assert.equal(failure.error.code, "E_OBS_DEPLOY_VOLUME");
-    assert.equal(failure.restore, "RESTORED");
+    assert.equal(failure.restore, "SKIPPED_SCOPE_CHANGED");
+    assert.equal(failure.restoreError.code, "E_OBS_DEPLOY_VOLUME");
   } finally {
     box.cleanup();
   }
@@ -405,8 +412,10 @@ test("적용 단계 실패는 실패 receipt를 남기고(복원 여부 포함),
     const host = createHost({ liveAfter: snapshot({ revision: "old" }) });
     await assert.rejects(deployObservabilityConfig(base(first, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_VERIFY/u);
     const failure = failureReceipt(first);
-    assert.deepEqual(Object.keys(failure), ["schemaVersion", "mode", "outcome", "commit", "previousCommit", "runUrl", "recordedAt", "error", "restore", "externalSeries", "configDigest"]);
-    assert.equal(failure.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V2");
+    assert.deepEqual(Object.keys(failure), ["schemaVersion", "mode", "outcome", "commit", "previousCommit", "runUrl", "recordedAt", "error", "restore", "restoreError", "networkAttachment", "externalSeries", "composeNetwork", "baselineAttachment", "configDigest"]);
+    assert.deepEqual(failure.composeNetwork, { name: COMPOSE_NETWORK_NAME, subnet: "172.18.0.0/16", action: "present" }, "실패 receipt도 네트워크 보장 결과를 남긴다");
+    assert.equal(failure.schemaVersion, "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V3");
+    assert.equal(failure.restoreError, null);
     assert.equal(failure.commit, COMMIT);
     assert.equal(failure.previousCommit, null);
     assert.equal(failure.restore, "NO_MANAGED_PREVIOUS");
@@ -633,7 +642,7 @@ test("적용 중 SIGTERM을 받으면 current를 직전 release로 되돌리고 
     seedPreviousRelease(box);
     const host = createHost();
     const hooked = withSignals(host, box);
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", ...hooked.options })), /killed/u);
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", ...hooked.options })), /E_OBS_DEPLOY_INTERRUPTED: SIGTERM received while applying/u);
     assert.deepEqual(hooked.exits, [143]);
     assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
     const failure = failureReceipt(box);
@@ -664,7 +673,7 @@ test("첫 배포 중 SIGINT는 되돌릴 관리 release가 없음을 receipt에 
       }
       return original(command, args, options);
     };
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", signalSource: signals, exit: (code) => { exits.push(code); }, commandRunner: runner })), /interrupted/u);
+    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY", signalSource: signals, exit: (code) => { exits.push(code); }, commandRunner: runner })), /E_OBS_DEPLOY_INTERRUPTED: SIGINT received while applying/u);
     assert.deepEqual(exits, [130]);
     const failure = failureReceipt(box);
     assert.equal(failure.outcome, "INTERRUPTED");
@@ -681,7 +690,7 @@ test("중단된 뒤 같은 커밋을 재시도하면 컨테이너가 어떤 상�
     seedPreviousRelease(box);
     const interrupted = createHost();
     const hooked = withSignals(interrupted, box);
-    await assert.rejects(deployObservabilityConfig(base(box, interrupted, { mode: "DEPLOY", ...hooked.options })), /killed/u);
+    await assert.rejects(deployObservabilityConfig(base(box, interrupted, { mode: "DEPLOY", ...hooked.options })), /E_OBS_DEPLOY_INTERRUPTED/u);
     // 컨테이너는 옛 파일을 마운트한 채 살아 있다(재생성되지 않음).
     const retry = createHost({ recreateOnUp: false, mountedBefore: "stale" });
     const result = await deployObservabilityConfig(base(box, retry, { mode: "DEPLOY", runId: "124" }));
@@ -711,10 +720,13 @@ test("복원도 직전 release의 reference와 라이브를 대조하고, 대조
   try {
     seedPreviousRelease(bad);
     const host = createHost({ liveAfter: snapshot({ revision: "old" }), liveAfterRestore: snapshot({ revision: "unexpected" }) });
-    await assert.rejects(deployObservabilityConfig(base(bad, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_RESTORE.*restore verification/su);
+    await assert.rejects(deployObservabilityConfig(base(bad, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_RESTORE: forward failure E_OBS_DEPLOY_VERIFY.*restore verification failed/su);
     const failure = failureReceipt(bad);
     assert.equal(failure.restore, "FAILED");
-    assert.equal(failure.error.code, "E_OBS_DEPLOY_RESTORE");
+    assert.equal(failure.error.code, "E_OBS_DEPLOY_VERIFY", "error는 정방향 실패 원인이다");
+    assert.match(failure.error.detail, /status\/config differs/u);
+    assert.equal(failure.restoreError.code, "E_OBS_DEPLOY_VERIFY");
+    assert.match(failure.restoreError.detail, /restore verification failed for previous release/u);
   } finally {
     bad.cleanup();
   }
@@ -779,14 +791,15 @@ test("명령 목록은 허용된 동사만 쓰고 down·rm(운영)·volume 삭�
     seedPreviousRelease(box);
     const host = createHost({ recreateOnUp: false });
     await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
-    const allowed = new Set(["pull", "run", "exec", "rm", "inspect", "ps", "volume", "restart", "compose"]);
+    const allowed = new Set(["pull", "run", "exec", "rm", "inspect", "ps", "volume", "restart", "compose", "network"]);
     for (const { command, args } of host.calls) {
       if (command === "git") {
         assert.deepEqual(args, ["-C", box.sourceRoot, "rev-parse", "HEAD"]);
         continue;
       }
       assert.ok(allowed.has(args[0]), args.join(" "));
-      for (const forbidden of ["down", "stop", "kill", "prune", "--remove-orphans", "--force-recreate", "rmi", "network"]) assert.equal(args.includes(forbidden), false, `${forbidden}: ${args.join(" ")}`);
+      for (const forbidden of ["down", "stop", "kill", "prune", "--remove-orphans", "--force-recreate", "rmi", "disconnect"]) assert.equal(args.includes(forbidden), false, `${forbidden}: ${args.join(" ")}`);
+      if (args[0] === "network") assert.ok(["ls", "inspect"].includes(args[1]), `기본 네트워크가 있고 붙어 있으면 읽기만 한다: ${args.join(" ")}`);
       if (args[0] === "compose") {
         const sub = args[args.indexOf("--profile") + 2];
         assert.ok(["config", "up"].includes(sub), args.join(" "));
@@ -885,24 +898,6 @@ test("레포의 prometheus.yml에는 제거된 back_worker 대상이 없고 rule
   assert.match(config, /rule_files:\n\s+- \/etc\/prometheus\/alerts\.yml/u);
 });
 
-test("레포의 docker-compose.yml은 기본 네트워크 이름과 ipam 서브넷을 관측 계약과 동일하게 고정한다", () => {
-  const contract = JSON.parse(
-    readFileSync(join(repoRoot, "contracts", "release", "platform-k3s-observability-contract.json"), "utf8"),
-  );
-  const compose = readFileSync(join(repoRoot, "infra", "docker-compose.yml"), "utf8");
-  const networksSection = compose.split(/\nnetworks:\n/u)[1];
-  assert.ok(networksSection, "infra/docker-compose.yml must declare a top-level networks block");
-  const escapedName = contract.composeNetwork.name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const escapedSubnet = contract.composeNetwork.subnet.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  assert.match(
-    networksSection,
-    new RegExp(
-      `^  default:\\n    name: ${escapedName}\\n    ipam:\\n      config:\\n        - subnet: "?${escapedSubnet}"?(?:\\n|$)`,
-      "mu",
-    ),
-  );
-});
-
 // 호스트 실측(2026-10-08): 컨테이너 easysubway-prometheus, volume easysubway_prometheus-data(compose project easysubway). 레포 compose를 실제 compose로
 // 해석했을 때 같은 이름이 나와야 새 위치에서 compose를 실행해도 TSDB volume이 그대로 이어진다. docker compose가 없는 환경에서는 건너뛰고, CI에는 있다.
 const composeAvailable = spawnSync("docker", ["compose", "version"], { stdio: "ignore" }).status === 0;
@@ -923,7 +918,7 @@ test("실제 compose 해석: 프로젝트 easysubway에서 prometheus 서비스�
     assert.equal(service.container_name, "easysubway-prometheus");
     assert.equal(config.volumes["prometheus-data"].name, "easysubway_prometheus-data");
     assert.equal(config.networks.default.name, contract.composeNetwork.name);
-    assert.deepEqual(config.networks.default.ipam.config, [{ subnet: contract.composeNetwork.subnet }]);
+    assert.equal(config.networks.default.external, true, "compose는 운영 네트워크를 만들거나 비교해 다시 만들지 않는다(#273)");
     const sources = service.volumes.filter((volume) => volume.type === "bind").map((volume) => [volume.source, volume.target]);
     assert.deepEqual(sources, [
       [join(current, "prometheus", "prometheus.yml"), "/etc/prometheus/prometheus.yml"],

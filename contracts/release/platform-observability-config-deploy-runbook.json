@@ -7,7 +7,7 @@
   },
   "workflow": ".github/workflows/observability-config-deploy.yml",
   "tool": "tools/platform/deploy-observability-config.mjs",
-  "scope": "compose 프로젝트 easysubway의 prometheus 서비스와, release가 infra/blackbox를 담을 때 그 job이 가리키는 origin-certificate-probe 서비스(platform#270). origin-certificate-probe의 설정 내용은 이 도구만 맞추고 backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 한다. infra/blackbox가 없는 옛 커밋은 prometheus만 맞추고 probe 컨테이너는 건드리지 않는다. 아래 첫 배포 절차는 prometheus만 다룬다. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
+  "scope": "compose 프로젝트 easysubway의 prometheus 서비스와, release가 infra/blackbox를 담을 때 그 job이 가리키는 origin-certificate-probe 서비스(platform#270). 두 서비스의 설정 내용은 이 도구만 맞추고 backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 한다(prometheusOwnership 절, platform#273). infra/blackbox가 없는 옛 커밋은 prometheus만 맞추고 probe 컨테이너는 건드리지 않는다. 아래 첫 배포 절차는 prometheus만 다룬다. alertmanager·grafana·loki·alloy는 release에 담기지만 컨테이너는 건드리지 않고 구 hub 체크아웃(/opt/easysubway/repository)을 계속 마운트한다.",
   "hostLayout": {
     "root": "/opt/easysubway/observability",
     "releases": "releases/<40자 커밋 SHA> (읽기 전용 복사본, 내용이 다르면 덮어쓰지 않음)",
@@ -15,14 +15,35 @@
     "previous": "직전 release symlink (자동 복원 대상)",
     "receipts": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/{receipt.json,failure-receipt.json}"
   },
-  "concurrencyAssumption": "호스트에서 한 번에 한 DEPLOY만 실행된다(workflow concurrency group observability-config-production, cancel-in-progress false). 오래된 .staging-*·.*.tmp-* 정리는 pid 생존 여부만 보므로 이 전제에 기댄다.",
+  "concurrency": "DEPLOY는 backend 배포(tools/deploy/deploy-backend.sh의 exec 9>deploy.lock; flock 9)와 같은 ${DEPLOY_ROOT}/deploy.lock에 배타 flock을 건다(platform#273). 다른 쪽이 쥐고 있으면(flock --conflict-exit-code 75) 기다리지 않고 E_OBS_DEPLOY_LOCKED로 바로 끝나며 아무것도 바꾸지 않는다. 그 backend 배포가 끝난 뒤 같은 DEPLOY를 다시 실행한다. 잠금 자체를 걸 수 없는 환경(flock이 없음, 잠금 파일을 열 수 없음, holder가 5초 안에 준비되지 않음)은 E_OBS_DEPLOY_LOCK_UNAVAILABLE로 끝나고 오류 문장에 flock의 종료 코드와 stderr가 남는다. 이때는 다시 실행해도 같으므로 호스트를 먼저 고친다. 잠근 뒤에는 호스트 명령, release 설치, current 전환, 복원마다 잠금이 유지되는지 확인한다. 잠금 holder가 사라지면 진행 중인 명령을 멈추고 다음 변경 전에 E_OBS_DEPLOY_LOCK_LOST로 끝난다. 잠금을 잃은 뒤 드러난 오류는 단계(검증·reference·네트워크 보장·적용·복원)와 무관하게 이 코드로 바뀌고 오류 문장 끝에 원래 원인(forward failure)이 남는다. current 전환 전이면 failure-receipt.json에 restore NOT_STARTED와 error E_OBS_DEPLOY_LOCK_LOST로, 적용 중이면 다른 배포가 돌 수 있으므로 복원도 하지 않고 restore LOCK_LOST로, 복원 중이면 restore FAILED와 restoreError E_OBS_DEPLOY_LOCK_LOST로 남긴다. 격리 reference 컨테이너는 잠금을 잃거나 중단되어도 지운다. 강제 종료가 남긴 reference 컨테이너(이름 easysubway-observability-ref-<sha12>-<pid>, 그 pid가 죽은 것만)는 다음 DEPLOY·PREVIEW가 검증 전에 지운다. 다른 배포가 끝난 뒤 같은 DEPLOY를 다시 실행한다. 기다리지 않는 이유는 backend 배포가 standby 부팅·검증으로 수 분 이상 잠금을 쥐어 workflow 제한 시간 20분 안에 끝난다는 보장이 없고, 기다린 끝에 남의 배포 결과 위에 덮어쓰는 것보다 다시 실행하는 쪽이 판단이 명확하기 때문이다. PREVIEW는 호스트에 닿지 않으므로 잠금을 잡지 않는다. workflow concurrency group observability-config-production은 관측 workflow끼리만 직렬화한다.",
+  "prometheusOwnership": {
+    "decision": "Prometheus(prometheus 서비스)의 설정 내용과 컨테이너는 이 도구만 맞춘다. backend 배포는 prometheus를 --no-recreate로 없을 때만 만들고, 설정 변경 강제 재생성 목록에서 뺐으며, depends_on으로 prometheus를 끌어오는 grafana는 --no-deps로만 올린다(platform#273). #272의 origin-certificate-probe와 같은 방식이다.",
+    "reasons": [
+      "backend 배포는 레포 체크아웃(-f infra/docker-compose.yml)에서, 이 도구는 observability/current에서 compose를 돌린다. project directory가 달라 docker compose config --hash prometheus 값이 다르므로, backend 배포의 up은 이 도구가 맞춘 prometheus를 체크아웃 기준으로 다시 만든다. 그러면 관측 DEPLOY와 롤백 결과가 다음 backend 배포에서 조용히 되돌아가고 receipt가 낡는다",
+      "grafana는 prometheus를 depends_on으로 가진다. 의존성을 수렴하는 up은 grafana만 지정해도 hash가 다른 prometheus를 다시 만들므로(실측) prometheus를 목록에서 빼는 것만으로는 막히지 않는다",
+      "이 도구는 promtool 검증, 격리 reference 대조, 라이브 대조, 자동 복원, receipt를 갖춘 경로라 설정 내용의 소유자로 맞다"
+    ],
+    "consequence": "infra/prometheus/**를 바꾸는 PR은 병합만으로 운영에 반영되지 않는다. 병합한 main 커밋을 이 도구로 DEPLOY해야 한다(postMerge 절). backend 배포는 더 이상 infra/prometheus 변경을 이유로 다른 관측 서비스를 다시 만들지 않는다.",
+    "bootstrap": "새 호스트에서는 backend 배포가 prometheus를 처음 한 번 만든다(--no-recreate는 없을 때 만든다). 이 도구는 기존 prometheus 컨테이너가 있어야 DEPLOY하므로, 그 뒤 이 도구로 DEPLOY해 내용을 넘겨받는다."
+  },
+  "composeNetwork": {
+    "decision": "infra/docker-compose.yml의 기본 네트워크는 name easysubway_default, external true다(platform#273). compose는 external 네트워크를 만들지도, 정의를 비교해 다시 만들지도 않는다(compose spec networks.<name>.external).",
+    "why": "#250이 기본 네트워크에 ipam 서브넷 정의를 더한 뒤, compose는 그 정의를 그보다 먼저 만들어진 운영 네트워크의 config-hash label과 다르게 보고 네트워크를 다시 만들려 했다. 그 과정에서 prometheus를 멈추고 네트워크에서 떼어 냈고, 다른 컨테이너가 붙어 있어 네트워크 삭제는 실패했다(2026-10-30 관측 DEPLOY 실패, platform#273). 복원의 compose up은 떨어진 컨테이너를 다시 시작만 하고 네트워크에 붙이지 않았다.",
+    "ensure": "external 네트워크는 compose가 만들지 않으므로 호스트에서 이 compose 파일로 up하는 모든 경로가 compose를 돌리기 전에 tools/platform/ensure-compose-network.mjs 하나로 확인한다. 이 도구는 promtool 검증 뒤 release 설치 전에, backend 배포는 첫 compose up 전에 CLI(node tools/platform/ensure-compose-network.mjs --project <compose project>)로, 후보 기동(start-journey-compose-candidates.mjs)은 standby up 전에 확인한다. 고정 호스트 활성화(run-fixed-host-journey-activation.mjs)는 같은 실행·잠금·project에서 먼저 후보 기동을 거치므로 따로 확인하지 않는다. 없으면 docker network create --driver bridge --subnet 172.18.0.0/16로 만들고 compose label(com.docker.compose.network=default, com.docker.compose.project)을 붙인다. label은 기본 네트워크를 external로 선언하지 않은 compose 파일(구 hub 체크아웃)이 같은 이름의 네트워크를 incorrect label로 거부하지 않게 한다. 이미 있으면 서브넷만 확인하고, 다르면 바꾸지 않고 멈춘다. CLI 종료 코드는 0 보장됨, 3 서브넷 불일치, 1 docker 오류, 2 잘못된 인자이고, backend 배포는 3을 blocked compose_network_mismatch로, 나머지 실패를 failed compose_network_unavailable로 남긴다. 이 도구는 E_OBS_DEPLOY_NETWORK로 멈추고 결과({name, subnet, action created|present})를 receipt.json과 failure-receipt.json의 composeNetwork에 남긴다. 이름과 서브넷의 정본은 contracts/release/platform-k3s-observability-contract.json의 composeNetwork이고 K3s NetworkPolicy와 Prometheus 대상도 같은 값을 쓴다.",
+    "refusedReleases": "#250부터 이 변경 전까지의 main 커밋은 기본 네트워크를 external 없이 ipam으로 선언한다. 이 도구는 기본 네트워크를 external 없이 암묵 기본값({name, ipam: {}}) 밖의 속성(ipam config, labels, driver, driver_opts, internal, enable_ipv6, attachable 등)으로 선언한 release를 적용·복원 어느 쪽으로도 compose에 넘기지 않고 E_OBS_DEPLOY_SOURCE로 거부한다. 그런 정의는 어느 것이든 compose가 운영 네트워크를 소유하고 다시 만들게 한다. 네트워크 블록이 없는 그 이전 커밋은 운영 네트워크를 만든 정의와 같아 다시 만들지 않으므로 롤백 대상으로 쓸 수 있다.",
+    "detachedContainer": "compose(v2)는 기본 네트워크 endpoint에 container_name과 서비스 이름을 alias로 단다(실측 Aliases [\"<container_name>\", \"<service>\"]). 떨어진 컨테이너에는 endpoint가 없으므로 다시 붙일 때 그 두 값을 컨테이너 자신의 이름과 com.docker.compose.service label에서 읽는다. DEPLOY는 기준선을 읽기 전에 release가 맞추는 관리 컨테이너 중 떨어진 것을 먼저 다시 붙인다(지난 실패가 떼어 둔 prometheus를 networks [] 기준선으로 삼지 않게). 붙이지 못하면 아무것도 바꾸기 전에 E_OBS_DEPLOY_NETWORK로 멈추고, 결과는 receipt의 baselineAttachment에 남는다. 적용이 실패하면 복원 전에 배포 전에 있던 prometheus와 probe 컨테이너가 easysubway_default에 붙어 떠 있는지 확인해 떨어졌으면 다시 붙이고(복원의 compose up은 떨어진 컨테이너를 다시 시작만 하고 붙이지 않으므로, 붙이지 않은 채 복원하면 모든 target이 down이라 복원 대조가 실패한다), 복원한 뒤 한 번 더 확인한다. 결과는 failure-receipt.json의 networkAttachment에 {reattach: 복원 전 확인, recheck: 복원 뒤 확인}으로 unit마다 남는다(ATTACHED·RECONNECTED·RECONNECT_FAILED·UNREADABLE, running, detail에 다시 붙인 alias). 판정은 recheck로 한다. 다시 붙이지 못했거나 멈춰 있으면 E_OBS_DEPLOY_RESTORE로 끝나고 오류 문장이 그 컨테이너를 이름으로 적는다. 적용 뒤와 복원 뒤의 배선 검사는 prometheus가 easysubway_default에 붙어 있어야 하고 배포 전과 같은 네트워크·extra_hosts여야 통과한다.",
+    "manualReconnect": "sudo docker network connect --alias easysubway-prometheus --alias prometheus easysubway_default easysubway-prometheus",
+    "localDevelopment": "개발 머신에서 infra/docker-compose.yml로 compose up하기 전에도 같은 네트워크가 있어야 한다(external이라 compose가 만들지 않고 \"network easysubway_default declared as external, but could not be found\"로 멈춘다, Compose v2 실측). 레포 루트에서 node tools/platform/ensure-compose-network.mjs --project easysubway를 한 번 실행하면 계약 서브넷과 compose label로 만든다. 직접 만들 때는 docker network create --driver bridge --subnet 172.18.0.0/16 --label com.docker.compose.network=default --label com.docker.compose.project=easysubway easysubway_default와 같다. 그 서브넷을 이미 다른 네트워크가 쓰면 생성이 실패하므로 그 네트워크를 정리한 뒤 다시 실행한다."
+  },
   "neverRun": [
     "docker compose down",
     "--remove-orphans",
     "--force-recreate",
     "docker volume rm",
     "docker volume prune",
-    "rm -rf /opt/easysubway/repository"
+    "rm -rf /opt/easysubway/repository",
+    "docker network rm",
+    "docker network disconnect"
   ],
   "preview": [
     {
@@ -54,14 +75,14 @@
     }
   ],
   "postMerge": {
-    "required": "infra/blackbox/** 또는 compose의 origin-certificate-probe 서비스(이미지·command·마운트·환경)를 바꾸는 PR은 병합한 뒤 그 main 커밋을 이 도구로 DEPLOY한다. 실제 DEPLOY와 QA 승인은 위 deploy 절을 따른다.",
-    "why": "origin-certificate-probe의 설정 내용과 이미지는 이 도구만 맞춘다. backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 하고 다시 만들거나 갱신하지 않으며, 이미지 갱신 자동화도 닿지 않는다. 그래서 병합만으로는 운영 probe가 바뀌지 않고, prometheus.yml의 module 이름만 먼저 반영되는 식으로 두 쪽이 어긋나 OriginCertificateProbeFailed가 울릴 수 있다.",
+    "required": "infra/prometheus/**, infra/blackbox/**, 또는 compose의 prometheus·origin-certificate-probe 서비스(이미지·command·마운트·환경)를 바꾸는 PR은 병합한 뒤 그 main 커밋을 이 도구로 DEPLOY한다. 실제 DEPLOY와 QA 승인은 위 deploy 절을 따른다.",
+    "why": "prometheus와 origin-certificate-probe의 설정 내용과 이미지는 이 도구만 맞춘다. backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 하고 다시 만들거나 갱신하지 않으며, 이미지 갱신 자동화도 닿지 않는다. 그래서 병합만으로는 운영 Prometheus와 probe가 바뀌지 않고, prometheus.yml의 module 이름만 먼저 반영되는 식으로 두 쪽이 어긋나면 OriginCertificateProbeFailed가 울릴 수 있다.",
     "check": "DEPLOY receipt의 units.origin-certificate-probe가 있고 verification.liveSeries의 표본 시각이 verification.convergedAt보다 뒤이며 probe_success 값이 1이다"
   },
   "verify": [
     {
       "title": "receipt 확인",
-      "check": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/receipt.json에서 statusConfigSha256 == expectedStatusConfigSha256, rulesSha256 일치, absentJobs == [back_worker], targets가 모든 job up, ruleHealth ok == total, untouchedContainers, volume before/after 동일. units는 appliedServices와 같은 서비스를 담는다: units.prometheus와(infra/blackbox가 있는 커밋이면) units.origin-certificate-probe의 idBefore·idAfter·action. verification.liveSeries(origin_certificate_probe의 probe_ssl_earliest_cert_expiry와 probe_success)는 컨테이너 수렴이 끝난 시각(verification.convergedAt) 뒤에 만든 표본이 있고 probe_success 값이 1이어야 통과한 조건이며, 관측한 표본 시각과 값이 그대로 남는다. 자동 복원이 RESTORED로 끝난 failure-receipt.json의 externalSeries는 복원된 probe의 같은 시계열을 관측만 한 결과다. 복원 판정은 복원한 probe의 probe_success에 수렴 뒤 새 표본이 있는지만 보므로(값은 무관) ok가 false여도 복원 실패가 아니다. 이때 detail과 series의 값을 읽는다. probe_success가 0이면 exporter는 scrape되었으나 호스트 443을 읽지 못한 것이라 route와 TLS 쪽이다(이때 만료 시계열은 없는 것이 정상이다). 새 표본이 없다는 detail이면 scrape와 설정 쪽이라 origin-certificate-probe 컨테이너와 prometheus job을 확인한다. Prometheus를 읽지 못했다는 detail이면 Prometheus 응답부터 확인한다. 복원한 probe의 probe_success에 새 표본이 끝내 없으면 restore가 FAILED(E_OBS_DEPLOY_RESTORE)로 남는다"
+      "check": "/opt/easysubway/release-receipts/observability-config-<sha12>-<run id>/receipt.json에서 statusConfigSha256 == expectedStatusConfigSha256, rulesSha256 일치, absentJobs == [back_worker], targets가 모든 job up, ruleHealth ok == total, untouchedContainers, volume before/after 동일. units는 appliedServices와 같은 서비스를 담는다: units.prometheus와(infra/blackbox가 있는 커밋이면) units.origin-certificate-probe의 idBefore·idAfter·action. verification.liveSeries(origin_certificate_probe의 probe_ssl_earliest_cert_expiry와 probe_success)는 컨테이너 수렴이 끝난 시각(verification.convergedAt) 뒤에 만든 표본이 있고 probe_success 값이 1이어야 통과한 조건이며, 관측한 표본 시각과 값이 그대로 남는다. 자동 복원이 RESTORED로 끝난 failure-receipt.json의 externalSeries는 복원된 probe의 같은 시계열을 관측만 한 결과다. 복원 판정은 복원한 probe의 probe_success에 수렴 뒤 새 표본이 있는지만 보므로(값은 무관) ok가 false여도 복원 실패가 아니다. 이때 detail과 series의 값을 읽는다. probe_success가 0이면 exporter는 scrape되었으나 호스트 443을 읽지 못한 것이라 route와 TLS 쪽이다(이때 만료 시계열은 없는 것이 정상이다). 새 표본이 없다는 detail이면 scrape와 설정 쪽이라 origin-certificate-probe 컨테이너와 prometheus job을 확인한다. Prometheus를 읽지 못했다는 detail이면 Prometheus 응답부터 확인한다. 복원한 probe의 probe_success에 새 표본이 끝내 없으면 restore가 FAILED(E_OBS_DEPLOY_RESTORE)로 남는다. failure-receipt.json(schemaVersion PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V3)의 error는 정방향 실패 원인이고, 복원이 실패하면 그 원인은 restoreError에 따로 남는다(복원이 없거나 성공하면 null). networkAttachment는 복원 전후 관리 컨테이너의 네트워크 확인 결과다(composeNetwork.detachedContainer). receipt.json(schemaVersion PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RECEIPT_V3)과 failure-receipt.json은 composeNetwork(네트워크 보장 결과)와 baselineAttachment(기준선 전 재연결 확인)도 남긴다. failure-receipt.json의 restore는 RESTORED·FAILED·SKIPPED_SCOPE_CHANGED·NO_MANAGED_PREVIOUS·SAME_COMMIT·NOT_STARTED(current 전환 전 실패: 네트워크·상태·불변 release·잠금)·LOCK_LOST·LINK_RESTORED(중단) 중 하나다. promtool·reference 검증 실패는 호스트를 바꾸지 않아 receipt를 남기지 않는다. restore 하나는 prometheus 복원과 호스트 전체 범위 검사를 함께 판정한다. restore FAILED에서 restoreError.code가 E_OBS_DEPLOY_SCOPE·E_OBS_DEPLOY_VOLUME이면 복원 compose와 라이브 대조는 끝났고 관리 unit 밖의 호스트가 복원 중에 바뀐 것이다. SKIPPED_SCOPE_CHANGED는 복원 전에 이미 범위가 깨져 있어 current만 직전 release로 되돌리고 컨테이너는 맞추지 않은 것이다(restoreError에 깨진 범위)"
     },
     {
       "title": "보조 명령",
@@ -92,7 +113,8 @@
           "title": "컨테이너가 재생성되지 않았으면 재시작해 새 current를 다시 읽게 한다",
           "run": "sudo docker restart easysubway-prometheus $(test -d /opt/easysubway/observability/current/blackbox && echo easysubway-origin-certificate-probe)"
         }
-      ]
+      ],
+      "restoreProbeBindSource": "infra/blackbox가 없는 release로 자동 복원하면 복원은 prometheus만 맞추고 origin-certificate-probe 컨테이너는 그대로 둔다. 그 컨테이너의 설정 bind mount 원천은 current/blackbox/origin-certificate.yml인데 current가 blackbox 없는 release를 가리키므로, 그 컨테이너가 재시작되면 원천 파일이 없어 시작하지 못할 수 있다(미검증). 그 release에는 origin_certificate_probe job도 없어 감시 공백은 같다. 감시를 되살리려면 #270 이후 커밋으로 다시 DEPLOY한다."
     },
     "firstRolloutRollback": {
       "when": "첫 DEPLOY가 E_OBS_DEPLOY_VERIFY·E_OBS_DEPLOY_RESTORE로 실패했거나, 첫 배포 뒤 v3.5.4와 구 hub 체크아웃 설정으로 돌아가야 할 때. 도구는 관리 대상 직전 release가 없어 이 경우 자동 복원하지 않는다",
@@ -119,9 +141,9 @@
     }
   },
   "interruptedDeploy": {
-    "what": "workflow 취소·타임아웃으로 DEPLOY가 적용 도중 끊긴 경우. 도구는 SIGTERM·SIGINT를 받으면 current를 마지막으로 검증된 직전 release로 되돌리고(있을 때) failure-receipt.json에 outcome INTERRUPTED를 남긴다. 컨테이너 상태는 알 수 없다",
+    "what": "workflow 취소·타임아웃으로 DEPLOY가 끊긴 경우. current 전환 전(검증·reference·네트워크 보장·기준선·release 설치)에 끊기면 진행 중인 자식을 멈추고 reference 컨테이너와 staging을 치운 뒤 release를 설치하지 않고 failure-receipt.json에 outcome FAILED, restore NOT_STARTED, error E_OBS_DEPLOY_INTERRUPTED를 한 번 남기고 signal 종료 코드로 끝난다. current 전환 뒤에 끊긴 경우는 다음과 같다. 도구는 SIGTERM·SIGINT를 받으면 진행 중인 docker·git 자식의 프로세스 그룹에 SIGTERM을 보내고(5초 안에 끝나지 않으면 SIGKILL, 그 뒤 250ms 출력 배수) 끝나기를 기다린다. 그 뒤 새 적용·복원 명령을 시작하지 않은 채 current를 마지막으로 검증된 직전 release로 되돌리고(있을 때), 중단과 무관하게 명령마다 1.5초 제한을 둔 연결 확인으로 떨어진 관리 컨테이너를 다시 붙인 뒤 failure-receipt.json에 outcome INTERRUPTED를 한 번 남긴다. 적용 도중 중단이면 error가 E_OBS_DEPLOY_INTERRUPTED이고, 복원 도중 중단이면 error는 정방향 실패, restoreError가 E_OBS_DEPLOY_INTERRUPTED다. 종료 코드는 SIGTERM 143, SIGINT 130이다. 컨테이너 상태는 알 수 없다",
     "steps": [
-      "failure-receipt.json의 restore 값(LINK_RESTORED·NO_MANAGED_PREVIOUS·SAME_COMMIT)을 읽는다",
+      "failure-receipt.json의 restore 값(LINK_RESTORED·NO_MANAGED_PREVIOUS·SAME_COMMIT·LOCK_LOST)과 networkAttachment.reattach를 읽는다",
       "같은 커밋으로 DEPLOY를 다시 실행한다. 재시작 여부를 current symlink가 아니라 컨테이너가 실제로 마운트한 파일 내용으로 판단하므로 어느 상태에서 끊겼든 수렴한다"
     ]
   }
