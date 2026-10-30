@@ -101,6 +101,9 @@ jobs:
           node --test tools/platform/deploy-source-reachability-probe.test.mjs
           node --test tools/platform/deploy-observability-config.test.mjs
           node --test tools/platform/deploy-observability-config-series.test.mjs
+          node --test tools/platform/deploy-observability-config-recovery.test.mjs
+          node --test tools/platform/observability-network.test.mjs
+          node --test tools/platform/shared-deploy-lock.test.mjs
           node --test tools/platform/prune-k3s-candidate-configs.test.mjs
           node --test tools/ci/observability-config-deploy-workflow.test.mjs
           node --test tools/ci/origin-certificate-renew-workflow.test.mjs

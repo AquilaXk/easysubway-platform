@@ -12,30 +12,36 @@
 // current를 바꾸고 컨테이너를 재시작하면 새 파일을 읽는다. 컨테이너가 이미 떠 있는 동안에는 symlink 전환이 반영되지 않으므로
 // compose 수준 변경(이미지·flag)은 `compose up`이 반영하고, 설정 파일만 바뀐 경우는 컨테이너가 실제로 마운트한 파일 내용(sha256sum)이
 // release와 다를 때 `docker restart`가 반영한다. 재시작 판단이 symlink 이력이 아니라 컨테이너 내용이라 중단 후 재시도도 수렴한다.
-// 호스트에서 한 번에 한 DEPLOY만 돈다는 전제(workflow concurrency group)에 기댄다. 수동 절차는 contracts/release/platform-observability-config-deploy-runbook.json.
+// DEPLOY는 backend 배포(tools/deploy/deploy-backend.sh)와 같은 `<deployRoot>/deploy.lock`을 잡고, 다른 쪽이 쥐고 있으면 아무것도 바꾸지 않고 바로 실패한다(platform#273).
+// 수동 절차는 contracts/release/platform-observability-config-deploy-runbook.json.
 //
-// 순서: 입력 검증 → release 스테이징 → promtool check config·test rules(실패하면 여기서 종료, 아무것도 바꾸지 않음) →
-// 같은 이미지의 격리 reference Prometheus로 기대 상태 수집 → release 설치 → current 전환 → release가 담은 MANAGED_UNITS 서비스만 compose up
+// 순서: 입력 검증 → 잠금 → release 스테이징 → promtool check config·test rules(실패하면 여기서 종료, 아무것도 바꾸지 않음) →
+// 같은 이미지의 격리 reference Prometheus로 기대 상태 수집 → compose 기본 네트워크 확인(없으면 생성) → release 설치 → current 전환 → release가 담은 MANAGED_UNITS 서비스만 compose up
 // → 마운트 내용 확인·필요하면 재시작 → 라이브 상태(설정·규칙·target·probe 시계열·네트워크·다른 컨테이너·volume)를 기대와 대조 → receipt.
 // probe 시계열은 컨테이너 수렴이 끝난 시각보다 새 표본이어야 한다(수렴 전 마지막 scrape가 lookback 안에 남아 있는 동안은 통과시키지 않는다).
-// 적용 뒤 대조가 실패하면 직전 release로 되돌리고 같은 기준으로 다시 대조한 뒤 실패로 끝난다(실패 receipt를 남김). 복원은 설정·규칙·target·마운트와
+// 적용 뒤 대조가 실패하면 직전 release로 되돌리고 같은 기준(범위·volume·네트워크 배선 포함)으로 다시 대조한 뒤, 기본 네트워크에서 떨어진 관리 컨테이너를
+// 다시 붙이고 실패로 끝난다(실패 receipt가 정방향 원인과 복원 결과를 따로 남김). 복원은 설정·규칙·target·마운트와
 // 복원한 probe가 수렴 뒤 scrape되었다는 증거(probe_success의 새 표본, 값은 무관)를 대조한다. 호스트 443 도달에 달린 값은 externalSeries로 기록만 하고
 // 복원 성공 여부를 가르지 않는다. 서버에 닿지 않으면 blackbox는 probe_success 0만 내고 만료 시계열을 내지 않는다.
 // 컨테이너를 맞추는 서비스는 MANAGED_UNITS(prometheus와 원 서버 인증서 만료 probe, platform#270)뿐이다. origin-certificate-probe의 내용은
 // 이 도구만 맞춘다. backend 배포(tools/deploy/deploy-backend.sh)는 그 컨테이너가 없을 때 만들기만 한다.
 // Alertmanager·Grafana·Loki·Alloy는 release에 담기지만 이 도구는 컨테이너를 건드리지 않는다(이슈 #227 범위 밖).
-import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { codepointCompare } from "../lib/codepoint-compare.mjs";
+import { interruptibleRunner, runCommand } from "./lib/process.mjs";
+import { DeployError, fail, message, sha256 } from "./observability-deploy-primitives.mjs";
+import { compareSnapshots, promData, readSnapshot, REMOVED_JOBS } from "./observability-prometheus.mjs";
+import { attachmentVerdict, ensureComposeNetwork, reattachDetached } from "./observability-network.mjs";
+import { acquireSharedDeployLock } from "./shared-deploy-lock.mjs";
 import { externalVerdict, isoOfEpoch, liveSeriesOf, newestSample, seriesReceipt, staleSeriesOf, unhealthySeriesOf } from "./observability-series.mjs";
 
 const MODES = Object.freeze(["PREVIEW", "DEPLOY"]);
 const RECEIPT_SCHEMA_VERSION = "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_RECEIPT_V2";
+const FAILURE_RECEIPT_SCHEMA_VERSION = "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V3";
 const COMPOSE_PROJECT = "easysubway";
 const COMPOSE_PROFILE = "observability";
 const RUNBOOK_PATH = "contracts/release/platform-observability-config-deploy-runbook.json";
@@ -82,8 +88,6 @@ const CONFIG_DIRS = Object.freeze([...MATERIALIZED_ONLY_DIRS, ...MANAGED_UNITS.f
 const OPTIONAL_DIRS = Object.freeze(MANAGED_UNITS.filter((unit) => unit.optional).flatMap((unit) => unit.configDirs));
 // CI는 `promtool test rules infra/prometheus/*.test.yml`로 한 단계만 본다. 배포 게이트도 같은 집합이어야 한다.
 const RULE_TEST_PATTERN = /^prometheus\/[^/]+\.test\.yml$/u;
-// 이슈 #220이 레포에서 제거한 대상. 라이브에 남아 있으면 상시 경보를 내므로 reference 대조와 별개로 이름을 명시해 막는다.
-const REMOVED_JOBS = Object.freeze(["back_worker"]);
 // compose 해석용 값이다. compose는 프로젝트 전체를 해석하므로 backend 서비스의 필수 변수가 필요하지만(CI의 compose config 검증과 같은 방식),
 // 이 도구는 prometheus 서비스 이름만 지정하고 --no-deps로 실행해 backend 컨테이너를 만들거나 바꾸지 않는다.
 const COMPOSE_PARSE_ENV = Object.freeze({
@@ -92,7 +96,7 @@ const COMPOSE_PARSE_ENV = Object.freeze({
 });
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/+-]+$/u;
-const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const HOST_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
 const SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143, SIGINT: 130 });
 const WAIT_ATTEMPTS = 60;
 // 라이브 검증은 3초 간격으로 다시 읽고, 설정의 가장 긴 scrape·평가 주기(origin_certificate_probe의 scrape_interval 1m)의 두 배를 기다린다.
@@ -101,55 +105,21 @@ const VERIFY_INTERVAL_MS = 3000;
 const VERIFY_MIN_ATTEMPTS = 20;
 const DURATION_UNIT_MS = Object.freeze({ ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000, y: 31_536_000_000 });
 
-class DeployError extends Error {
-  constructor(code, detail = "") {
-    super(detail ? `${code}: ${detail}` : code);
-    this.code = code;
-    this.detail = detail;
-  }
-}
-
-const fail = (code, detail) => { throw new DeployError(code, detail); };
-const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const defaultSleep = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
-const message = (error) => String(error?.detail ?? error?.message ?? error).slice(0, 600);
 
 // 자식에는 PATH와 HOME(docker CLI 설정)만 넘긴다. 이 프로세스 환경의 secret은 상속되지 않는다.
-export function runCommand(command, args, { env = {}, timeoutMs = 120_000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: { PATH: SAFE_PATH, ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...env }, stdio: ["ignore", "pipe", "pipe"] });
-    const stdout = [];
-    const stderr = [];
-    let size = 0;
-    let settled = false;
-    const finish = (callback) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      callback();
-    };
-    const collect = (target) => (chunk) => {
-      size += chunk.length;
-      if (size > 8 * 1024 * 1024) {
-        child.kill("SIGTERM");
-        finish(() => reject(new Error("host command output exceeded the limit")));
-        return;
-      }
-      target.push(chunk);
-    };
-    child.stdout.on("data", collect(stdout));
-    child.stderr.on("data", collect(stderr));
-    child.once("error", (error) => finish(() => reject(error)));
-    child.once("close", (code) => finish(() => {
-      const errorText = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) resolve({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: errorText });
-      else reject(new Error(`host command failed (${code}): ${errorText.slice(0, 1000)}`));
-    }));
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish(() => reject(new Error("host command timed out")));
-    }, timeoutMs);
-  });
+const hostCommand = (command, args, options = {}) => runCommand(command, args, {
+  ...options, env: { ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...options.env }, maxOutputBytes: HOST_OUTPUT_LIMIT_BYTES,
+});
+
+const lockPathOf = (deployRoot) => join(deployRoot, "deploy.lock");
+
+async function holdDeployLock(acquireDeployLock, deployRoot) {
+  try {
+    return await acquireDeployLock(lockPathOf(deployRoot));
+  } catch (error) {
+    return fail("E_OBS_DEPLOY_LOCKED", `${lockPathOf(deployRoot)} is held by another deploy (backend deploy or another observability DEPLOY); nothing was changed, rerun after it finishes: ${message(error)}`);
+  }
 }
 
 /* ------------------------------------------------------------------ 파일·digest */
@@ -238,8 +208,8 @@ function processIsAlive(pid) {
 
 /**
  * 강제 종료된 이전 실행이 남긴 `.staging-<sha12>-<pid>` 디렉터리와 `.current|previous.tmp-<pid>` symlink를 지운다.
- * pid가 살아 있으면 다른 실행이 쓰는 중으로 보고 건드리지 않는다. 같은 호스트에서 한 번에 한 DEPLOY만 돈다는 전제(workflow concurrency group
- * observability-config-production, cancel-in-progress false)에 기대며, pid 재사용으로 못 지우는 경우는 남겨 두는 쪽(무해)으로 실패한다.
+ * pid가 살아 있으면 다른 실행이 쓰는 중으로 보고 건드리지 않는다. 호출 시점에 이 실행이 deploy.lock을 쥐고 있어 다른 DEPLOY는 돌지 않으며,
+ * pid 재사용으로 못 지우는 경우는 남겨 두는 쪽(무해)으로 실패한다.
  */
 function reapStaleArtifacts(root, isProcessAlive) {
   const candidates = [
@@ -294,8 +264,10 @@ function createDocker(commandRunner) {
     json,
     composeConfig: async (projectDirectory, envFile, services) => {
       const { stdout } = await docker([...composeArgs(projectDirectory, envFile), "config", "--format", "json", ...services], { env: COMPOSE_PARSE_ENV });
-      const defined = JSON.parse(stdout)?.services ?? {};
+      const parsed = JSON.parse(stdout);
+      const defined = parsed?.services ?? {};
       const service = defined[PROMETHEUS.service];
+      assertNetworkNotOwned(parsed?.networks?.default);
       if (typeof service?.image !== "string" || !Array.isArray(service?.command)) fail("E_OBS_DEPLOY_SOURCE", "compose does not define the prometheus service image and command");
       for (const name of services) if (!(name in defined)) fail("E_OBS_DEPLOY_SOURCE", `compose does not define the ${name} service`);
       return { image: service.image, command: service.command };
@@ -307,62 +279,16 @@ function createDocker(commandRunner) {
   };
 }
 
-const promUrl = (path) => `http://127.0.0.1:9090${path}`;
-
-async function promGet(docker, target, path) {
-  const { stdout } = await docker.docker(["exec", target, "wget", "-qO-", promUrl(path)]);
-  return stdout;
+/**
+ * platform#250~#273 사이 main 커밋의 compose는 운영 네트워크를 external 없이 ipam으로 선언한다. compose는 그 정의를 운영 네트워크의 config-hash와
+ * 달리 보고 연결된 컨테이너를 떼어 내며 네트워크를 다시 만들려 한다(2026-10-30 사고). 그런 release는 적용·복원 어느 쪽으로도 compose에 넘기지 않는다.
+ * 네트워크 블록이 없는 옛 compose는 그 네트워크를 만든 정의와 같아 다시 만들지 않는다.
+ */
+function assertNetworkNotOwned(network) {
+  if (network && network.external !== true && (network.ipam?.config ?? []).length > 0) {
+    fail("E_OBS_DEPLOY_SOURCE", `compose declares the default network ${network.name} with ipam but not external; compose would recreate the live network (platform#273)`);
+  }
 }
-
-const rulesProjection = (groups) => groups.map((group) => ({
-  name: group.name,
-  file: group.file,
-  interval: group.interval ?? null,
-  rules: (group.rules ?? []).map((rule) => ({
-    name: rule.name, type: rule.type, query: rule.query, duration: rule.duration ?? null, keepFiringFor: rule.keepFiringFor ?? null, labels: rule.labels ?? {}, annotations: rule.annotations ?? {},
-  })),
-}));
-
-const JOB_PREFIX = "- job_name: ";
-const jobsOf = (yaml) => yaml.split("\n")
-  .filter((line) => line.startsWith(JOB_PREFIX))
-  .map((line) => line.slice(JOB_PREFIX.length).trim().replace(/^["']|["']$/gu, ""))
-  .toSorted(codepointCompare);
-
-async function promData(docker, target, path) {
-  const parsed = JSON.parse(await promGet(docker, target, path));
-  if (parsed.status !== "success") throw new Error(`prometheus ${path} did not succeed`);
-  return parsed.data;
-}
-
-async function readSnapshot(docker, target) {
-  const data = (path) => promData(docker, target, path);
-  const ready = await promGet(docker, target, "/-/ready");
-  if (!ready.includes("Ready")) throw new Error("prometheus is not ready");
-  const [build, flags, config, rules] = [
-    await data("/api/v1/status/buildinfo"), await data("/api/v1/status/flags"), await data("/api/v1/status/config"), await data("/api/v1/rules"),
-  ];
-  const targets = (await data("/api/v1/targets?state=active")).activeTargets.map((target) => ({ job: target.scrapePool, health: target.health })).sort((a, b) => codepointCompare(a.job, b.job) || codepointCompare(a.health, b.health));
-  const allRules = rules.groups.flatMap((group) => (group.rules ?? []).map((rule) => ({ name: rule.name, health: rule.health })));
-  // Prometheus가 자기 자신을 scrape하지 않으므로(prometheus.yml에 self job 없음) PromQL이 아니라 /metrics 본문에서 읽는다.
-  const metrics = await promGet(docker, target, "/metrics");
-  const projected = rulesProjection(rules.groups);
-  return {
-    version: build.version,
-    flags,
-    yaml: config.yaml,
-    statusConfigSha256: sha256(config.yaml),
-    rulesSha256: sha256(JSON.stringify(projected)),
-    jobs: jobsOf(config.yaml),
-    targets,
-    ruleHealth: { total: allRules.length, ok: allRules.filter((rule) => rule.health === "ok").length },
-    unhealthyRules: allRules.filter((rule) => rule.health !== "ok").map((rule) => `${rule.name}=${rule.health}`),
-    reloadSuccessful: metricToken(metrics, "prometheus_config_last_reload_successful"),
-    lowestTimestamp: metricToken(metrics, "prometheus_tsdb_lowest_timestamp"),
-  };
-}
-
-const metricToken = (text, name) => text.split("\n").find((line) => line.startsWith(`${name} `))?.slice(name.length + 1).trim() ?? null;
 
 /** step()이 {done: true}를 돌려줄 때까지 attempts번 반복한다. 마지막 결과를 그대로 돌려준다. */
 async function poll(sleep, attempts, interval, step) {
@@ -577,32 +503,6 @@ async function recordExternalSeries({ docker, series, notBefore }) {
   }
 }
 
-function compareSnapshots(expected, live, flagKeys) {
-  const problems = [];
-  if (live.version !== expected.version) problems.push(`version ${live.version} != ${expected.version}`);
-  for (const key of flagKeys) if (live.flags[key] !== expected.flags[key]) problems.push(`flag ${key}: ${JSON.stringify(live.flags[key])} != ${JSON.stringify(expected.flags[key])}`);
-  if (live.statusConfigSha256 !== expected.statusConfigSha256) problems.push("/api/v1/status/config differs from the deployed commit");
-  if (live.rulesSha256 !== expected.rulesSha256) problems.push("/api/v1/rules differs from the deployed commit");
-  if (JSON.stringify(live.jobs) !== JSON.stringify(expected.jobs)) problems.push(`jobs [${live.jobs.join(",")}] != [${expected.jobs.join(",")}]`);
-  for (const job of REMOVED_JOBS) if (live.jobs.includes(job)) problems.push(`removed job ${job} is still configured`);
-  problems.push(...runtimeProblems(expected, live));
-  return problems;
-}
-
-// reference는 네트워크가 없어 scrape할 수 없으므로 target·규칙 health는 라이브만 본다. 첫 scrape·첫 평가는 검증 반복이 기다린다.
-function runtimeProblems(expected, live) {
-  const problems = expected.jobs.map((job) => targetProblem(job, live.targets.filter((target) => target.job === job))).filter(Boolean);
-  if (live.unhealthyRules.length > 0) problems.push(`rule health is not ok: ${live.unhealthyRules.join(",")}`);
-  if (live.reloadSuccessful !== "1") problems.push("prometheus_config_last_reload_successful is not 1");
-  return problems;
-}
-
-function targetProblem(job, own) {
-  if (own.length === 0) return `job ${job} has no active target`;
-  if (own.some((target) => target.health !== "up")) return `job ${job} target is not up (${own.map((target) => target.health).join(",")})`;
-  return null;
-}
-
 /* ------------------------------------------------------------------ 입력 */
 
 function readOptions(options) {
@@ -624,55 +524,50 @@ function readOptions(options) {
 
 export async function deployObservabilityConfig(options = {}) {
   const { mode, commit, sourceRoot, deployRoot, composeEnvFile, runUrl, runId } = readOptions(options);
-  const { commandRunner = runCommand, sleep = defaultSleep, now = () => new Date(), stagingRoot, isProcessAlive = processIsAlive, signalSource = process, exit = (code) => process.exit(code) } = options;
+  const {
+    commandRunner = hostCommand, sleep = defaultSleep, now = () => new Date(), stagingRoot, isProcessAlive = processIsAlive, signalSource = process, exit = (code) => process.exit(code),
+    acquireDeployLock = (lockPath) => acquireSharedDeployLock({ lockPath }),
+  } = options;
   if (typeof commandRunner !== "function") fail("E_OBS_DEPLOY_USAGE", "commandRunner must be a function");
-  const docker = createDocker(commandRunner);
+  const children = interruptibleRunner(commandRunner);
+  const docker = createDocker(children.run);
 
-  const head = (await commandRunner("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {})).stdout.trim();
+  const head = (await children.run("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {})).stdout.trim();
   if (head !== commit) fail("E_OBS_DEPLOY_SOURCE", `source checkout is at ${head}, expected ${commit}`);
 
-  const deploying = mode === "DEPLOY";
-  const root = deploying ? join(deployRoot, "observability") : null;
-  if (deploying) {
-    mkdirSync(join(root, "releases"), { recursive: true, mode: 0o755 });
-    reapStaleArtifacts(root, isProcessAlive);
-  }
-  const ownedStagingBase = !deploying && stagingRoot === undefined ? mkdtempSync(join(tmpdir(), "obs-deploy-")) : null;
-  const stagingBase = deploying ? join(root, "releases") : (stagingRoot ?? ownedStagingBase);
-  mkdirSync(stagingBase, { recursive: true });
-  const stagingDir = join(stagingBase, `.staging-${commit.slice(0, 12)}-${process.pid}`);
-
-  let preview;
+  if (mode === "PREVIEW") return previewRelease({ docker, commit, sourceRoot, stagingRoot, composeEnvFile, sleep });
+  const lock = await holdDeployLock(acquireDeployLock, deployRoot);
   try {
-    preview = await preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep });
-  } catch (error) {
-    rmSync(ownedStagingBase ?? stagingDir, { recursive: true, force: true });
-    throw error;
+    return await deployRelease({ docker, children, sleep, now, commit, sourceRoot, deployRoot, composeEnvFile, runUrl, runId, isProcessAlive, signalSource, exit });
+  } finally {
+    await lock.close();
   }
-  const result = {
-    mode,
-    commit,
-    image: preview.image,
-    appliedServices: preview.tree.units.map((unit) => unit.service),
-    materializedOnly: [...MATERIALIZED_ONLY_DIRS],
-    validation: preview.validation,
-    files: preview.tree.files,
-    directoryDigests: preview.tree.directoryDigests,
-    configDigest: preview.tree.configDigest,
-  };
-  if (!deploying) {
-    rmSync(ownedStagingBase ?? stagingDir, { recursive: true, force: true });
+}
+
+const stagingDirOf = (base, commit) => join(base, `.staging-${commit.slice(0, 12)}-${process.pid}`);
+
+const releaseSummary = (preview) => ({
+  image: preview.image,
+  appliedServices: preview.tree.units.map((unit) => unit.service),
+  materializedOnly: [...MATERIALIZED_ONLY_DIRS],
+  validation: preview.validation,
+  files: preview.tree.files,
+  directoryDigests: preview.tree.directoryDigests,
+  configDigest: preview.tree.configDigest,
+});
+
+async function previewRelease({ docker, commit, sourceRoot, stagingRoot, composeEnvFile, sleep }) {
+  const ownedStagingBase = stagingRoot === undefined ? mkdtempSync(join(tmpdir(), "obs-deploy-")) : null;
+  const stagingBase = stagingRoot ?? ownedStagingBase;
+  mkdirSync(stagingBase, { recursive: true });
+  const stagingDir = stagingDirOf(stagingBase, commit);
+  try {
+    const preview = await preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep });
     return {
       schemaVersion: "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_PREVIEW_V1",
-      mode,
-      commit: result.commit,
-      image: result.image,
-      appliedServices: result.appliedServices,
-      materializedOnly: result.materializedOnly,
-      validation: result.validation,
-      files: result.files,
-      directoryDigests: result.directoryDigests,
-      configDigest: result.configDigest,
+      mode: "PREVIEW",
+      commit,
+      ...releaseSummary(preview),
       expected: {
         version: preview.expected.version,
         flags: Object.fromEntries(preview.flagKeys.map((key) => [key, preview.expected.flags[key]])),
@@ -682,8 +577,24 @@ export async function deployObservabilityConfig(options = {}) {
       },
       hostMutationCount: 0,
     };
+  } finally {
+    rmSync(ownedStagingBase ?? stagingDir, { recursive: true, force: true });
   }
-  return applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result, signalSource, exit });
+}
+
+async function deployRelease({ commit, sourceRoot, deployRoot, composeEnvFile, isProcessAlive, ...context }) {
+  const root = join(deployRoot, "observability");
+  mkdirSync(join(root, "releases"), { recursive: true, mode: 0o755 });
+  reapStaleArtifacts(root, isProcessAlive);
+  const stagingDir = stagingDirOf(join(root, "releases"), commit);
+  let preview;
+  try {
+    preview = await preflight({ docker: context.docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep: context.sleep });
+  } catch (error) {
+    rmSync(stagingDir, { recursive: true, force: true });
+    throw error;
+  }
+  return applyRelease({ ...context, root, deployRoot, composeEnvFile, commit, stagingDir, preview, result: { mode: "DEPLOY", commit, ...releaseSummary(preview) } });
 }
 
 async function preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFile, sleep }) {
@@ -699,8 +610,9 @@ async function preflight({ docker, commit, sourceRoot, stagingDir, composeEnvFil
 }
 
 /**
- * 적용 도중 SIGTERM·SIGINT(workflow 취소·타임아웃)를 받으면, current를 마지막으로 검증된 직전 release로 되돌리고(가능할 때)
- * 중단 receipt를 동기적으로 남긴 뒤 종료한다. 컨테이너 상태는 알 수 없으므로 같은 DEPLOY를 다시 실행해 수렴시키라고 알린다.
+ * 적용 도중 SIGTERM·SIGINT(workflow 취소·타임아웃)를 받으면, 진행 중인 docker·git 자식을 멈추고 끝날 때까지 기다린 뒤 current를 마지막으로 검증된
+ * 직전 release로 되돌리고(가능할 때) 중단 receipt를 남기고 종료한다. 컨테이너 상태는 알 수 없으므로 같은 DEPLOY를 다시 실행해 수렴시키라고 알린다.
+ * state.done은 그 처리가 끝나는 promise라, 시그널로 끊긴 적용 경로는 이를 기다린 뒤에 실패를 전한다.
  */
 function interruptRestoreLabel(canRestore, previousCommit) {
   if (canRestore) return "LINK_RESTORED";
@@ -708,26 +620,34 @@ function interruptRestoreLabel(canRestore, previousCommit) {
 }
 
 function installInterruptGuard({ signalSource, exit, onInterrupt }) {
-  const state = { handled: false };
+  const state = { handled: false, done: null };
   const listeners = Object.keys(SIGNAL_EXIT_CODES).map((signal) => [signal, () => {
     if (state.handled) return;
     state.handled = true;
-    try {
-      onInterrupt(signal);
-    } finally {
-      exit(SIGNAL_EXIT_CODES[signal]);
-    }
+    state.done = Promise.resolve()
+      .then(() => onInterrupt(signal))
+      .catch((error) => { process.stderr.write(`E_OBS_DEPLOY_INTERRUPTED: interrupt handling failed: ${message(error)}\n`); })
+      .finally(() => exit(SIGNAL_EXIT_CODES[signal]));
   }]);
   for (const [signal, listener] of listeners) signalSource.on(signal, listener);
   return { state, dispose: () => { for (const [signal, listener] of listeners) signalSource.removeListener(signal, listener); } };
 }
 
-async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result, signalSource, exit }) {
+async function ensureNetwork(docker) {
+  try {
+    return await ensureComposeNetwork(docker, COMPOSE_PROJECT);
+  } catch (error) {
+    return fail("E_OBS_DEPLOY_NETWORK", `compose default network is not usable: ${message(error)}`);
+  }
+}
+
+async function applyRelease({ docker, children, sleep, now, root, deployRoot, composeEnvFile, runUrl, runId, commit, stagingDir, preview, result, signalSource, exit }) {
   const releaseDir = join(root, "releases", commit);
   let installedNow = false;
   let switched = false;
   let guard = null;
   try {
+    await ensureNetwork(docker);
     const previousCommit = readManagedLink(root, "current");
     const before = await readHostState(docker);
     const { units } = preview.tree;
@@ -749,17 +669,19 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       installedNow = true;
     }
 
+    const receiptBase = { deployRoot, runId, runUrl, commit, previousCommit, now, configDigest: result.configDigest };
     guard = installInterruptGuard({
       signalSource,
       exit,
-      onInterrupt: (signal) => {
+      onInterrupt: async (signal) => {
+        await children.stop();
         const canRestore = previousCommit !== null && previousCommit !== commit;
         if (canRestore) atomicSymlink(root, "current", join("releases", previousCommit));
         writeFailureReceipt({
-          deployRoot, runId, runUrl, commit, previousCommit, now, outcome: "INTERRUPTED", configDigest: result.configDigest,
-          error: new DeployError("E_OBS_DEPLOY_INTERRUPTED", `${signal} received while applying; container state is unknown; rerun the same DEPLOY to converge (runbook: ${RUNBOOK_PATH})`),
+          ...receiptBase,
+          outcome: "INTERRUPTED",
+          error: { code: "E_OBS_DEPLOY_INTERRUPTED", detail: `${signal} received while applying; in-flight host commands were stopped; container state is unknown; rerun the same DEPLOY to converge (runbook: ${RUNBOOK_PATH})` },
           restore: interruptRestoreLabel(canRestore, previousCommit),
-          externalSeries: null,
         });
       },
     });
@@ -779,10 +701,13 @@ async function applyRelease({ docker, sleep, now, root, deployRoot, composeEnvFi
       assertScopeAndVolume(before, verified.hostAfter, units);
       assertRuntimeWiring(before, verified.hostAfter);
     } catch (error) {
-      if (guard.state.handled) throw error;
-      const outcome = await restorePrevious({ docker, sleep, now, root, composeEnvFile, previousCommit, commit, error });
-      writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, outcome: "FAILED", error: outcome.error, restore: outcome.restore, externalSeries: outcome.externalSeries, configDigest: result.configDigest });
-      throw outcome.error;
+      const recovery = guard.state.handled ? null : await recoverFailedApply({ docker, sleep, now, root, composeEnvFile, previousCommit, commit, before, units, error });
+      if (guard.state.handled) {
+        await guard.state.done;
+        throw error;
+      }
+      writeFailureReceipt({ ...receiptBase, outcome: "FAILED", ...recovery.receipt });
+      throw recovery.error;
     }
 
     const verification = finishVerification({ before, verified, convergedAt, lowestBefore, preview });
@@ -872,15 +797,18 @@ function finishVerification({ before, verified, convergedAt, lowestBefore, previ
   };
 }
 
-async function restorePrevious({ docker, sleep, now, root, composeEnvFile, previousCommit, commit, error }) {
-  const cause = message(error);
-  const code = error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY";
+/** 적용과 복원이 compose로 맞추는 unit 전부. 둘 중 하나라도 맞춘 컨테이너는 범위 검사의 "다른 컨테이너"가 아니다. */
+const unitsOf = (...lists) => MANAGED_UNITS.filter((unit) => lists.some((list) => list.includes(unit)));
+
+/**
+ * 직전 release로 되돌리고 적용과 같은 기준으로 대조한다: reference·라이브 대조, 마운트 내용, 그리고 배포 전 상태 대비 범위·volume·prometheus 네트워크 배선.
+ * 결과는 restore 라벨과, 복원이 실패했으면 그 원인(restoreError)이다. 정방향 실패 원인은 호출자가 따로 남긴다.
+ */
+async function restorePrevious({ docker, sleep, now, root, composeEnvFile, previousCommit, commit, before, appliedUnits }) {
   if (previousCommit === null) {
-    return { error: new DeployError(code, `${cause}; no managed previous release to restore (first rollout): follow firstRolloutRollback in ${RUNBOOK_PATH}`), restore: "NO_MANAGED_PREVIOUS", externalSeries: null };
+    return { restore: "NO_MANAGED_PREVIOUS", restoreError: null, externalSeries: null, note: `no managed previous release to restore (first rollout): follow firstRolloutRollback in ${RUNBOOK_PATH}` };
   }
-  if (previousCommit === commit) {
-    return { error: new DeployError(code, `${cause}; current already was this commit, nothing to restore`), restore: "SAME_COMMIT", externalSeries: null };
-  }
+  if (previousCommit === commit) return { restore: "SAME_COMMIT", restoreError: null, externalSeries: null, note: "current already was this commit, nothing to restore" };
   let externalSeries;
   try {
     atomicSymlink(root, "current", join("releases", previousCommit));
@@ -888,7 +816,6 @@ async function restorePrevious({ docker, sleep, now, root, composeEnvFile, previ
     const previousTree = describeTree(previousDir);
     const { units } = previousTree;
     const { image, command } = await docker.composeConfig(join(root, "current"), composeEnvFile, units.map((unit) => unit.service));
-    // 복원도 처음 배포와 같은 기준으로 확인한다: 직전 release의 reference와 라이브를 대조하고 마운트 내용을 맞춘다.
     const expected = await collectReference({ docker, image, command, stagedPrometheus: join(previousDir, "prometheus"), commit: previousCommit, sleep });
     const idsBefore = containerIds(await readProjectContainers(docker), units);
     await convergeContainers({ docker, sleep, root, composeEnvFile, files: previousTree.files, units, idsBefore });
@@ -898,13 +825,34 @@ async function restorePrevious({ docker, sleep, now, root, composeEnvFile, previ
     const scrapeProof = series.filter((spec) => spec.scrapeProof).map((spec) => ({ ...spec, expectedValue: null }));
     const settled = await pollLive({ docker, sleep, expected, flagKeys: expectedFlagKeys(command), freshness: { series: scrapeProof, notBefore: convergedAt } });
     if (!settled.done) fail("E_OBS_DEPLOY_VERIFY", [...settled.configProblems, ...settled.staleSeries.map((problem) => `the restored probe is not being scraped (${problem})`)].join("; "));
-    await readHostState(docker);
+    const hostAfter = await readHostState(docker);
+    assertScopeAndVolume(before, hostAfter, unitsOf(appliedUnits, units));
+    assertRuntimeWiring(before, hostAfter);
     externalSeries = await recordExternalSeries({ docker, series, notBefore: convergedAt });
   } catch (restoreError) {
-    return { error: new DeployError("E_OBS_DEPLOY_RESTORE", `${cause}; restore verification failed for previous release ${previousCommit}: ${message(restoreError)} (runbook: ${RUNBOOK_PATH})`), restore: "FAILED", externalSeries: null };
+    const code = restoreError instanceof DeployError ? restoreError.code : "E_OBS_DEPLOY_RESTORE";
+    return { restore: "FAILED", restoreError: { code, detail: `restore verification failed for previous release ${previousCommit}: ${message(restoreError)} (runbook: ${RUNBOOK_PATH})` }, externalSeries: null, note: null };
   }
   const unconfirmed = externalSeries?.ok === false ? `; the restored probe series are not confirmed: ${externalSeries.detail}` : "";
-  return { error: new DeployError(code, `${cause}; restored previous release ${previousCommit}${unconfirmed}`), restore: "RESTORED", externalSeries };
+  return { restore: "RESTORED", restoreError: null, externalSeries, note: `restored previous release ${previousCommit}${unconfirmed}` };
+}
+
+/**
+ * 적용이 실패한 뒤: 직전 release로 복원하고, 배포 전에 있던 관리 컨테이너가 기본 네트워크에 붙어 떠 있는지 확인해 떨어졌으면 다시 붙인다.
+ * receipt는 정방향 원인(error)과 복원 원인(restoreError)·네트워크 확인 결과를 따로 남기고, 던질 오류는 그 모두를 이름으로 적는다.
+ */
+async function recoverFailedApply({ before, units, error, ...restoreContext }) {
+  const forward = { code: error instanceof DeployError ? error.code : "E_OBS_DEPLOY_VERIFY", detail: message(error) };
+  const restored = await restorePrevious({ ...restoreContext, before, appliedUnits: units });
+  const networkAttachment = await reattachDetached(restoreContext.docker, MANAGED_UNITS.filter((unit) => unit.container in before.projectContainers));
+  const attachment = attachmentVerdict(networkAttachment);
+  const notes = [restored.note ?? restored.restoreError.detail, ...attachment.notes];
+  const failed = restored.restoreError !== null || attachment.failed;
+  const detail = failed ? `forward failure ${forward.code}: ${forward.detail}; ${notes.join("; ")}` : `${forward.detail}; ${notes.join("; ")}`;
+  return {
+    error: new DeployError(failed ? "E_OBS_DEPLOY_RESTORE" : forward.code, detail),
+    receipt: { error: forward, restore: restored.restore, restoreError: restored.restoreError, networkAttachment, externalSeries: restored.externalSeries },
+  };
 }
 
 function receiptDirectory(deployRoot, commit, runId) {
@@ -913,17 +861,19 @@ function receiptDirectory(deployRoot, commit, runId) {
   return directory;
 }
 
-function writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, outcome, error, restore, externalSeries, configDigest }) {
+function writeFailureReceipt({ deployRoot, runId, runUrl, commit, previousCommit, now, outcome, error, restore, restoreError = null, networkAttachment = null, externalSeries = null, configDigest }) {
   const receipt = {
-    schemaVersion: "PLATFORM_OBSERVABILITY_CONFIG_DEPLOY_FAILURE_RECEIPT_V2",
+    schemaVersion: FAILURE_RECEIPT_SCHEMA_VERSION,
     mode: "DEPLOY",
     outcome,
     commit,
     previousCommit,
     runUrl,
     recordedAt: now().toISOString(),
-    error: { code: error.code ?? "E_OBS_DEPLOY_FAILED", detail: message(error) },
+    error,
     restore,
+    restoreError,
+    networkAttachment,
     externalSeries,
     configDigest,
   };

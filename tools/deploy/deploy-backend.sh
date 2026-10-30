@@ -69,17 +69,23 @@ RESULT_FILE="${SHARED_DIR}/last-result.env"
 # file never gates anything, it only makes the standby's state observable.
 STANDBY_STATE_FILE="${SHARED_DIR}/deployment-standby-state.env"
 LOCK_FILE="${DEPLOY_ROOT}/deploy.lock"
+# The compose default network is external in the platform compose file (platform#273), so compose never creates or recreates it.
+# Name and subnet match contracts/release/platform-k3s-observability-contract.json; tools/platform/observability-network.test.mjs pins them.
+COMPOSE_NETWORK_NAME="easysubway_default"
+COMPOSE_NETWORK_SUBNET="172.18.0.0/16"
 
 COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
 RUNTIME_SERVICES=(backend)
-OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana alloy)
-OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana alloy)
+OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager loki alloy)
+# grafana depends_on prometheus, and an up that converges dependencies would recreate prometheus from this checkout, so it starts with --no-deps.
+OBSERVABILITY_PROMETHEUS_DEPENDENTS=(grafana)
+OBSERVABILITY_CONFIG_SERVICES=(alertmanager loki grafana alloy)
 # tools/platform/deploy-observability-config.mjs owns these services' content from /opt/easysubway/observability/current.
-# Compose from this checkout yields a different config hash, so any recreate here would undo that deploy. Backend deploys
-# only create them when missing, because the prometheus.yml applied here already scrapes origin-certificate-probe:9115.
-OBSERVABILITY_CREATE_ONLY_SERVICES=(origin-certificate-probe)
-OBSERVABILITY_RUNNING_SERVICES=("${OBSERVABILITY_SERVICES[@]}" "${OBSERVABILITY_CREATE_ONLY_SERVICES[@]}")
+# Compose from this checkout yields a different config hash, so any recreate here would undo that deploy (platform#273).
+# Backend deploys only create them when missing, which is how a fresh host gets the Prometheus the observability deploy then takes over.
+OBSERVABILITY_CREATE_ONLY_SERVICES=(prometheus origin-certificate-probe)
+OBSERVABILITY_RUNNING_SERVICES=("${OBSERVABILITY_SERVICES[@]}" "${OBSERVABILITY_PROMETHEUS_DEPENDENTS[@]}" "${OBSERVABILITY_CREATE_ONLY_SERVICES[@]}")
 
 # The image content sha (digest hex) replaces the former jar sha256 as the
 # deployed-artifact identity; it flows into the compose metadata label.
@@ -309,6 +315,21 @@ compose() {
 	docker compose --project-name "${DEPLOY_COMPOSE_PROJECT}" --env-file "${compose_env}" -f infra/docker-compose.yml "$@"
 }
 
+# Creates the default network when it is absent and fails when it exists with another subnet. The compose labels let a checkout
+# whose compose file still owns the default network adopt it instead of rejecting it for an "incorrect label".
+ensure_compose_network() {
+	local names=""
+	local subnets=""
+	names="$(docker network ls --filter "name=^${COMPOSE_NETWORK_NAME}\$" --format '{{.Name}}')" || return 1
+	if [[ "${names}" != "${COMPOSE_NETWORK_NAME}" ]]; then
+		docker network create --driver bridge --subnet "${COMPOSE_NETWORK_SUBNET}" \
+			--label com.docker.compose.network=default --label "com.docker.compose.project=${DEPLOY_COMPOSE_PROJECT}" \
+			"${COMPOSE_NETWORK_NAME}" >/dev/null || return 1
+	fi
+	subnets="$(docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "${COMPOSE_NETWORK_NAME}")" || return 1
+	[[ "${subnets}" == "${COMPOSE_NETWORK_SUBNET} " ]]
+}
+
 compose_services_running() {
 	local backend_env="$1"
 	local compose_env="$2"
@@ -334,10 +355,11 @@ start_observability_services() {
 	local compose_env="$2"
 	local image_tag="$3"
 	shift 3
-	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build "${OBSERVABILITY_SERVICES[@]}" || return 1
 	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --no-recreate "${OBSERVABILITY_CREATE_ONLY_SERVICES[@]}" || return 1
+	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build "${OBSERVABILITY_SERVICES[@]}" || return 1
+	compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --no-deps "${OBSERVABILITY_PROMETHEUS_DEPENDENTS[@]}" || return 1
 	if [[ "$#" -gt 0 ]]; then
-		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --force-recreate "$@" || return 1
+		compose "${backend_env}" "${compose_env}" "${image_tag}" --profile observability up -d --no-build --no-deps --force-recreate "$@" || return 1
 	fi
 }
 
@@ -533,6 +555,11 @@ preflight_legacy_backend_absence() {
 
 preflight_legacy_backend_absence
 
+if ! ensure_compose_network; then
+	write_result "blocked" "compose_network_mismatch"
+	exit 1
+fi
+
 EASYSUBWAY_BACKEND_ENV_FILE="${BACKEND_ENV}" \
 EASYSUBWAY_BACKEND_IMAGE="${backend_image}" \
 EASYSUBWAY_BACKEND_JAR_SHA256="${image_digest_hex}" \
@@ -608,7 +635,7 @@ fi
 # Config files are single-file bind mounts, so a content-only change keeps the old inode until the container is recreated.
 # alertmanager also reads its rendered config from the env set, so an env change recreates it alone.
 recreate_services=()
-if [[ -z "${current_sha}" ]] || ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/prometheus infra/alertmanager/templates infra/loki infra/grafana/provisioning infra/alloy; then
+if [[ -z "${current_sha}" ]] || ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/alertmanager/templates infra/loki infra/grafana/provisioning infra/alloy; then
 	recreate_services=("${OBSERVABILITY_CONFIG_SERVICES[@]}")
 elif [[ "${current_env_hash}" != "${target_env_hash}" ]]; then
 	recreate_services=(alertmanager)

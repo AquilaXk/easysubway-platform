@@ -15,15 +15,13 @@ import {
 import {
   validateJourneyReleaseTupleBytes,
 } from "./bind-journey-release-candidate.mjs";
+import { acquireSharedDeployLock } from "./shared-deploy-lock.mjs";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const COMPOSE_TIMEOUT_MS = 120_000;
 const FORCE_KILL_GRACE_MS = 1000;
-const SHARED_LOCK_ACQUIRE_TIMEOUT_MS = 5000;
 const DEFAULT_DEPLOY_ROOT = "/opt/easysubway";
-const SHARED_LOCK_HOLDER_ARGUMENT = "--hold-shared-deploy-lock";
-const SHARED_LOCK_READY = "EASYSUBWAY_STANDBY_LOCKED\n";
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const GIT_SHA = /^[a-f0-9]{40}$/;
@@ -88,7 +86,7 @@ export async function startJourneyComposeCandidates({
   candidateEnvironmentConsumer,
   inspectDescriptor = inspectServerRouteBundlePublicationDescriptor,
   composeRunner = runCompose,
-  deployLockRunner = acquireSharedDeployLock,
+  deployLockRunner = acquireCandidateDeployLock,
 }) {
   validateInvocation({
     bindingPath,
@@ -323,91 +321,12 @@ async function openSharedDeployLock(runner, lockPath, ambientEnvironment) {
   }
 }
 
-function acquireSharedDeployLock({ lockPath, ambientEnvironment }) {
-  return new Promise((resolveLock, rejectLock) => {
-    const child = spawn(
-      "/usr/bin/flock",
-      [
-        "--nonblock",
-        "--exclusive",
-        lockPath,
-        process.execPath,
-        fileURLToPath(import.meta.url),
-        SHARED_LOCK_HOLDER_ARGUMENT,
-      ],
-      {
-        env: dockerOperationalEnvironment(ambientEnvironment),
-        shell: false,
-        stdio: ["pipe", "pipe", "ignore"],
-      },
-    );
-    const lock = new SharedDeployLock(child);
-    let output = "";
-    let settled = false;
-    const timer = setTimeout(() => fail(), SHARED_LOCK_ACQUIRE_TIMEOUT_MS);
-
-    child.stdout.on("data", (chunk) => {
-      if (settled) return;
-      output += chunk.toString("utf8");
-      if (!SHARED_LOCK_READY.startsWith(output)) {
-        fail();
-        return;
-      }
-      if (output === SHARED_LOCK_READY) {
-        settled = true;
-        clearTimeout(timer);
-        resolveLock(lock);
-      }
-    });
-    child.once("error", fail);
-    child.once("close", () => {
-      if (!settled) fail();
-    });
-
-    function fail() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.stdin.destroy();
-      child.kill("SIGTERM");
-      rejectLock(new Error("shared deploy lock unavailable"));
-    }
+function acquireCandidateDeployLock({ lockPath, ambientEnvironment }) {
+  return acquireSharedDeployLock({
+    lockPath,
+    env: dockerOperationalEnvironment(ambientEnvironment),
+    lostError: () => failure("CANDIDATE_START_LOCKED", 2),
   });
-}
-
-class SharedDeployLock {
-  constructor(child) {
-    this.child = child;
-    this.active = true;
-    this.closed = new Promise((resolveClosed) => {
-      child.once("close", () => {
-        this.active = false;
-        resolveClosed();
-      });
-    });
-  }
-
-  async verify() {
-    if (!this.active || this.child.exitCode !== null || this.child.signalCode !== null) {
-      throw failure("CANDIDATE_START_LOCKED", 2);
-    }
-  }
-
-  async close() {
-    if (!this.active) return;
-    this.child.stdin.end();
-    const closed = await Promise.race([
-      this.closed.then(() => true),
-      new Promise((resolveClosed) => setTimeout(
-        () => resolveClosed(false),
-        FORCE_KILL_GRACE_MS,
-      )),
-    ]);
-    if (!closed && this.active) {
-      this.child.kill("SIGKILL");
-      await this.closed;
-    }
-  }
 }
 
 function validateSecrets(serviceToken, currentPublicKeyPem) {
@@ -996,26 +915,8 @@ async function main() {
   process.stdout.write(formatCandidateRuntime(runtime));
 }
 
-async function holdSharedDeployLock() {
-  process.stdout.write(SHARED_LOCK_READY);
-  process.stdin.resume();
-  await new Promise((resolveEnd) => {
-    let ended = false;
-    const finish = () => {
-      if (ended) return;
-      ended = true;
-      resolveEnd();
-    };
-    process.stdin.once("end", finish);
-    process.stdin.once("close", finish);
-  });
-}
-
 if (isMainModule()) {
-  const lockHolder = process.argv.length === 3 &&
-    process.argv[2] === SHARED_LOCK_HOLDER_ARGUMENT;
-  const entrypoint = lockHolder ? holdSharedDeployLock : main;
-  entrypoint().catch((error) => {
+  main().catch((error) => {
     const typed = error instanceof CandidateStartError
       ? error
       : failure("CANDIDATE_START_COMPOSE");
