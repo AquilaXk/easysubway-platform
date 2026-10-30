@@ -66,6 +66,8 @@ const SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143, SIGINT: 130 });
 // 중단 뒤 떨어진 컨테이너를 다시 붙이는 확인은 중단 signal과 무관하게 돌되, 명령마다 이 제한을 둔다. workflow 취소는 SIGINT 뒤 7.5초에 SIGTERM,
 // 다시 2.5초 뒤 SIGKILL이므로 진행 중 명령 종료(최대 5.75초) 뒤 남은 시간 안에 inspect와 connect가 끝나야 한다.
 const INTERRUPT_COMMAND_LIMITS = Object.freeze({ timeoutMs: 1500, killGraceMs: 250 });
+// reference 컨테이너 삭제는 평소 배포에서도 돈다. 부하가 높아도 docker rm이 끝날 시간을 주되, 중단에는 끊기지 않는다.
+const CLEANUP_COMMAND_LIMITS = Object.freeze({ timeoutMs: 60_000, killGraceMs: 5000 });
 const WAIT_ATTEMPTS = 60;
 // 라이브 검증은 3초 간격으로 다시 읽고, 설정의 가장 긴 scrape·평가 주기(origin_certificate_probe의 scrape_interval 1m)의 두 배를 기다린다.
 // 재시작 직후 첫 scrape가 실패해도 다음 scrape에서 통과할 수 있게 하려는 것이다. 주기가 짧은 설정도 최소 VERIFY_MIN_ATTEMPTS번은 읽는다.
@@ -207,8 +209,20 @@ function expectedFlagKeys(command) {
 const REFERENCE_PREFIX = "easysubway-observability-ref-";
 const REFERENCE_NAME = /^easysubway-observability-ref-[0-9a-f]{12}-(\d+)$/u;
 
-/** 강제 종료된 지난 실행이 남긴 reference 컨테이너를 지운다. 이름 형식이 맞고 이름의 pid가 죽은 것만 지운다(다른 실행이 쓰는 중일 수 있다). */
-async function reapStaleReferences({ docker, cleanup, isProcessAlive }) {
+/**
+ * 강제 종료된 지난 실행이 남긴 reference 컨테이너를 지운다. 이름 형식이 맞고 이름의 pid가 죽은 것만 지운다(다른 실행이 쓰는 중일 수 있다).
+ * 남은 것을 치우는 정리라 실패해도 배포를 막지 않는다. 다음 실행이 다시 치운다.
+ */
+async function reapStaleReferences(context) {
+  try {
+    await reapReferences(context);
+  } catch (error) {
+    // 잠금 상실은 정리 실패가 아니라 배포를 멈출 이유다.
+    if (error?.code === "E_OBS_DEPLOY_LOCK_LOST") throw error;
+  }
+}
+
+async function reapReferences({ docker, cleanup, isProcessAlive }) {
   const { stdout } = await docker.docker(["ps", "-a", "--filter", `name=^${REFERENCE_PREFIX}`, "--format", "{{.Names}}"]);
   const stale = stdout.split("\n").map((line) => line.trim()).filter((name) => {
     const match = REFERENCE_NAME.exec(name);
@@ -456,12 +470,13 @@ export async function deployObservabilityConfig(options = {}) {
   const guard = installInterruptGuard({ signalSource, onSignal: () => children.stop() });
   // docker 호출은 세 종류다. scratch는 잠금을 확인하지 않고 중단에 끊긴다. cleanup은 잠금을 확인하지 않고 중단에 끊기지 않으며 명령마다 짧은 제한을 둔다
   // (자기 reference 컨테이너 삭제). DEPLOY의 docker(잠금 확인, 중단에 끊김)와 recoveryDocker(잠금 확인, cleanup 제한)는 잠근 뒤에 만든다.
-  const boundedRunner = (command, args, callOptions) => commandRunner(command, args, { ...callOptions, ...INTERRUPT_COMMAND_LIMITS });
-  const runners = { children, boundedRunner, scratchDocker: createDocker(children.run), cleanupDocker: createDocker(boundedRunner) };
+  const limitedRunner = (limits) => (command, args, callOptions) => commandRunner(command, args, { ...callOptions, ...limits });
+  const boundedRunner = limitedRunner(INTERRUPT_COMMAND_LIMITS);
+  const runners = { children, boundedRunner, scratchDocker: createDocker(children.run), cleanupDocker: createDocker(limitedRunner(CLEANUP_COMMAND_LIMITS)) };
   try {
     const head = (await children.run("git", ["-C", sourceRoot, "rev-parse", "HEAD"], {})).stdout.trim();
     if (head !== commit) fail("E_OBS_DEPLOY_SOURCE", `source checkout is at ${head}, expected ${commit}`);
-    if (mode === "PREVIEW") return await previewRelease({ ...runners, commit, sourceRoot, stagingRoot, composeEnvFile, sleep, isProcessAlive });
+    if (mode === "PREVIEW") return await previewRelease({ ...runners, commit, sourceRoot, stagingRoot, composeEnvFile, sleep: abortableSleep(sleep, children.signal), isProcessAlive });
     const lock = await holdDeployLock(acquireDeployLock, deployRoot);
     // holder가 사라지면 커널 잠금이 풀려 다른 배포가 시작할 수 있다. 진행 중인 명령을 멈춰 겹치는 시간을 줄인다(다음 명령은 lockedRunner가 막는다).
     lock.closed.then(() => children.stop());

@@ -38,6 +38,24 @@ test("DEPLOY는 어떤 호스트 호출보다 먼저 <deployRoot>/deploy.lock을
   }
 });
 
+test("평소 배포의 reference 삭제는 중단용 1.5초 제한이 아니라 정리용 제한으로 돌고, 남은 reference 정리 실패는 배포를 막지 않는다", async () => {
+  const box = sandbox();
+  try {
+    const host = createHost();
+    const removals = [];
+    const commandRunner = (command, args, options = {}) => {
+      if (args[0] === "ps" && args.some((arg) => arg.startsWith("name=^easysubway-observability-ref-"))) return Promise.reject(new Error("host command timed out"));
+      if (args[0] === "rm") removals.push(options.timeoutMs);
+      return host.runner(command, args, options);
+    };
+    await deploy(box, host, { commandRunner });
+    assert.ok(removals.length > 0);
+    assert.ok(removals.every((timeoutMs) => timeoutMs >= 60_000), `reference rm ran with ${removals.join(",")} ms`);
+  } finally {
+    box.cleanup();
+  }
+});
+
 test("다른 배포가 deploy.lock을 쥐고 있으면 E_OBS_DEPLOY_LOCKED, 잠금을 걸 수 없는 환경이면 E_OBS_DEPLOY_LOCK_UNAVAILABLE로 바로 실패하고 아무것도 바꾸지 않는다", async () => {
   const cases = [
     ["경합", Object.assign(new Error("shared deploy lock is held by another deploy"), { contended: true }), /E_OBS_DEPLOY_LOCKED: .*deploy\.lock is held by another deploy.*nothing was changed/u],
