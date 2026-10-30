@@ -142,6 +142,11 @@ services:
     restart: unless-stopped
     profiles:
       - observability
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    # origin_certificate_probe job이 호스트 nginx의 443을 docker 네트워크 게이트웨이로 직접 TLS 연결한다.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   docker-runtime-probe:
     image: ghcr.io/google/cadvisor:v0.60.6

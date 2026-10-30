@@ -25,7 +25,7 @@ permissions: {}
 env:
   CERT_NAME: easysubway-api.aquilaxk.site
   # nginx가 443에서 같은 인증서로 서비스하는 이름(infra/nginx/host-easysubway.conf.template의 server_name).
-  SERVED_HOSTS: easysubway-api.aquilaxk.site easysubway.aquilaxk.site
+  SERVED_HOSTS: easysubway-api.aquilaxk.site
   # 호스트 nginx가 공개로 여는 actuator 경로는 readiness와 liveness뿐이다.
   PUBLIC_HEALTH_URL: https://easysubway-api.aquilaxk.site/actuator/health/readiness
 

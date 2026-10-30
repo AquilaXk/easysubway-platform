@@ -74,7 +74,7 @@ COMPOSE_ENV="${INCOMING_DIR}/compose.env"
 BACKEND_ENV="${INCOMING_DIR}/backend.env"
 RUNTIME_SERVICES=(backend)
 OBSERVABILITY_SERVICES=(public-edge-probe docker-runtime-probe alertmanager prometheus loki grafana alloy)
-OBSERVABILITY_CONFIG_SERVICES=(alertmanager prometheus loki grafana alloy)
+OBSERVABILITY_CONFIG_SERVICES=(public-edge-probe alertmanager prometheus loki grafana alloy)
 
 # The image content sha (digest hex) replaces the former jar sha256 as the
 # deployed-artifact identity; it flows into the compose metadata label.
@@ -609,7 +609,7 @@ fi
 recreate_observability_config=0
 if [[ -z "${current_sha}" ]]; then
 	recreate_observability_config=1
-elif ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/prometheus infra/alertmanager/templates infra/loki infra/grafana/provisioning infra/alloy; then
+elif ! git diff --quiet "${current_sha}" "${DEPLOY_SHA}" -- infra/blackbox infra/prometheus infra/alertmanager/templates infra/loki infra/grafana/provisioning infra/alloy; then
 	recreate_observability_config=1
 fi
 

@@ -79,6 +79,7 @@ jobs:
           node --test tools/platform/source-free-k3s-deployment.test.mjs
           node --test tools/platform/production-db-backend-image-contract.test.mjs
           node --test tools/platform/prometheus-k3s-backend-target.test.mjs
+          node --test tools/platform/origin-certificate-expiry-probe.test.mjs
           node --test tools/platform/candidate-token-content-digest.test.mjs
           node --test tools/platform/inject-datapack-callback-secrets.test.mjs
           node --test tools/platform/inject-journey-runtime-settings.test.mjs
@@ -115,6 +116,10 @@ jobs:
       - name: Validate Prometheus alert rules
         run: |
           docker run --rm --entrypoint promtool -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo prom/prometheus:v3.14.0 test rules infra/prometheus/alerts.test.yml
+
+      - name: Validate Blackbox exporter configuration
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}/infra/blackbox:/config:ro" prom/blackbox-exporter:v0.28.0 --config.file=/config/blackbox.yml --config.check
 
       - name: Validate Nginx configuration
         run: |
