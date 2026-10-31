@@ -106,5 +106,5 @@ Related #
 - [ ] 실패·호환성·activation·recovery 동작이 명확합니다.
 - [ ] current failure를 previous/alternate/orchestrator 경로의 성공으로 바꾸지 않습니다.
 - [ ] GitHub PR Review 객체가 있는지 확인했습니다. CodeRabbit status check만으로는 리뷰 완료로 보지 않습니다.
-- [ ] `aquila-review` 스킬로 Aquila 마커 Review를 단일 PR review로 게시했습니다.
+- [ ] 현재 head에 대한 `pstack` `interrogate` Review(`<!-- pstack-interrogate head=<40자 sha> act-on=0 -->`)를 단일 PR review로 게시했습니다.
 - [ ] 배포 영향이 있는 경우 CD Preflight 상태를 확인했습니다.
