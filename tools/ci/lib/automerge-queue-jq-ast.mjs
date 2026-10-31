@@ -161,7 +161,7 @@ function resolveAsPatternEnd(match, bracketOpenToClose) {
   return closeBracketIndex === undefined ? -1 : closeBracketIndex + 1;
 }
 
-function validateOuterParens(asIndex, afterPattern, parsed) {
+function validateOuterParens(asIndex, afterPattern, parsed, loopTupleOpens) {
   const { text, groupingOpenToClose, groupingCloseToOpen } = parsed;
   const lhsClose = prevNonSpace(text, asIndex - 1);
   const lhsOpen = groupingCloseToOpen.get(lhsClose);
@@ -170,7 +170,7 @@ function validateOuterParens(asIndex, afterPattern, parsed) {
   }
   const outerOpen = prevNonSpace(text, lhsOpen - 1);
   const outerClose = groupingOpenToClose.get(outerOpen);
-  if (text[outerOpen] !== "(" || outerClose === undefined) {
+  if (text[outerOpen] !== "(" || outerClose === undefined || loopTupleOpens.has(outerOpen)) {
     return `as at offset ${asIndex} must have outer grouping '(' immediately before LHS`;
   }
   const beforeOuter = prevNonSpace(text, outerOpen - 1);
@@ -205,7 +205,8 @@ export function validateJqAsBindings(program) {
 
   let nonReduceCount = 0;
   let loopCount = 0;
-  for (const match of parsed.text.matchAll(/\bas\s+(?:\$([A-Za-z_][A-Za-z0-9_]*)|(\{|\[))/g)) {
+  const loopTupleOpens = new Set();
+  for (const match of parsed.text.matchAll(/\bas\s*(?:\$([A-Za-z_][A-Za-z0-9_]*)|(\{|\[))/g)) {
     const asIndex = match.index;
     const patternEnd = resolveAsPatternEnd(match, parsed.bracketOpenToClose);
     if (patternEnd === -1) {
@@ -215,32 +216,46 @@ export function validateJqAsBindings(program) {
     if (parsed.text[afterPattern] === "(") {
       const loopErr = validateLoopAsBinding(asIndex, parsed);
       if (loopErr) return { ok: false, reason: loopErr };
+      loopTupleOpens.add(afterPattern);
       loopCount += 1;
       continue;
     }
     if (parsed.text[afterPattern] !== "|") {
       return { ok: false, reason: `as at offset ${asIndex} must be followed by '|'` };
     }
-    const parenErr = validateOuterParens(asIndex, afterPattern, parsed);
+    const parenErr = validateOuterParens(asIndex, afterPattern, parsed, loopTupleOpens);
     if (parenErr) return { ok: false, reason: parenErr };
     nonReduceCount += 1;
   }
   return { ok: true, nonReduceCount, loopCount };
 }
 
-function unquoteYamlFlowScalar(scalar) {
-  const trimmed = scalar.trim();
-  if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
-    return trimmed.slice(1, -1).replaceAll("''", "'");
+function parseYamlFlowRunScalar(rawAfterRun, lineNo) {
+  if (rawAfterRun.startsWith("'")) {
+    const match = rawAfterRun.match(/^'((?:''|[^'])*)'(?:[ \t]+#.*)?$/);
+    if (!match) {
+      return { ok: false, reason: `malformed single-quoted YAML flow run: scalar at line ${lineNo}` };
+    }
+    return { ok: true, script: match[1].replaceAll("''", "'") };
   }
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
-    return trimmed.slice(1, -1);
+  if (rawAfterRun.startsWith('"')) {
+    if (rawAfterRun.includes("\\")) {
+      return { ok: false, reason: `escaped double-quoted YAML flow run: scalar is forbidden at line ${lineNo}` };
+    }
+    const match = rawAfterRun.match(/^"([^"]*)"(?:[ \t]+#.*)?$/);
+    if (!match) {
+      return { ok: false, reason: `malformed double-quoted YAML flow run: scalar at line ${lineNo}` };
+    }
+    return { ok: true, script: match[1] };
   }
-  return trimmed;
+  return { ok: true, script: rawAfterRun.replace(/[ \t]+#.*$/, "") };
 }
 
+const RAW_JQ_REF_RE =
+  /(?:^|[^A-Za-z0-9_-])jq(?:$|[^A-Za-z0-9_-])|--jq(?:\s|=|['"]|$)|(?:^|\s)-[A-Za-z]*q(?:\s|=|['"]|$)/;
+
 function extractYamlRunScripts(workflowText) {
-  if (!/^(?:name|on|jobs):/m.test(workflowText)) {
+  if (!/^(?:name|on|jobs| *(?:-\s+)?['"]?run['"]?\s*:)/m.test(workflowText)) {
     return { ok: true, scripts: [workflowText] };
   }
   const lines = workflowText.replace(/\r\n?/g, "\n").split("\n");
@@ -248,16 +263,22 @@ function extractYamlRunScripts(workflowText) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (/^\s*#/.test(line)) continue;
+    if (/^ *(?:-\s+)?['"]run['"]\s*:/.test(line)) {
+      return { ok: false, reason: `quoted YAML run: key is forbidden at line ${i + 1}` };
+    }
     const runMatch = line.match(/^( *(?:-\s+)?)run:[ \t]*(.*)$/);
     if (!runMatch) {
-      if (/(?:^|[^A-Za-z0-9_-])jq(?:$|[^A-Za-z0-9_-])|--jq(?:\s|=|['"]|$)|(?:^|\s)-q(?:\s|=|['"]|$)/.test(line)) {
+      if (RAW_JQ_REF_RE.test(line)) {
         return { ok: false, reason: `jq reference found outside YAML run: block at line ${i + 1}` };
       }
       continue;
     }
     const keyIndent = runMatch[1].length;
     const rawAfterRun = runMatch[2].trim();
-    if (/^[|>][-+]?[0-9]*(?:\s+#.*)?$/.test(rawAfterRun)) {
+    if (/^>[-+]?[0-9]*(?:\s+#.*)?$/.test(rawAfterRun)) {
+      return { ok: false, reason: `folded YAML run: > scalar is forbidden at line ${i + 1}` };
+    }
+    if (/^\|[-+]?[0-9]*(?:\s+#.*)?$/.test(rawAfterRun)) {
       const blockLines = [];
       let j = i + 1;
       while (j < lines.length) {
@@ -277,10 +298,16 @@ function extractYamlRunScripts(workflowText) {
       scripts.push(blockLines.map((l) => (l.length >= minIndent ? l.slice(minIndent) : "")).join("\n"));
       i = j - 1;
     } else if (rawAfterRun.length > 0 && !rawAfterRun.startsWith("#")) {
-      if (rawAfterRun.startsWith('"') && rawAfterRun.includes("\\")) {
-        return { ok: false, reason: `escaped double-quoted YAML flow run: scalar is forbidden at line ${i + 1}` };
+      let lookahead = i + 1;
+      while (lookahead < lines.length && (lines[lookahead].trim() === "" || /^\s*#/.test(lines[lookahead]))) {
+        lookahead += 1;
       }
-      scripts.push(unquoteYamlFlowScalar(runMatch[2]));
+      if (lookahead < lines.length && lines[lookahead].match(/^ */)[0].length > keyIndent) {
+        return { ok: false, reason: `multiline YAML flow run: scalar is forbidden at line ${i + 1}` };
+      }
+      const parsedFlow = parseYamlFlowRunScalar(rawAfterRun, i + 1);
+      if (!parsedFlow.ok) return parsedFlow;
+      scripts.push(parsedFlow.script);
     } else {
       return { ok: false, reason: `empty YAML run: block at line ${i + 1}` };
     }
@@ -293,41 +320,79 @@ function extractYamlRunScripts(workflowText) {
 
 function extractHeredocsAndQueries(scriptText) {
   const programs = [];
+  const standaloneJqBlocks = [];
   const prefixVars = new Map();
   const queryRefVars = new Map();
   const protectedVars = new Set();
   let duplicateVar = null;
 
-  let cleaned = scriptText.replace(
-    /([A-Za-z_][A-Za-z0-9_]*)="\$\(cat <<'([A-Z_]+)'\n([\s\S]*?)\n *\2\n *\)"/g,
-    (_, varName, delim, body) => {
-      if (protectedVars.has(varName)) {
-        duplicateVar ??= varName;
+  const srcLines = scriptText.replace(/\r\n?/g, "\n").split("\n");
+  const outLines = [];
+  for (let idx = 0; idx < srcLines.length; idx += 1) {
+    const line = srcLines[idx];
+    if (/^\s*#/.test(line)) {
+      outLines.push(line);
+      continue;
+    }
+    const assignMatch = line.match(/^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)="\$\(cat <<'([A-Z_]+)'$/);
+    if (assignMatch) {
+      const [, indent, varName, delim] = assignMatch;
+      let endIdx = idx + 1;
+      while (endIdx < srcLines.length && srcLines[endIdx] !== delim) {
+        endIdx += 1;
       }
-      protectedVars.add(varName);
+      if (endIdx >= srcLines.length) {
+        return { ok: false, reason: `unclosed <<'${delim}' heredoc` };
+      }
+      if (srcLines[endIdx + 1]?.trim() !== ')"') {
+        return { ok: false, reason: `commands after <<'${delim}' inside $(cat ...) are forbidden` };
+      }
+      const body = srcLines.slice(idx + 1, endIdx).join("\n");
       if (delim === "JQ") {
+        if (protectedVars.has(varName)) {
+          duplicateVar ??= varName;
+        }
+        protectedVars.add(varName);
         prefixVars.set(varName, body);
         programs.push(body);
+      } else if (RAW_JQ_REF_RE.test(body)) {
+        return { ok: false, reason: `jq reference inside <<'${delim}' heredoc is forbidden` };
       }
-      return `__VERIFIED_HEREDOC_${varName}__=''`;
-    },
-  );
+      outLines.push(`${indent}__VERIFIED_HEREDOC_${varName}__=''`);
+      idx = endIdx + 1;
+      continue;
+    }
+    if (/(?<!<)<<(?!<)/.test(line)) {
+      const standaloneMatch = line.match(/^(.*?)(?<!<)<<'([A-Z_]+)'$/);
+      if (!standaloneMatch || /(?<!<)<<(?!<)/.test(standaloneMatch[1])) {
+        return { ok: false, reason: "only closed single-quoted <<'DELIM' heredocs are permitted" };
+      }
+      const [, prefix, delim] = standaloneMatch;
+      let endIdx = idx + 1;
+      while (endIdx < srcLines.length && srcLines[endIdx] !== delim) {
+        endIdx += 1;
+      }
+      if (endIdx >= srcLines.length) {
+        return { ok: false, reason: `unclosed <<'${delim}' heredoc` };
+      }
+      const body = srcLines.slice(idx + 1, endIdx).join("\n");
+      if (delim === "JQ") {
+        standaloneJqBlocks.push(body);
+        programs.push(body);
+      } else if (RAW_JQ_REF_RE.test(body)) {
+        return { ok: false, reason: `jq reference inside <<'${delim}' heredoc is forbidden` };
+      }
+      outLines.push(`${prefix}<<<''`);
+      idx = endIdx;
+      continue;
+    }
+    outLines.push(line);
+  }
   if (duplicateVar) {
     return { ok: false, reason: `duplicate heredoc assignment to ${duplicateVar}` };
   }
 
-  cleaned = cleaned.replace(/(?<!<)<<'([A-Z_]+)'\n([\s\S]*?)\n *\1(?=\n|$)/g, (_, delim, body) => {
-    if (delim === "JQ") {
-      programs.push(body);
-    }
-    return "<<<''";
-  });
-
-  if (/(?<!<)<<(?!<)/.test(cleaned)) {
-    return { ok: false, reason: "only closed single-quoted <<'DELIM' heredocs are permitted" };
-  }
-
-  cleaned = cleaned.replace(
+  const cleaned = outLines.join("\n").replace(
     /(^|[;\n])[ \t]*([A-Za-z_][A-Za-z0-9_]*(?:_query|_filter))='([^']*)'(?=[ \t]*(?:#[^\n]*)?(?:\n|;|$))/g,
     (_, lead, varName, body) => {
       if (protectedVars.has(varName)) {
@@ -346,7 +411,7 @@ function extractHeredocsAndQueries(scriptText) {
     return { ok: false, reason: `duplicate jq variable assignment to ${duplicateVar}` };
   }
 
-  return { ok: true, cleaned, programs, prefixVars, queryRefVars, protectedVars };
+  return { ok: true, cleaned, programs, standaloneJqBlocks, prefixVars, queryRefVars, protectedVars };
 }
 
 function readSingleQuoted(text, start) {
@@ -375,6 +440,9 @@ function readArithmeticExpansion(text, start) {
 
 function flushWord(state) {
   if (state.buf.length > 0) {
+    if (state.cmdStack.length > 0 && state.buf === "case") {
+      state.error = "case inside $(...) command substitution is forbidden";
+    }
     state.tokens.push({ kind: "word", raw: state.buf });
     state.buf = "";
   }
@@ -476,19 +544,42 @@ function tokenizeShellWords(scriptText) {
       } else if (next !== -1) {
         cursor = next;
       }
-    } else if (scriptText.startsWith("<<<", cursor)) {
+    } else if (scriptText.startsWith("<(", cursor) || scriptText.startsWith(">(", cursor)) {
       flushWord(state);
-      state.tokens.push({ kind: "op", raw: "<<<" });
-      cursor += 3;
-    } else if ("|&;()<>".includes(ch)) {
-      if (ch === "(" && state.cmdStack.length > 0) state.cmdStack.at(-1).parenDepth += 1;
-      if ((ch === "<" || ch === ">") && /^[0-9]+$/.test(state.buf)) {
-        state.tokens.push({ kind: "op", raw: `${state.buf}${ch}` });
+      if (state.cmdStack.length > 0) state.cmdStack.at(-1).parenDepth += 1;
+      state.tokens.push({ kind: "op", raw: scriptText.slice(cursor, cursor + 2) });
+      cursor += 2;
+    } else if (scriptText.startsWith("<<<", cursor)) {
+      let fdPrefix = "";
+      if (/^[0-9]+$/.test(state.buf)) {
+        fdPrefix = state.buf;
         state.buf = "";
       } else {
         flushWord(state);
-        state.tokens.push({ kind: "op", raw: ch });
       }
+      state.tokens.push({ kind: "redir", raw: `${fdPrefix}<<<`, hasTarget: false });
+      cursor += 3;
+    } else if (ch === "<" || ch === ">" || (ch === "&" && (scriptText[cursor + 1] === ">" || scriptText[cursor + 1] === "<"))) {
+      let prefix = "";
+      if (ch === "&") {
+        flushWord(state);
+        prefix = "&";
+        cursor += 1;
+      } else if (/^[0-9]+$/.test(state.buf)) {
+        prefix = state.buf;
+        state.buf = "";
+      } else {
+        flushWord(state);
+      }
+      const redirMatch = scriptText.slice(cursor).match(/^(?:>>|>&[0-9-]*|<&[0-9-]*|<>|>\||<|>)/);
+      const opText = redirMatch ? redirMatch[0] : scriptText[cursor];
+      const hasInlineFdTarget = /^(?:>&|<&)[0-9-]+$/.test(opText);
+      state.tokens.push({ kind: "redir", raw: `${prefix}${opText}`, hasTarget: hasInlineFdTarget });
+      cursor += opText.length;
+    } else if ("|&;()".includes(ch)) {
+      if (ch === "(" && state.cmdStack.length > 0) state.cmdStack.at(-1).parenDepth += 1;
+      flushWord(state);
+      state.tokens.push({ kind: "op", raw: ch });
       cursor += 1;
     } else if (ch === "'") {
       const end = readSingleQuoted(scriptText, cursor);
@@ -567,30 +658,42 @@ function consumeJqCommandFilter(tokens, jqIndex, prefixVars) {
       return { ok: false, reason: `jq filter must be single-quoted (with optional verified prefix), got: ${word}` };
     }
     let argCursor = idx + 1;
+    let seenRedir = false;
     while (argCursor < tokens.length && tokens[argCursor].kind !== "op") {
-      if (tokens[argCursor].kind === "cmd_open") {
+      const curTok = tokens[argCursor];
+      if (curTok.kind === "cmd_open") {
         return {
           ok: false,
           reason: "command substitution after jq filter is forbidden",
         };
       }
-      if (!/^"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9]+)"$/.test(tokens[argCursor].raw)) {
+      if (curTok.kind === "redir") {
+        seenRedir = true;
+        const isHereString = curTok.raw.endsWith("<<<");
+        if (curTok.hasTarget) {
+          argCursor += 1;
+          continue;
+        }
+        const targetTok = tokens[argCursor + 1];
+        if (!targetTok || targetTok.kind === "op" || targetTok.kind === "redir") {
+          return { ok: false, reason: `missing redirect target after ${curTok.raw}` };
+        }
+        if (targetTok.kind === "cmd_open" || (isHereString && tokens[argCursor + 2]?.kind === "cmd_open")) {
+          return {
+            ok: false,
+            reason: "command substitution inside jq redirect or here-string input is forbidden",
+          };
+        }
+        argCursor += 2;
+        continue;
+      }
+      if (seenRedir || !/^"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9]+)"$/.test(curTok.raw)) {
         return {
           ok: false,
-          reason: `unexpected trailing argument after jq filter: ${tokens[argCursor].raw}`,
+          reason: `unexpected trailing argument after jq filter: ${curTok.raw}`,
         };
       }
       argCursor += 1;
-    }
-    if (
-      tokens[argCursor]?.raw === "<<<" &&
-      (tokens[argCursor + 1]?.kind === "cmd_open" ||
-        (tokens[argCursor + 1]?.kind === "word" && tokens[argCursor + 2]?.kind === "cmd_open"))
-    ) {
-      return {
-        ok: false,
-        reason: "command substitution inside jq here-string input is forbidden",
-      };
     }
     return {
       ok: true,
@@ -616,13 +719,27 @@ function compileCheckJqInvocation(jqBin, compiledProgram, declaredVars) {
   return { ok: true };
 }
 
+const FORBIDDEN_SHELL_RUNNERS = new Set(["eval", "bash", "sh", "zsh", "dash", "source", ".", "xargs"]);
+
+function findUnsafeProtectedVarReference(rawToken, protectedVars) {
+  if (rawToken.startsWith("__VERIFIED_")) return null;
+  for (const varName of protectedVars) {
+    if (rawToken === `--jq="\${${varName}}"` || rawToken.startsWith(`--jq="\${${varName}}"'`)) {
+      continue;
+    }
+    if (new RegExp(`(?<![A-Za-z0-9_])${varName}(?![A-Za-z0-9_])`).test(rawToken)) {
+      return varName;
+    }
+  }
+  return null;
+}
+
 export function auditWorkflowJqInvocations(workflowText) {
   const extracted = extractYamlRunScripts(workflowText);
   if (!extracted.ok) return { ok: false, reason: extracted.reason, programs: [] };
 
   const jqBin = resolveJqBinary();
   const programs = [];
-  const invocations = [];
   let commandCount = 0;
 
   for (const script of extracted.scripts) {
@@ -630,8 +747,9 @@ export function auditWorkflowJqInvocations(workflowText) {
     if (!pre.ok) return { ok: false, reason: pre.reason, programs: [] };
     programs.push(...pre.programs);
 
-    for (const defBody of pre.prefixVars.values()) {
-      const standalone = defBody.trimEnd().endsWith(";") ? `${defBody}\n.` : defBody;
+    for (const defBody of [...pre.prefixVars.values(), ...pre.standaloneJqBlocks]) {
+      const trimmedDef = defBody.trim();
+      const standalone = trimmedDef.length === 0 || trimmedDef.endsWith(";") ? `${defBody}\n.` : defBody;
       const check = compileCheckJqInvocation(jqBin, standalone, []);
       if (!check.ok) return { ok: false, reason: check.reason, programs: [] };
       const bindingCheck = validateJqAsBindings(standalone);
@@ -642,20 +760,32 @@ export function auditWorkflowJqInvocations(workflowText) {
     if (!tokenized.ok) return { ok: false, reason: tokenized.reason, programs: [] };
     const { tokens } = tokenized;
 
-    let currentCmd = null;
+    let seenGh = false;
+    let expectRedirTarget = false;
     for (let i = 0; i < tokens.length; i += 1) {
       const token = tokens[i];
       if (token.kind === "op" || token.kind === "cmd_open") {
-        currentCmd = null;
+        seenGh = false;
+        expectRedirTarget = false;
+        continue;
+      }
+      if (token.kind === "redir") {
+        expectRedirTarget = !token.hasTarget;
         continue;
       }
       if (token.kind !== "word") continue;
 
       const unquotedWord = token.raw.replace(/['"\\]/g, "");
       const baseCmd = unquotedWord.split("/").at(-1);
-      if (currentCmd === null && !/^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(token.raw)) {
-        currentCmd = baseCmd;
+
+      if (FORBIDDEN_SHELL_RUNNERS.has(baseCmd)) {
+        return {
+          ok: false,
+          reason: `${baseCmd} command runner is forbidden in audited workflow run blocks`,
+          programs: [],
+        };
       }
+
       if (
         (baseCmd === "jq" && token.raw !== "jq") ||
         ((unquotedWord === "--jq" || unquotedWord.startsWith("--jq=")) &&
@@ -669,39 +799,45 @@ export function auditWorkflowJqInvocations(workflowText) {
         };
       }
 
+      const mutatedProtectedVar = findUnsafeProtectedVarReference(token.raw, pre.protectedVars);
+      if (mutatedProtectedVar) {
+        return {
+          ok: false,
+          reason: `protected jq variable ${mutatedProtectedVar} may only be referenced via verified \${${mutatedProtectedVar}} expansion`,
+          programs: [],
+        };
+      }
+
+      const unquotedAssign = unquotedWord.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=/);
+      if (
+        unquotedAssign &&
+        !token.raw.startsWith("__VERIFIED_") &&
+        /(?:_query|_filter)$/.test(unquotedAssign[1])
+      ) {
+        return {
+          ok: false,
+          reason: `non-single-quoted or duplicate ${unquotedAssign[1]} assignment is forbidden`,
+          programs: [],
+        };
+      }
+
+      if (expectRedirTarget) {
+        expectRedirTarget = false;
+        continue;
+      }
+
+      if (baseCmd === "gh") {
+        seenGh = true;
+      }
+
       if (
         unquotedWord === "-q" ||
         unquotedWord.startsWith("-q") ||
-        (currentCmd === "gh" && /^-[A-Za-z]*q/.test(unquotedWord))
+        (seenGh && /^-[A-Za-z]*q/.test(unquotedWord))
       ) {
         return {
           ok: false,
           reason: `-q shorthand is forbidden; use --jq (${token.raw})`,
-          programs: [],
-        };
-      }
-
-      if (
-        currentCmd &&
-        /^(?:read|printf|unset|declare|typeset|local|export|eval)$/.test(currentCmd) &&
-        (pre.protectedVars.has(unquotedWord) || /(?:_query|_filter)$/.test(unquotedWord))
-      ) {
-        return {
-          ok: false,
-          reason: `builtin mutation of protected jq variable ${unquotedWord} is forbidden`,
-          programs: [],
-        };
-      }
-
-      const anyAssignMatch = token.raw.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=(.*)$/);
-      if (
-        anyAssignMatch &&
-        !anyAssignMatch[1].startsWith("__VERIFIED_") &&
-        (pre.protectedVars.has(anyAssignMatch[1]) || /(?:_query|_filter)$/.test(anyAssignMatch[1]))
-      ) {
-        return {
-          ok: false,
-          reason: `non-single-quoted or duplicate ${anyAssignMatch[1]} assignment is forbidden`,
           programs: [],
         };
       }
@@ -720,7 +856,6 @@ export function auditWorkflowJqInvocations(workflowText) {
           const src = pre.queryRefVars.get(rawFilter);
           const check = compileCheckJqInvocation(jqBin, src, []);
           if (!check.ok) return { ok: false, reason: check.reason, programs: [] };
-          invocations.push({ source: src, fullSource: src, argNames: [] });
           if (token.raw === "--jq") i += 1;
           continue;
         }
@@ -733,7 +868,6 @@ export function auditWorkflowJqInvocations(workflowText) {
         const bindingCheck = validateJqAsBindings(parsed.compiledProgram);
         if (!bindingCheck.ok) return { ok: false, reason: bindingCheck.reason, programs: [] };
         programs.push(parsed.inlineFilter);
-        invocations.push({ source: parsed.compiledProgram, fullSource: parsed.compiledProgram, argNames: [] });
         if (token.raw === "--jq") i += 1;
         continue;
       }
@@ -747,16 +881,11 @@ export function auditWorkflowJqInvocations(workflowText) {
         const bindingCheck = validateJqAsBindings(result.compiledProgram);
         if (!bindingCheck.ok) return { ok: false, reason: bindingCheck.reason, programs: [] };
         programs.push(result.inlineFilter);
-        invocations.push({
-          source: result.compiledProgram,
-          fullSource: result.compiledProgram,
-          argNames: result.declaredVars,
-        });
         i = result.nextIndex;
       }
     }
   }
-  return { ok: true, programs, invocations, commandCount };
+  return { ok: true, programs, commandCount };
 }
 
 export function extractWorkflowJqPrograms(workflowText) {

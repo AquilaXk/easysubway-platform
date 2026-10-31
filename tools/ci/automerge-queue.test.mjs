@@ -461,7 +461,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   const runReviewFilter = (
     reviews,
     comments = [marker()],
-    commits = [{ sha: HEAD }, { sha: PREVIOUS_HEAD }],
+    commits = [{ sha: PREVIOUS_HEAD }, { sha: HEAD }],
     headArg = HEAD,
   ) => {
     const directory = mkdtempSync(join(tmpdir(), 'automerge-review-filter-'));
@@ -576,6 +576,46 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     0,
     'valid current-head pstack-interrogate act-on=0 from the same reviewer must clear CHANGES_REQUESTED',
   );
+  assert.notEqual(
+    runReviewFilter(
+      [
+        review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z'),
+        review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', { commit_id: PREVIOUS_HEAD }),
+        review(3, 'COMMENTED', '2026-08-01T00:02:00Z', interrogateBody(HEAD, 0), {
+          user: { login: 'reviewer-two', type: 'User' },
+        }),
+      ],
+      exactMarker,
+      [{ sha: PREVIOUS_HEAD }, { sha: HEAD }],
+    ),
+    0,
+    'older-commit APPROVED must not clear newer-commit CHANGES_REQUESTED by same reviewer',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', 'pre-rebase cr', { commit_id: REMOVED_HEAD }),
+      review(2, 'COMMENTED', '2026-08-01T00:01:00Z', interrogateBody(DIFFERENT_HEAD, 0), {
+        commit_id: DIFFERENT_HEAD,
+      }),
+      review(3, 'COMMENTED', '2026-08-01T00:02:00Z', interrogateBody(HEAD, 0), {
+        user: { login: 'reviewer-two', type: 'User' },
+      }),
+    ], exactMarker),
+    0,
+    'pre-rebase pstack-interrogate act-on=0 must clear pre-rebase CHANGES_REQUESTED by same reviewer',
+  );
+  for (const [label, body] of [
+    ['inline unclosed <!-- before act-on=0', `See \`<!--\` note.\n\n${interrogateMarker()}`],
+    ['fenced unclosed <!-- before act-on=0', `\`\`\`sh\nm="<!-- "\n\`\`\`\n\n${interrogateMarker()}`],
+    ['HTML comment holding triple backticks before act-on=0', `<!-- \`\`\` -->\n\n${interrogateMarker()}`],
+    ['closed backslash span before decoy inline span', `\`\\\` and \`${interrogateMarker(PREVIOUS_HEAD, 2)}\`\n\n${interrogateMarker()}`],
+  ]) {
+    assert.equal(
+      runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', body)], exactMarker),
+      0,
+      label,
+    );
+  }
 
   for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
     assert.equal(
@@ -778,6 +818,55 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
   );
   assert.notEqual(
     runReviewFilter([
+      review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', '', {
+        commit_id: PREVIOUS_HEAD,
+        user: { login: 'reviewer-one', type: 'User' },
+      }),
+      review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', {
+        commit_id: 'e'.repeat(40),
+        user: { login: 'reviewer-one', type: 'User' },
+      }),
+      review(3, 'COMMENTED', '2026-08-01T00:02:00Z', interrogateBody(), {
+        user: { login: 'reviewer-two', type: 'User' },
+      }),
+    ]),
+    0,
+    'out-of-PR APPROVED must not clear in-PR CHANGES_REQUESTED',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z', '', {
+        commit_id: 'e'.repeat(40),
+        user: { login: 'reviewer-one', type: 'User' },
+      }),
+      review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', {
+        commit_id: 'f'.repeat(40),
+        user: { login: 'reviewer-one', type: 'User' },
+      }),
+      review(3, 'COMMENTED', '2026-08-01T00:02:00Z', interrogateBody(), {
+        user: { login: 'reviewer-two', type: 'User' },
+      }),
+    ]),
+    0,
+    'pre-rebase CHANGES_REQUESTED already cleared by pre-rebase APPROVED must not wedge after rebase',
+  );
+  assert.equal(
+    runReviewFilter([
+      review(1, 'COMMENTED', '2026-08-01T00:00:00Z', interrogateBody('e'.repeat(40), 2), {
+        commit_id: 'e'.repeat(40),
+        user: { login: 'reviewer-one', type: 'User' },
+      }),
+      review(2, 'COMMENTED', '2026-08-01T00:01:00Z', interrogateBody('f'.repeat(40), 0), {
+        commit_id: 'f'.repeat(40),
+        user: { login: 'reviewer-one', type: 'User' },
+      }),
+      review(3, 'COMMENTED', '2026-08-01T00:02:00Z', '', codeRabbit),
+    ]),
+    0,
+    'pre-rebase ACT_ON already cleared by pre-rebase act-on=0 must not wedge CodeRabbit after rebase',
+  );
+  assert.notEqual(
+    runReviewFilter([
       review(1, 'APPROVED', '2026-08-01T00:00:00Z', '', {
         commit_id: PREVIOUS_HEAD,
       }),
@@ -906,6 +995,12 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     `> ${interrogateMarker(HEAD, 2)}\n\n${interrogateMarker(HEAD, 0)}`,
     `   > \`\`\`\n   > ${interrogateMarker(HEAD, 2)}\n   > \`\`\`\n\n${interrogateMarker(HEAD, 0)}`,
     `Paragraph one \`stray\n\nParagraph two \`stray\n\n${interrogateMarker(HEAD, 0)}`,
+    `<!-- note \`\`\` -->\nbody\n${interrogateMarker(HEAD, 0)}`,
+    `\\\` text \`${interrogateMarker(HEAD, 1)}\`\n${interrogateMarker(HEAD, 0)}`,
+    `    \`\`\`\n\n${interrogateMarker(HEAD, 0)}`,
+    `### Example\n    ${interrogateMarker(HEAD, 2)}\n${interrogateMarker(HEAD, 0)}`,
+    `\`\`\`md\n    \`\`\`\n${interrogateMarker(HEAD, 2)}\n\`\`\`\n${interrogateMarker(HEAD, 0)}`,
+    `- > ${interrogateMarker(HEAD, 2)}\n${interrogateMarker(HEAD, 0)}`,
   ]) {
     assert.equal(
       runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', quotedExampleBody)]),
@@ -947,6 +1042,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     `<!-- pstack-interrogate head=${HEAD} act-on=1`,
     `<!-- pstack-interrogate head=${HEAD} act-on=1\n${interrogateMarker(HEAD, 0)}`,
     `${interrogateMarker(HEAD, 0)}\n<!-- pstack-interrogate head=${HEAD} act-on=1`,
+    `Note \\\`${interrogateMarker(HEAD, 2)}\\\`\n${interrogateMarker(HEAD, 0)}`,
   ]) {
     assert.notEqual(
       runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', adversarialBlockingBody)]),
@@ -3289,7 +3385,6 @@ test('marker 동기화와 BEHIND 승계 판정은 리뷰 게이트와 같은 rev
   for (const name of [
     'is_coderabbit',
     'is_trusted_human',
-    'strip_closed_markdown_code',
     'strip_markdown_code',
     'has_pstack_interrogate_marker',
     'is_valid_pstack_interrogate_on',
@@ -3827,38 +3922,50 @@ test('워크플로의 모든 jq 호출이 단일 인용·평탄화 규칙과 ((<
   }
 
   for (const [label, badWorkflowSnippet] of [
-    ['double-quoted jq filter', 'jq -e ".foo" <<<"$x"'],
-    ['double-quoted --jq filter', 'gh api rate_limit --jq ".resources"'],
-    ['unquoted jq filter', 'jq -r .foo <<<"$x"'],
-    ['unquoted --jq filter', 'gh pr view 1 --json headRefOid --jq .headRefOid'],
-    ['unknown prefix variable', 'jq -e "${unknown_defs}"\'.foo\' <<<"$x"'],
-    ['nested $(jq ...) inside --argjson', 'jq -c --argjson x "$(jq -c \'.\' <<<"{}")" \'.\' <<<"{}"'],
-    ['quoted nested $(...) in trailing jq positional arg', 'jq \'.\' "$(jq \'.\' <<<"{}")"'],
-    ['unquoted nested $(...) in trailing jq positional arg', 'jq \'.\' $(jq \'.\' <<<"{}")'],
+    ['double-quoted jq filter', 'run: |\n  jq -e ".foo" <<<"$x"\n'],
+    ['double-quoted --jq filter', 'run: |\n  gh api rate_limit --jq ".resources"\n'],
+    ['unquoted jq filter', 'run: |\n  jq -r .foo <<<"$x"\n'],
+    ['unquoted --jq filter', 'run: |\n  gh pr view 1 --json headRefOid --jq .headRefOid\n'],
+    ['unknown prefix variable', 'run: |\n  jq -e "${unknown_defs}"\'.foo\' <<<"$x"\n'],
+    ['nested $(jq ...) inside --argjson', 'run: |\n  jq -c --argjson x "$(jq -c \'.\' <<<"{}")" \'.\' <<<"{}"\n'],
+    ['quoted nested $(...) in trailing jq positional arg', 'run: |\n  jq \'.\' "$(jq \'.\' <<<"{}")"\n'],
+    ['unquoted nested $(...) in trailing jq positional arg', 'run: |\n  jq \'.\' $(jq \'.\' <<<"{}")\n'],
+    ['nested $(...) in jq here-string', 'run: |\n  jq \'.\' <<<"$(jq -r \'. as $x | $x\' <<<\'{}\')"\n'],
+    ['gh -q shorthand', 'run: |\n  gh api rate_limit -q \'. as $x | $x\'\n'],
+    ['+= query mutation', 'run: |\n  q_query=\'.x\'\n  q_query+=\' | . as $x | $x\'\n  gh api x --jq "${q_query}"\n'],
+    ['eval command wrapper', 'run: |\n  eval "jq -r \'. as \\$x | \\$x\' <<<\'{}\'"\n'],
+    ['bash -c subshell bypass', 'run: |\n  bash -c "jq -r \'. as \\$x | \\$x\' <<<\'{}\'"\n'],
+    ['non-JQ heredoc jq reference', 'run: |\n  msg="$(cat <<\'EOF\'\njq -r \'. as $x | $x\'\nEOF\n)"\n'],
+    ['quoted YAML run key', "'run': |\n  jq -r '. as $x | $x' <<<'{}'\n"],
+    ['folded YAML run scalar', 'name: T\non: push\njobs:\n  t:\n    steps:\n      - run: >\n          jq -r \'. as $x | $x\' <<<\'{}\'\n'],
   ]) {
     const rejected = auditWorkflowJqInvocations(badWorkflowSnippet);
     assert.equal(rejected.ok, false, `auditor must fail closed on ${label}: ${badWorkflowSnippet}`);
   }
 
   const automergeWorkflow = await readWorkflow();
-  for (const stripDefName of ['strip_closed_markdown_code', 'strip_markdown_code']) {
-    const defs = [...automergeWorkflow.matchAll(new RegExp(`def ${stripDefName}:[\\s\\S]*?;\\n`, 'g'))].map((m) => m[0]);
-    assert.equal(defs.length, 1, `shared ${stripDefName} definition must be audited`);
-    assert.doesNotMatch(
-      defs[0],
-      /`/,
-      `${stripDefName} must use \\x60 instead of literal backticks`,
-    );
-  }
+  const defs = [
+    ...automergeWorkflow.matchAll(/def strip_markdown_code\(\$keep_unclosed\):[\s\S]*?;\n/g),
+  ].map((m) => m[0]);
+  assert.equal(defs.length, 1, 'shared strip_markdown_code($keep_unclosed) definition must be audited');
+  assert.doesNotMatch(
+    defs[0],
+    /`/,
+    'strip_markdown_code($keep_unclosed) must use \\x60 instead of literal backticks',
+  );
 
   const audit = auditWorkflowJqInvocations(automergeWorkflow);
   assert.equal(audit.ok, true, `automerge-queue.yml jq invocation audit failed: ${audit.reason ?? ''}`);
   assert.ok(
-    audit.invocations.length >= 50,
-    `automerge-queue.yml: expected at least 50 audited jq invocations, got ${audit.invocations.length}`,
+    audit.commandCount >= 50,
+    `automerge-queue.yml: expected at least 50 audited jq invocations, got ${audit.commandCount}`,
   );
 
-  const totalWorkflowAsBindings = [...automergeWorkflow.matchAll(/\bas\s+(?:\$[A-Za-z_][A-Za-z0-9_]*|\{|\[)/g)].length;
+  const commentStrippedWorkflow = automergeWorkflow
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  const totalWorkflowAsBindings = [...commentStrippedWorkflow.matchAll(/\bas\s*(?:\$[A-Za-z_][A-Za-z0-9_]*|\{|\[)/g)].length;
   let checkedNonReduce = 0;
   let checkedLoop = 0;
   for (const program of audit.programs) {
@@ -3876,26 +3983,6 @@ test('워크플로의 모든 jq 호출이 단일 인용·평탄화 규칙과 ((<
     totalWorkflowAsBindings,
     `every jq 'as' binding in automerge-queue.yml must be AST-checked (${checkedNonReduce} + ${checkedLoop} vs ${totalWorkflowAsBindings})`,
   );
-
-  for (const { fullSource, argNames } of audit.invocations) {
-    const asResult = validateJqAsBindings(fullSource);
-    assert.equal(
-      asResult.ok,
-      true,
-      `composed jq invocation violates ((<lhs>) as $<var> | <body>): ${asResult.reason ?? ''}`,
-    );
-    const jqArgs = ['-n'];
-    for (const argName of [...new Set(argNames)]) {
-      jqArgs.push('--argjson', argName, 'null');
-    }
-    jqArgs.push(`if false then (\n${fullSource}\n) else empty end`);
-    const compiled = spawnSync('jq', jqArgs, { encoding: 'utf8' });
-    assert.equal(
-      compiled.status,
-      0,
-      `automerge-queue.yml failed jq compile check:\n${compiled.stderr}\n${fullSource}`,
-    );
-  }
 });
 
 test('워크플로와 모든 PR 템플릿이 현재 head의 pstack interrogate 단일 마커 계약을 안내하고 은퇴한 폴백 문구를 남기지 않는다', async () => {

@@ -358,71 +358,63 @@ jobs:
             def is_trusted_human:
               type == "object" and (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") and
               (.user | type == "object") and (.user.login | type == "string" and length > 0) and .user.type == "User";
-            def strip_closed_markdown_code:
-              gsub("\\r\\n?"; "\n") |
-              gsub("(?m)^ {0,3}>.*$"; "") |
-              gsub("(?m)^[ \\t]*(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?^[ \\t]*\\1\\x60*[ \\t]*$|^[ \\t]*(~{3,})[^\\n]*\\n[\\s\\S]*?^[ \\t]*\\2~*[ \\t]*$|^[ \\t]*(?:\\x60{3,}[^\\x60\\n]*|~{3,}[^\\n]*)$|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n[ \\t]*<!--\\s*pstack-interrogate)[\\s\\S])*?(?<!\\x60)\\3(?!\\x60)"; "") |
-              gsub("(\\n[ \\t]*\\n|\\A)(?:(?: {4,}|\\t).*(\\n|$))+"; "\n");
-            def strip_markdown_code:
-              gsub("\\r\\n?"; "\n") |
-              gsub("(?m)^ {0,3}>.*$"; "") |
-              gsub("(?m)^[ \\t]*(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^[ \\t]*\\1\\x60*[ \\t]*$|\\z)|^[ \\t]*(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^[ \\t]*\\2~*[ \\t]*$|\\z)|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n[ \\t]*<!--\\s*pstack-interrogate)[\\s\\S])*?(?<!\\x60)\\3(?!\\x60)"; "") |
-              gsub("(\\n[ \\t]*\\n|\\A)(?:(?: {4,}|\\t).*(\\n|$))+"; "\n");
+            def strip_markdown_code($keep_unclosed):
+              ((if $keep_unclosed then "" else "|\\z" end) as $eof |
+               ((if $keep_unclosed then "" else "|(?=\\n\\S)|\\z" end) as $list_eof |
+                ((if $keep_unclosed then "|^ {0,11}(?:\\x60{3,}[^\\x60\\n]*|~{3,}[^\\n]*)$" else "" end) as $open_fence |
+                 gsub("\\r\\n?"; "\n") |
+                 gsub("(?m)^(?: {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \\t]+)* {0,3}>.*$"; "") |
+                 gsub("(?m)^ {0,3}(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^ {0,3}\\1\\x60*[ \\t]*$" + $eof + ")|^ {0,3}(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^ {0,3}\\2~*[ \\t]*$" + $eof + ")|^( {4,11})(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^ {2,14}\\4\\x60*[ \\t]*$" + $list_eof + ")|^( {4,11})(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^ {2,14}\\6~*[ \\t]*$" + $list_eof + ")|(?:\\n[ \\t]*\\n|(?:\\n|\\A) {0,3}#{1,6}(?:[ \\t](?!.*pstack-interrogate)[^\\n]*)?\\n|\\A(?:[ \\t]*\\n)*)(?: {4,}|\\t)(?!\\x60{3,}|~{3,})[^\\n]*(?:\\n(?: {4,}|\\t)[^\\n]*)*" + $open_fence + "|\\\\[\\s\\S]|<!--(?!\\s*pstack-interrogate)(?:(?!<!--\\s*pstack-interrogate)[\\s\\S])*?-->|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}<!--)[\\s\\S])*?(?<!\\x60)\\7(?!\\x60)"; " ") |
+                 gsub("(?:\\n[ \\t]*\\n|(?:\\n|\\A) {0,3}#{1,6}(?:[ \\t](?!.*pstack-interrogate)[^\\n]*)?\\n|\\A(?:[ \\t]*\\n)*)(?: {4,}|\\t)[^\\n]*(?:\\n(?: {4,}|\\t)[^\\n]*)*"; "\n"))));
             def has_pstack_interrogate_marker:
-              (((.body // "") | strip_closed_markdown_code) as $clean | ([$clean | scan("<!--\\s*pstack-interrogate")] | length) > 0);
+              (((.body // "") | strip_markdown_code(true)) as $clean | ([$clean | scan("<!--\\s*pstack-interrogate")] | length) > 0);
             def is_valid_pstack_interrogate_on($expected_head):
               ($expected_head | type == "string" and test("^[0-9a-f]{40}$")) and
               is_trusted_human and .state == "COMMENTED" and .commit_id == $expected_head and
-              (((.body // "") | strip_closed_markdown_code) as $closed_clean |
-               (((.body // "") | strip_markdown_code) as $clean |
+              (((.body // "") | strip_markdown_code(true)) as $closed_clean | (((.body // "") | strip_markdown_code(false)) as $clean |
                 (([$closed_clean | scan("<!--\\s*pstack-interrogate")] | length) == 1 and
                  ([$clean | scan("<!--\\s*pstack-interrogate")] | length) == 1 and
                  ($clean | test("(?m)^<!-- pstack-interrogate head=" + $expected_head + " act-on=0 -->[ \\t]*$")))));
             def is_current_pr_commit($commits):
               ((.commit_id) as $cid | ($cid | type == "string" and length > 0) and ($commits | flatten | any(type == "object" and .sha == $cid)));
+            def pos_clears($recorded_pos; $pos): ($pos >= 0 and $pos >= $recorded_pos) or ($pos < 0 and $recorded_pos < 0);
             def clear_prior_act_on($pstack; $pos):
-              if $pstack != null and $pstack.kind == "ACT_ON" and ($pstack.current | not) and $pos >= 0 and $pos >= $pstack.pos
-              then null else $pstack end;
+              if $pstack != null and $pstack.kind == "ACT_ON" and ($pstack.current | not) and pos_clears($pstack.pos; $pos) then null else $pstack end;
             def reduce_review_states($current_head; $commits):
               (($commits | flatten | map(select(type == "object" and (.sha | type == "string")) | .sha)) as $shas |
               sort_by(.submitted_at, .id) |
               reduce .[] as $review ({};
-                (($review.user.login) as $login |
-                 ((.[$login] // { formal: null, pstack: null }) as $cur |
+                (($review.user.login) as $login | ((.[$login] // { formal: null, formal_pos: -1, pstack: null }) as $cur |
                   ((($shas | index($review.commit_id)) // -1) as $pos |
                    ((($current_head | length) > 0 and $review.commit_id == $current_head and $pos >= 0) as $is_cur_head |
                     if $review.state == "DISMISSED" then
-                      if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then .[$login] = { formal: null, pstack: $cur.pstack }
-                      else del(.[$login]) end
+                      if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then .[$login] = { formal: null, formal_pos: -1, pstack: $cur.pstack } else del(.[$login]) end
                     elif $review.state == "CHANGES_REQUESTED" then
-                      if ($review | is_trusted_human) then
-                        .[$login] = { formal: "CHANGES_REQUESTED", pstack: (if $cur.pstack != null and $cur.pstack.kind == "OK" then null else $cur.pstack end) }
-                      else .[$login] = { formal: "UNTRUSTED_CHANGES_REQUESTED", pstack: $cur.pstack } end
+                      if ($review | is_trusted_human) then .[$login] = { formal: "CHANGES_REQUESTED", formal_pos: $pos, pstack: (if $cur.pstack != null and $cur.pstack.kind == "OK" then null else $cur.pstack end) }
+                      else .[$login] = { formal: "UNTRUSTED_CHANGES_REQUESTED", formal_pos: $pos, pstack: $cur.pstack } end
                     elif $review.state == "APPROVED" then
                       if ($review | is_trusted_human) and $pos >= 0 then
-                        if $is_cur_head then .[$login] = { formal: "APPROVED", pstack: null }
-                        else .[$login] = { formal: "APPROVED_PRIOR", pstack: clear_prior_act_on($cur.pstack; $pos) } end
-                      elif ($review | is_coderabbit) and $pos >= 0 then
-                        .[$login] = { formal: (if $cur.formal == "UNTRUSTED_CHANGES_REQUESTED" then "COMMENTED" else ($cur.formal // "COMMENTED") end), pstack: $cur.pstack }
-                      else .[$login] = { formal: ($cur.formal // "COMMENTED"), pstack: $cur.pstack } end
+                        if $is_cur_head then .[$login] = { formal: "APPROVED", formal_pos: $pos, pstack: null }
+                        elif $cur.formal == "CHANGES_REQUESTED" and (pos_clears($cur.formal_pos; $pos) | not) then .[$login] = { formal: "CHANGES_REQUESTED", formal_pos: $cur.formal_pos, pstack: clear_prior_act_on($cur.pstack; $pos) }
+                        else .[$login] = { formal: "APPROVED_PRIOR", formal_pos: $pos, pstack: clear_prior_act_on($cur.pstack; $pos) } end
+                      elif ($review | is_trusted_human) and $pos < 0 then
+                        .[$login] = { formal: (if $cur.formal == "CHANGES_REQUESTED" and pos_clears($cur.formal_pos; $pos) then "COMMENTED" else ($cur.formal // "COMMENTED") end), formal_pos: (if $cur.formal == "CHANGES_REQUESTED" and pos_clears($cur.formal_pos; $pos) then -1 else $cur.formal_pos end), pstack: clear_prior_act_on($cur.pstack; $pos) }
+                      elif ($review | is_coderabbit) and pos_clears($cur.formal_pos; $pos) then
+                        .[$login] = { formal: (if $cur.formal == "UNTRUSTED_CHANGES_REQUESTED" then "COMMENTED" else ($cur.formal // "COMMENTED") end), formal_pos: (if $cur.formal == "UNTRUSTED_CHANGES_REQUESTED" then -1 else $cur.formal_pos end), pstack: $cur.pstack }
+                      else .[$login] = { formal: ($cur.formal // "COMMENTED"), formal_pos: $cur.formal_pos, pstack: $cur.pstack } end
                     elif $review.state == "COMMENTED" then
                       if ($review | is_trusted_human and has_pstack_interrogate_marker) then
                         if $is_cur_head and ($review | is_valid_pstack_interrogate_on($current_head)) then
-                          .[$login] = { formal: (if $cur.formal == null or $cur.formal == "CHANGES_REQUESTED" then "COMMENTED" else $cur.formal end), pstack: { kind: "OK" } }
+                          .[$login] = { formal: (if $cur.formal == null or $cur.formal == "CHANGES_REQUESTED" then "COMMENTED" else $cur.formal end), formal_pos: (if $cur.formal == "CHANGES_REQUESTED" then -1 else $cur.formal_pos end), pstack: { kind: "OK" } }
                         elif ($review | is_valid_pstack_interrogate_on($review.commit_id)) then
-                          .[$login] = { formal: ($cur.formal // "COMMENTED"), pstack: clear_prior_act_on($cur.pstack; $pos) }
+                          .[$login] = { formal: (if $cur.formal == "CHANGES_REQUESTED" and $pos < 0 and $cur.formal_pos < 0 then "COMMENTED" else ($cur.formal // "COMMENTED") end), formal_pos: (if $cur.formal == "CHANGES_REQUESTED" and $pos < 0 and $cur.formal_pos < 0 then -1 else $cur.formal_pos end), pstack: clear_prior_act_on($cur.pstack; $pos) }
                         elif $is_cur_head then
-                          .[$login] = { formal: (if $cur.formal == "APPROVED" then "APPROVED_PRIOR" else ($cur.formal // "COMMENTED") end), pstack: { kind: "ACT_ON", pos: $pos, current: true } }
+                          .[$login] = { formal: (if $cur.formal == "APPROVED" then "APPROVED_PRIOR" else ($cur.formal // "COMMENTED") end), formal_pos: $cur.formal_pos, pstack: { kind: "ACT_ON", pos: $pos, current: true } }
                         else
-                          .[$login] = {
-                            formal: ($cur.formal // "COMMENTED"),
-                            pstack: (if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then
-                              { kind: "ACT_ON", pos: (if $pos > $cur.pstack.pos then $pos else $cur.pstack.pos end), current: $cur.pstack.current }
-                            else { kind: "ACT_ON", pos: $pos, current: false } end)
-                          }
+                          .[$login] = { formal: ($cur.formal // "COMMENTED"), formal_pos: $cur.formal_pos, pstack: (if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then { kind: "ACT_ON", pos: (if $pos > $cur.pstack.pos then $pos else $cur.pstack.pos end), current: $cur.pstack.current } else { kind: "ACT_ON", pos: $pos, current: false } end) }
                         end
-                      else .[$login] = { formal: ($cur.formal // "COMMENTED"), pstack: $cur.pstack } end
-                    else .[$login] = { formal: $review.state, pstack: $cur.pstack } end))))));
+                      else .[$login] = { formal: ($cur.formal // "COMMENTED"), formal_pos: $cur.formal_pos, pstack: $cur.pstack } end
+                    else .[$login] = { formal: $review.state, formal_pos: $cur.formal_pos, pstack: $cur.pstack } end))))));
             def is_human_gate_discovery($current_head; $commits; $states):
               is_current_pr_commit($commits) and
               ((.state == "APPROVED" and .commit_id == $current_head and is_trusted_human and $states[.user.login].formal == "APPROVED" and $states[.user.login].pstack == null) or
