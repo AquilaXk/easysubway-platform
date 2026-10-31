@@ -380,35 +380,60 @@ jobs:
                  ($clean | test("(?m)^<!-- pstack-interrogate head=" + $expected_head + " act-on=0 -->[ \\t]*$")))));
             def is_current_pr_commit($commits):
               ((.commit_id) as $cid | ($cid | type == "string" and length > 0) and ($commits | flatten | any(type == "object" and .sha == $cid)));
+            def clear_prior_act_on($pstack; $pos):
+              if $pstack != null and $pstack.kind == "ACT_ON" and ($pstack.current | not) and $pos >= 0 and $pos >= $pstack.pos
+              then null else $pstack end;
             def reduce_review_states($current_head; $commits):
+              (($commits | flatten | map(select(type == "object" and (.sha | type == "string")) | .sha)) as $shas |
               sort_by(.submitted_at, .id) |
               reduce .[] as $review ({};
-                if $review.state == "DISMISSED" then del(.[$review.user.login])
-                elif $review.state == "APPROVED" then
-                  if ($review | is_trusted_human and is_current_pr_commit($commits)) then
-                    if ($current_head | length) > 0 and $review.commit_id == $current_head then .[$review.user.login] = "APPROVED"
-                    elif .[$review.user.login] != "ACT_ON_CURRENT" and .[$review.user.login] != "APPROVED" and .[$review.user.login] != "PSTACK_OK" then .[$review.user.login] = "APPROVED_PRIOR"
-                    else . end
-                  else .[$review.user.login] //= "COMMENTED" end
-                elif $review.state == "COMMENTED" then
-                  if ($review | is_trusted_human and has_pstack_interrogate_marker) then
-                    if ($review | is_valid_pstack_interrogate_on($current_head) and is_current_pr_commit($commits)) then
-                      .[$review.user.login] = "PSTACK_OK"
-                    elif ($review | is_valid_pstack_interrogate_on($review.commit_id) and is_current_pr_commit($commits)) then
-                      if .[$review.user.login] == null or .[$review.user.login] == "ACT_ON_PRIOR" then .[$review.user.login] = "COMMENTED" else . end
-                    elif ($current_head | length) > 0 and $review.commit_id == $current_head then .[$review.user.login] = "ACT_ON_CURRENT"
-                    else .[$review.user.login] = "ACT_ON_PRIOR" end
-                  else .[$review.user.login] //= "COMMENTED" end
-                else .[$review.user.login] = $review.state end);
+                (($review.user.login) as $login |
+                 ((.[$login] // { formal: null, pstack: null }) as $cur |
+                  ((($shas | index($review.commit_id)) // -1) as $pos |
+                   ((($current_head | length) > 0 and $review.commit_id == $current_head and $pos >= 0) as $is_cur_head |
+                    if $review.state == "DISMISSED" then
+                      if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then .[$login] = { formal: null, pstack: $cur.pstack }
+                      else del(.[$login]) end
+                    elif $review.state == "CHANGES_REQUESTED" then
+                      if ($review | is_trusted_human) then
+                        .[$login] = { formal: "CHANGES_REQUESTED", pstack: (if $cur.pstack != null and $cur.pstack.kind == "OK" then null else $cur.pstack end) }
+                      else .[$login] = { formal: "UNTRUSTED_CHANGES_REQUESTED", pstack: $cur.pstack } end
+                    elif $review.state == "APPROVED" then
+                      if ($review | is_trusted_human) and $pos >= 0 then
+                        if $is_cur_head then .[$login] = { formal: "APPROVED", pstack: null }
+                        else .[$login] = { formal: "APPROVED_PRIOR", pstack: clear_prior_act_on($cur.pstack; $pos) } end
+                      elif ($review | is_coderabbit) and $pos >= 0 then
+                        .[$login] = { formal: (if $cur.formal == "UNTRUSTED_CHANGES_REQUESTED" then "COMMENTED" else ($cur.formal // "COMMENTED") end), pstack: $cur.pstack }
+                      else .[$login] = { formal: ($cur.formal // "COMMENTED"), pstack: $cur.pstack } end
+                    elif $review.state == "COMMENTED" then
+                      if ($review | is_trusted_human and has_pstack_interrogate_marker) then
+                        if $is_cur_head and ($review | is_valid_pstack_interrogate_on($current_head)) then
+                          .[$login] = { formal: (if $cur.formal == null or $cur.formal == "CHANGES_REQUESTED" then "COMMENTED" else $cur.formal end), pstack: { kind: "OK" } }
+                        elif ($review | is_valid_pstack_interrogate_on($review.commit_id)) then
+                          .[$login] = { formal: ($cur.formal // "COMMENTED"), pstack: clear_prior_act_on($cur.pstack; $pos) }
+                        elif $is_cur_head then
+                          .[$login] = { formal: (if $cur.formal == "APPROVED" then "APPROVED_PRIOR" else ($cur.formal // "COMMENTED") end), pstack: { kind: "ACT_ON", pos: $pos, current: true } }
+                        else
+                          .[$login] = {
+                            formal: ($cur.formal // "COMMENTED"),
+                            pstack: (if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then
+                              { kind: "ACT_ON", pos: (if $pos > $cur.pstack.pos then $pos else $cur.pstack.pos end), current: $cur.pstack.current }
+                            else { kind: "ACT_ON", pos: $pos, current: false } end)
+                          }
+                        end
+                      else .[$login] = { formal: ($cur.formal // "COMMENTED"), pstack: $cur.pstack } end
+                    else .[$login] = { formal: $review.state, pstack: $cur.pstack } end))))));
             def is_human_gate_discovery($current_head; $commits; $states):
               is_current_pr_commit($commits) and
-              ((.state == "APPROVED" and .commit_id == $current_head and is_trusted_human and $states[.user.login] == "APPROVED") or
-               (is_valid_pstack_interrogate_on($current_head) and $states[.user.login] == "PSTACK_OK"));
+              ((.state == "APPROVED" and .commit_id == $current_head and is_trusted_human and $states[.user.login].formal == "APPROVED" and $states[.user.login].pstack == null) or
+               (is_valid_pstack_interrogate_on($current_head) and $states[.user.login].pstack != null and $states[.user.login].pstack.kind == "OK" and ($states[.user.login].formal == "COMMENTED" or $states[.user.login].formal == "APPROVED" or $states[.user.login].formal == "APPROVED_PRIOR")));
             def is_transferable_discovery($commits; $states):
-              is_current_pr_commit($commits) and .state == "COMMENTED" and is_coderabbit and $states[.user.login] == "COMMENTED";
+              is_current_pr_commit($commits) and .state == "COMMENTED" and is_coderabbit and $states[.user.login].formal == "COMMENTED";
             def is_gate_discovery($current_head; $commits; $states): is_transferable_discovery($commits; $states) or is_human_gate_discovery($current_head; $commits; $states);
             def states_are_clean($has_current_human_pass):
-              length > 0 and all(.[]; . == "APPROVED" or . == "APPROVED_PRIOR" or . == "PSTACK_OK" or . == "COMMENTED" or (. == "ACT_ON_PRIOR" and $has_current_human_pass));
+              length > 0 and all(.[];
+                (.formal == null or .formal == "COMMENTED" or .formal == "APPROVED" or .formal == "APPROVED_PRIOR") and
+                (.pstack == null or .pstack.kind == "OK" or (.pstack.kind == "ACT_ON" and (.pstack.current | not) and $has_current_human_pass)));
             def has_clean_gate_discovery($current_head; $reviews; $commits):
               ($current_head | type == "string" and test("^[0-9a-f]{40}$")) and
               (([($reviews | flatten[]) | select(is_trusted_human or is_coderabbit)]) as $trusted |
@@ -419,7 +444,7 @@ jobs:
             def has_clean_transferable_discovery($reviews; $commits):
               (([($reviews | flatten[]) | select(is_trusted_human or is_coderabbit)]) as $trusted |
               (($trusted | reduce_review_states(""; $commits)) as $states |
-              ($states | length > 0 and all(.[]; . == "APPROVED_PRIOR" or . == "COMMENTED")) and
+              ($states | length > 0 and all(.[]; (.formal == null or .formal == "COMMENTED" or .formal == "APPROVED_PRIOR") and .pstack == null)) and
               any($trusted[]; is_transferable_discovery($commits; $states))));
           JQ
           )"
