@@ -580,8 +580,9 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     runReviewFilter(
       [
         review(1, 'CHANGES_REQUESTED', '2026-08-01T00:00:00Z'),
-        review(2, 'APPROVED', '2026-08-01T00:01:00Z', '', { commit_id: PREVIOUS_HEAD }),
-        review(3, 'COMMENTED', '2026-08-01T00:02:00Z', interrogateBody(HEAD, 0), {
+        review(2, 'CHANGES_REQUESTED', '2026-08-01T00:00:30Z', '', { commit_id: PREVIOUS_HEAD }),
+        review(3, 'APPROVED', '2026-08-01T00:01:00Z', '', { commit_id: PREVIOUS_HEAD }),
+        review(4, 'COMMENTED', '2026-08-01T00:02:00Z', interrogateBody(HEAD, 0), {
           user: { login: 'reviewer-two', type: 'User' },
         }),
       ],
@@ -999,6 +1000,7 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     `\\\` text \`${interrogateMarker(HEAD, 1)}\`\n${interrogateMarker(HEAD, 0)}`,
     `    \`\`\`\n\n${interrogateMarker(HEAD, 0)}`,
     `### Example\n    ${interrogateMarker(HEAD, 2)}\n${interrogateMarker(HEAD, 0)}`,
+    `Summary\n---\n    ${interrogateMarker(HEAD, 2)}\n${interrogateMarker(HEAD, 0)}`,
     `\`\`\`md\n    \`\`\`\n${interrogateMarker(HEAD, 2)}\n\`\`\`\n${interrogateMarker(HEAD, 0)}`,
     `- > ${interrogateMarker(HEAD, 2)}\n${interrogateMarker(HEAD, 0)}`,
   ]) {
@@ -1043,6 +1045,8 @@ test('리뷰 게이트는 전 커밋의 활성 상태와 exact-head marker가 �
     `<!-- pstack-interrogate head=${HEAD} act-on=1\n${interrogateMarker(HEAD, 0)}`,
     `${interrogateMarker(HEAD, 0)}\n<!-- pstack-interrogate head=${HEAD} act-on=1`,
     `Note \\\`${interrogateMarker(HEAD, 2)}\\\`\n${interrogateMarker(HEAD, 0)}`,
+    `${interrogateMarker(HEAD, 2)}\n---\n    code\n${interrogateMarker(HEAD, 0)}`,
+    `- Example\n=======\n    ${interrogateMarker(HEAD, 2)}\n${interrogateMarker(HEAD, 0)}`,
   ]) {
     assert.notEqual(
       runReviewFilter([review(1, 'COMMENTED', '2026-08-01T00:00:00Z', adversarialBlockingBody)]),
@@ -3938,10 +3942,20 @@ test('워크플로의 모든 jq 호출이 단일 인용·평탄화 규칙과 ((<
     ['non-JQ heredoc jq reference', 'run: |\n  msg="$(cat <<\'EOF\'\njq -r \'. as $x | $x\'\nEOF\n)"\n'],
     ['quoted YAML run key', "'run': |\n  jq -r '. as $x | $x' <<<'{}'\n"],
     ['folded YAML run scalar', 'name: T\non: push\njobs:\n  t:\n    steps:\n      - run: >\n          jq -r \'. as $x | $x\' <<<\'{}\'\n'],
+    ['gh -iq after $(...) endpoint arg', 'run: |\n  gh api "repos/o/$(printf r)" -iq \'. as $x | $x\'\n'],
+    ['YAML anchor on run scalar', 'run: &a |\n  jq -r \'. as $x | $x\' <<<\'{}\'\n'],
+    ['redirect $(...) before quoted jq', 'run: |\n  >$(echo /tmp/out) jq -r ". as \\$x | \\$x" <<<"{}"\n'],
+    ['assignment $(...) before dot runner', 'run: |\n  x="$(true)" . ./setup.sh\n  jq -r \'.\' <<<\'{}\'\n'],
+    ['command position $(...)', 'run: |\n  "$(printf .)" ./setup.sh\n  jq -r \'.\' <<<\'{}\'\n'],
+    ['dangling redirect at EOF', 'run: |\n  jq -r \'.\' >\n'],
   ]) {
     const rejected = auditWorkflowJqInvocations(badWorkflowSnippet);
     assert.equal(rejected.ok, false, `auditor must fail closed on ${label}: ${badWorkflowSnippet}`);
   }
+  assert.equal(
+    auditWorkflowJqInvocations('run: |\n  git -C . status\n  url="https://example.com/$(jq -r \'.\' <<<\'{}\')-q"\n  msg="$(cat <<\'EOF\'\n  [ "$a" -eq 1 ]\n  EOF\n  )"\n  jq -r \'((.a) as $x | $x)\' <<<\'{}\'\n').ok,
+    true,
+  );
 
   const automergeWorkflow = await readWorkflow();
   const defs = [

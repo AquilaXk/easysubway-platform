@@ -364,8 +364,8 @@ jobs:
                 ((if $keep_unclosed then "|^ {0,11}(?:\\x60{3,}[^\\x60\\n]*|~{3,}[^\\n]*)$" else "" end) as $open_fence |
                  gsub("\\r\\n?"; "\n") |
                  gsub("(?m)^(?: {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \\t]+)* {0,3}>.*$"; "") |
-                 gsub("(?m)^ {0,3}(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^ {0,3}\\1\\x60*[ \\t]*$" + $eof + ")|^ {0,3}(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^ {0,3}\\2~*[ \\t]*$" + $eof + ")|^( {4,11})(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^ {2,14}\\4\\x60*[ \\t]*$" + $list_eof + ")|^( {4,11})(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^ {2,14}\\6~*[ \\t]*$" + $list_eof + ")|(?:\\n[ \\t]*\\n|(?:\\n|\\A) {0,3}#{1,6}(?:[ \\t](?!.*pstack-interrogate)[^\\n]*)?\\n|\\A(?:[ \\t]*\\n)*)(?: {4,}|\\t)(?!\\x60{3,}|~{3,})[^\\n]*(?:\\n(?: {4,}|\\t)[^\\n]*)*" + $open_fence + "|\\\\[\\s\\S]|<!--(?!\\s*pstack-interrogate)(?:(?!<!--\\s*pstack-interrogate)[\\s\\S])*?-->|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}<!--)[\\s\\S])*?(?<!\\x60)\\7(?!\\x60)"; " ") |
-                 gsub("(?:\\n[ \\t]*\\n|(?:\\n|\\A) {0,3}#{1,6}(?:[ \\t](?!.*pstack-interrogate)[^\\n]*)?\\n|\\A(?:[ \\t]*\\n)*)(?: {4,}|\\t)[^\\n]*(?:\\n(?: {4,}|\\t)[^\\n]*)*"; "\n"))));
+                 gsub("(?m)^ {0,3}(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^ {0,3}\\1\\x60*[ \\t]*$" + $eof + ")|^ {0,3}(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^ {0,3}\\2~*[ \\t]*$" + $eof + ")|^( {4,11})(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^ {2,14}\\4\\x60*[ \\t]*$" + $list_eof + ")|^( {4,11})(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^ {2,14}\\6~*[ \\t]*$" + $list_eof + ")|(?:\\n[ \\t]*\\n|(?:\\n|\\A) {0,3}#{1,6}(?:[ \\t](?!.*pstack-interrogate)[^\\n]*)?\\n|(?:\\n|\\A)(?! {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \\t])(?!.*pstack-interrogate)[^\\n]+\\n {0,3}(?:=+|-+)[ \\t]*\\n|\\A(?:[ \\t]*\\n)*)(?: {4,}|\\t)(?!\\x60{3,}|~{3,})[^\\n]*(?:\\n(?: {4,}|\\t)[^\\n]*)*" + $open_fence + "|\\\\[\\s\\S]|<!--(?!\\s*pstack-interrogate)(?:(?!<!--\\s*pstack-interrogate)[\\s\\S])*?-->|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}<!--)[\\s\\S])*?(?<!\\x60)\\7(?!\\x60)"; " ") |
+                 gsub("(?:\\n[ \\t]*\\n|(?:\\n|\\A) {0,3}#{1,6}(?:[ \\t](?!.*pstack-interrogate)[^\\n]*)?\\n|(?:\\n|\\A)(?! {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \\t])(?!.*pstack-interrogate)[^\\n]+\\n {0,3}(?:=+|-+)[ \\t]*\\n|\\A(?:[ \\t]*\\n)*)(?: {4,}|\\t)[^\\n]*(?:\\n(?: {4,}|\\t)[^\\n]*)*"; "\n"))));
             def has_pstack_interrogate_marker:
               (((.body // "") | strip_markdown_code(true)) as $clean | ([$clean | scan("<!--\\s*pstack-interrogate")] | length) > 0);
             def is_valid_pstack_interrogate_on($expected_head):
@@ -378,6 +378,7 @@ jobs:
             def is_current_pr_commit($commits):
               ((.commit_id) as $cid | ($cid | type == "string" and length > 0) and ($commits | flatten | any(type == "object" and .sha == $cid)));
             def pos_clears($recorded_pos; $pos): ($pos >= 0 and $pos >= $recorded_pos) or ($pos < 0 and $recorded_pos < 0);
+            def max_pos($a; $b): if $a > $b then $a else $b end;
             def clear_prior_act_on($pstack; $pos):
               if $pstack != null and $pstack.kind == "ACT_ON" and ($pstack.current | not) and pos_clears($pstack.pos; $pos) then null else $pstack end;
             def reduce_review_states($current_head; $commits):
@@ -390,8 +391,8 @@ jobs:
                     if $review.state == "DISMISSED" then
                       if $cur.pstack != null and $cur.pstack.kind == "ACT_ON" then .[$login] = { formal: null, formal_pos: -1, pstack: $cur.pstack } else del(.[$login]) end
                     elif $review.state == "CHANGES_REQUESTED" then
-                      if ($review | is_trusted_human) then .[$login] = { formal: "CHANGES_REQUESTED", formal_pos: $pos, pstack: (if $cur.pstack != null and $cur.pstack.kind == "OK" then null else $cur.pstack end) }
-                      else .[$login] = { formal: "UNTRUSTED_CHANGES_REQUESTED", formal_pos: $pos, pstack: $cur.pstack } end
+                      if ($review | is_trusted_human) then .[$login] = { formal: "CHANGES_REQUESTED", formal_pos: (if $cur.formal == "CHANGES_REQUESTED" then max_pos($cur.formal_pos; $pos) else $pos end), pstack: (if $cur.pstack != null and $cur.pstack.kind == "OK" then null else $cur.pstack end) }
+                      else .[$login] = { formal: "UNTRUSTED_CHANGES_REQUESTED", formal_pos: (if $cur.formal == "UNTRUSTED_CHANGES_REQUESTED" then max_pos($cur.formal_pos; $pos) else $pos end), pstack: $cur.pstack } end
                     elif $review.state == "APPROVED" then
                       if ($review | is_trusted_human) and $pos >= 0 then
                         if $is_cur_head then .[$login] = { formal: "APPROVED", formal_pos: $pos, pstack: null }

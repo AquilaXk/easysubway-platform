@@ -3,16 +3,7 @@ import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
 const JQ_KEYWORDS_BEFORE_PAREN = new Set([
-  "if",
-  "then",
-  "elif",
-  "else",
-  "and",
-  "or",
-  "try",
-  "catch",
-  "reduce",
-  "foreach",
+  "if", "then", "elif", "else", "and", "or", "try", "catch", "reduce", "foreach",
 ]);
 
 function resolveJqBinary() {
@@ -231,6 +222,12 @@ export function validateJqAsBindings(program) {
 }
 
 function parseYamlFlowRunScalar(rawAfterRun, lineNo) {
+  if (rawAfterRun.length === 0) {
+    return { ok: false, reason: `empty or multiline flow YAML run: scalar is forbidden at line ${lineNo}` };
+  }
+  if (/^[&!*]/.test(rawAfterRun)) {
+    return { ok: false, reason: `YAML node properties (&, !, *) on run: scalar are forbidden at line ${lineNo}` };
+  }
   if (rawAfterRun.startsWith("'")) {
     const match = rawAfterRun.match(/^'((?:''|[^'])*)'(?:[ \t]+#.*)?$/);
     if (!match) {
@@ -252,7 +249,7 @@ function parseYamlFlowRunScalar(rawAfterRun, lineNo) {
 }
 
 const RAW_JQ_REF_RE =
-  /(?:^|[^A-Za-z0-9_-])jq(?:$|[^A-Za-z0-9_-])|--jq(?:\s|=|['"]|$)|(?:^|\s)-[A-Za-z]*q(?:\s|=|['"]|$)/;
+  /(?:^|[^A-Za-z0-9_-])jq(?:$|[^A-Za-z0-9_-])|--jq(?:\s|=|['"]|$)|(?:^|\s)-(?!eq(?:\s|=|['"]|$))[A-Za-z]*q(?:\s|=|['"]|$)/;
 
 function extractYamlRunScripts(workflowText) {
   if (!/^(?:name|on|jobs| *(?:-\s+)?['"]?run['"]?\s*:)/m.test(workflowText)) {
@@ -266,7 +263,7 @@ function extractYamlRunScripts(workflowText) {
     if (/^ *(?:-\s+)?['"]run['"]\s*:/.test(line)) {
       return { ok: false, reason: `quoted YAML run: key is forbidden at line ${i + 1}` };
     }
-    const runMatch = line.match(/^( *(?:-\s+)?)run:[ \t]*(.*)$/);
+    const runMatch = line.match(/^( *(?:-\s+)?)run[ \t]*:[ \t]*(.*)$/);
     if (!runMatch) {
       if (RAW_JQ_REF_RE.test(line)) {
         return { ok: false, reason: `jq reference found outside YAML run: block at line ${i + 1}` };
@@ -425,6 +422,7 @@ function readArithmeticExpansion(text, start) {
   let cursor = start + 3;
   let depth = 1;
   while (cursor < text.length && depth > 0) {
+    if (text[cursor] === "`" || (text.startsWith("$(", cursor) && !text.startsWith("$((", cursor))) return -1;
     if (text.startsWith("((", cursor)) {
       depth += 1;
       cursor += 2;
@@ -438,14 +436,43 @@ function readArithmeticExpansion(text, start) {
   return depth === 0 ? cursor : -1;
 }
 
+function ensureWordId(state) {
+  if (state.curWordId === null) {
+    state.curWordId = state.nextWordId;
+    state.nextWordId += 1;
+    state.wordHasToken = false;
+  }
+  return state.curWordId;
+}
+
 function flushWord(state) {
   if (state.buf.length > 0) {
     if (state.cmdStack.length > 0 && state.buf === "case") {
       state.error = "case inside $(...) command substitution is forbidden";
     }
-    state.tokens.push({ kind: "word", raw: state.buf });
+    const wordId = ensureWordId(state);
+    const isWordStart = !state.wordHasToken;
+    state.wordHasToken = true;
+    state.tokens.push({ kind: "word", raw: state.buf, wordId, isWordStart });
     state.buf = "";
   }
+}
+
+function endWord(state) {
+  flushWord(state);
+  state.curWordId = null;
+  state.wordHasToken = false;
+}
+
+function openCommandSubstitution(state, resumeDoubleQuote) {
+  flushWord(state);
+  const outerWordId = ensureWordId(state);
+  const isWordStart = !state.wordHasToken;
+  state.wordHasToken = true;
+  state.tokens.push({ kind: "cmd_open", raw: "$(", wordId: outerWordId, isWordStart });
+  state.cmdStack.push({ resumeDoubleQuote, parenDepth: 0, outerWordId, outerWordHasToken: true });
+  state.curWordId = null;
+  state.wordHasToken = false;
 }
 
 function scanDoubleQuotedSegment(text, start, state) {
@@ -466,9 +493,7 @@ function scanDoubleQuotedSegment(text, start, state) {
       cursor = end;
     } else if (text.startsWith("$(", cursor)) {
       state.buf += '"';
-      flushWord(state);
-      state.tokens.push({ kind: "cmd_open", raw: "$(" });
-      state.cmdStack.push({ resumeDoubleQuote: true, parenDepth: 0 });
+      openCommandSubstitution(state, true);
       return cursor + 2;
     } else if (text[cursor] === "\\") {
       if (cursor + 1 >= text.length) {
@@ -497,28 +522,30 @@ function handleCommandCloseParen(text, cursor, state) {
     top.parenDepth -= 1;
     return -2;
   }
-  flushWord(state);
-  state.tokens.push({ kind: "op", raw: ")" });
+  endWord(state);
   state.cmdStack.pop();
+  state.curWordId = top.outerWordId;
+  state.wordHasToken = top.outerWordHasToken;
+  state.tokens.push({ kind: "cmd_close", raw: ")", wordId: top.outerWordId });
   if (!top.resumeDoubleQuote) return cursor + 1;
   return scanDoubleQuotedSegment(text, cursor, state);
 }
 
 function tokenizeShellWords(scriptText) {
-  const state = { tokens: [], buf: "", cmdStack: [], error: null };
+  const state = { tokens: [], buf: "", cmdStack: [], error: null, nextWordId: 1, curWordId: null, wordHasToken: false };
   let cursor = 0;
   while (cursor < scriptText.length && !state.error) {
     const ch = scriptText[cursor];
     if (ch === "\\" && cursor + 1 < scriptText.length && scriptText[cursor + 1] === "\n") {
       cursor += 2;
     } else if (ch === "\n") {
-      flushWord(state);
+      endWord(state);
       state.tokens.push({ kind: "op", raw: "\n" });
       cursor += 1;
     } else if (/\s/.test(ch)) {
-      flushWord(state);
+      endWord(state);
       cursor += 1;
-    } else if (ch === "#" && state.buf.length === 0) {
+    } else if (ch === "#" && state.buf.length === 0 && !state.wordHasToken) {
       while (cursor < scriptText.length && scriptText[cursor] !== "\n") cursor += 1;
     } else if (ch === "`") {
       state.error = "backtick command substitution is forbidden";
@@ -531,54 +558,56 @@ function tokenizeShellWords(scriptText) {
         cursor = end;
       }
     } else if (scriptText.startsWith("$(", cursor)) {
-      flushWord(state);
-      state.tokens.push({ kind: "cmd_open", raw: "$(" });
-      state.cmdStack.push({ resumeDoubleQuote: false, parenDepth: 0 });
+      openCommandSubstitution(state, false);
       cursor += 2;
     } else if (ch === ")" && state.cmdStack.length > 0) {
       const next = handleCommandCloseParen(scriptText, cursor, state);
       if (next === -2) {
-        flushWord(state);
+        endWord(state);
         state.tokens.push({ kind: "op", raw: ")" });
         cursor += 1;
       } else if (next !== -1) {
         cursor = next;
       }
     } else if (scriptText.startsWith("<(", cursor) || scriptText.startsWith(">(", cursor)) {
-      flushWord(state);
+      endWord(state);
       if (state.cmdStack.length > 0) state.cmdStack.at(-1).parenDepth += 1;
       state.tokens.push({ kind: "op", raw: scriptText.slice(cursor, cursor + 2) });
       cursor += 2;
     } else if (scriptText.startsWith("<<<", cursor)) {
       let fdPrefix = "";
-      if (/^[0-9]+$/.test(state.buf)) {
+      if (/^[0-9]+$/.test(state.buf) && !state.wordHasToken) {
         fdPrefix = state.buf;
         state.buf = "";
       } else {
-        flushWord(state);
+        endWord(state);
       }
       state.tokens.push({ kind: "redir", raw: `${fdPrefix}<<<`, hasTarget: false });
+      state.curWordId = null;
+      state.wordHasToken = false;
       cursor += 3;
     } else if (ch === "<" || ch === ">" || (ch === "&" && (scriptText[cursor + 1] === ">" || scriptText[cursor + 1] === "<"))) {
       let prefix = "";
       if (ch === "&") {
-        flushWord(state);
+        endWord(state);
         prefix = "&";
         cursor += 1;
-      } else if (/^[0-9]+$/.test(state.buf)) {
+      } else if (/^[0-9]+$/.test(state.buf) && !state.wordHasToken) {
         prefix = state.buf;
         state.buf = "";
       } else {
-        flushWord(state);
+        endWord(state);
       }
       const redirMatch = scriptText.slice(cursor).match(/^(?:>>|>&[0-9-]*|<&[0-9-]*|<>|>\||<|>)/);
       const opText = redirMatch ? redirMatch[0] : scriptText[cursor];
       const hasInlineFdTarget = /^(?:>&|<&)[0-9-]+$/.test(opText);
       state.tokens.push({ kind: "redir", raw: `${prefix}${opText}`, hasTarget: hasInlineFdTarget });
+      state.curWordId = null;
+      state.wordHasToken = false;
       cursor += opText.length;
     } else if ("|&;()".includes(ch)) {
       if (ch === "(" && state.cmdStack.length > 0) state.cmdStack.at(-1).parenDepth += 1;
-      flushWord(state);
+      endWord(state);
       state.tokens.push({ kind: "op", raw: ch });
       cursor += 1;
     } else if (ch === "'") {
@@ -602,7 +631,7 @@ function tokenizeShellWords(scriptText) {
   }
   if (state.error) return { ok: false, reason: state.error };
   if (state.cmdStack.length > 0) return { ok: false, reason: "unclosed $(...) command substitution" };
-  flushWord(state);
+  endWord(state);
   return { ok: true, tokens: state.tokens };
 }
 
@@ -631,14 +660,9 @@ function consumeJqCommandFilter(tokens, jqIndex, prefixVars) {
     if (word === "--arg" || word === "--argjson" || word === "--slurpfile") {
       const nameTok = tokens[idx + 1];
       const valTok = tokens[idx + 2];
-      const afterValTok = tokens[idx + 3];
       if (
-        !nameTok ||
-        nameTok.kind !== "word" ||
-        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(nameTok.raw) ||
-        !valTok ||
-        valTok.kind !== "word" ||
-        afterValTok?.kind === "cmd_open"
+        nameTok?.kind !== "word" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(nameTok.raw) ||
+        valTok?.kind !== "word" || tokens[idx + 3]?.kind === "cmd_open"
       ) {
         return { ok: false, reason: `invalid or command-substituted ${word} binding in jq invocation` };
       }
@@ -647,9 +671,7 @@ function consumeJqCommandFilter(tokens, jqIndex, prefixVars) {
       continue;
     }
     if (word.startsWith("-")) {
-      if (!/^-[ceEnrRsS]+$/.test(word)) {
-        return { ok: false, reason: `unsupported jq flag: ${word}` };
-      }
+      if (!/^-[ceEnrRsS]+$/.test(word)) return { ok: false, reason: `unsupported jq flag: ${word}` };
       idx += 1;
       continue;
     }
@@ -659,13 +681,10 @@ function consumeJqCommandFilter(tokens, jqIndex, prefixVars) {
     }
     let argCursor = idx + 1;
     let seenRedir = false;
-    while (argCursor < tokens.length && tokens[argCursor].kind !== "op") {
+    while (argCursor < tokens.length && tokens[argCursor].kind !== "op" && tokens[argCursor].kind !== "cmd_close") {
       const curTok = tokens[argCursor];
       if (curTok.kind === "cmd_open") {
-        return {
-          ok: false,
-          reason: "command substitution after jq filter is forbidden",
-        };
+        return { ok: false, reason: "command substitution after jq filter is forbidden" };
       }
       if (curTok.kind === "redir") {
         seenRedir = true;
@@ -675,32 +694,23 @@ function consumeJqCommandFilter(tokens, jqIndex, prefixVars) {
           continue;
         }
         const targetTok = tokens[argCursor + 1];
-        if (!targetTok || targetTok.kind === "op" || targetTok.kind === "redir") {
+        if (!targetTok || targetTok.kind === "op" || targetTok.kind === "cmd_close" || targetTok.kind === "redir") {
           return { ok: false, reason: `missing redirect target after ${curTok.raw}` };
         }
         if (targetTok.kind === "cmd_open" || (isHereString && tokens[argCursor + 2]?.kind === "cmd_open")) {
-          return {
-            ok: false,
-            reason: "command substitution inside jq redirect or here-string input is forbidden",
-          };
+          return { ok: false, reason: "command substitution inside jq redirect or here-string input is forbidden" };
         }
         argCursor += 2;
         continue;
       }
       if (seenRedir || !/^"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9]+)"$/.test(curTok.raw)) {
-        return {
-          ok: false,
-          reason: `unexpected trailing argument after jq filter: ${curTok.raw}`,
-        };
+        return { ok: false, reason: `unexpected trailing argument after jq filter: ${curTok.raw}` };
       }
       argCursor += 1;
     }
     return {
-      ok: true,
-      inlineFilter: parsed.inlineFilter,
-      compiledProgram: parsed.compiledProgram,
-      declaredVars,
-      nextIndex: argCursor - 1,
+      ok: true, inlineFilter: parsed.inlineFilter, compiledProgram: parsed.compiledProgram,
+      declaredVars, nextIndex: argCursor - 1,
     };
   }
   return { ok: false, reason: `jq command at token ${jqIndex} is missing a filter argument` };
@@ -719,17 +729,24 @@ function compileCheckJqInvocation(jqBin, compiledProgram, declaredVars) {
   return { ok: true };
 }
 
-const FORBIDDEN_SHELL_RUNNERS = new Set(["eval", "bash", "sh", "zsh", "dash", "source", ".", "xargs"]);
+const FORBIDDEN_SHELL_RUNNERS = new Set([
+  "eval", "bash", "sh", "zsh", "dash", "source", "xargs",
+  "command", "builtin", "env", "nohup", "exec", "coproc", "time",
+]);
+const SHELL_CMD_PREFIX_WORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"]);
+
+function freshCmdState() {
+  return {
+    seenGh: false, expectRedirTarget: false, redirWordId: null,
+    assignWordId: null, cmdNameWordId: null, atCmdStart: true,
+  };
+}
 
 function findUnsafeProtectedVarReference(rawToken, protectedVars) {
   if (rawToken.startsWith("__VERIFIED_")) return null;
   for (const varName of protectedVars) {
-    if (rawToken === `--jq="\${${varName}}"` || rawToken.startsWith(`--jq="\${${varName}}"'`)) {
-      continue;
-    }
-    if (new RegExp(`(?<![A-Za-z0-9_])${varName}(?![A-Za-z0-9_])`).test(rawToken)) {
-      return varName;
-    }
+    if (rawToken === `--jq="\${${varName}}"` || rawToken.startsWith(`--jq="\${${varName}}"'`)) continue;
+    if (new RegExp(`(?<![A-Za-z0-9_])${varName}(?![A-Za-z0-9_])`).test(rawToken)) return varName;
   }
   return null;
 }
@@ -760,43 +777,78 @@ export function auditWorkflowJqInvocations(workflowText) {
     if (!tokenized.ok) return { ok: false, reason: tokenized.reason, programs: [] };
     const { tokens } = tokenized;
 
-    let seenGh = false;
-    let expectRedirTarget = false;
+    let cmd = freshCmdState();
+    const auditStack = [];
     for (let i = 0; i < tokens.length; i += 1) {
       const token = tokens[i];
-      if (token.kind === "op" || token.kind === "cmd_open") {
-        seenGh = false;
-        expectRedirTarget = false;
+      if (token.kind === "op") {
+        if (token.raw === "<(" || token.raw === ">(") {
+          if (cmd.atCmdStart && !cmd.expectRedirTarget) {
+            return { ok: false, reason: "process substitution in command position is forbidden", programs: [] };
+          }
+          cmd.expectRedirTarget = false;
+          auditStack.push(cmd);
+          cmd = freshCmdState();
+          continue;
+        }
+        if (cmd.expectRedirTarget) return { ok: false, reason: "missing redirect target", programs: [] };
+        if (token.raw === "(") auditStack.push(freshCmdState());
+        cmd = token.raw === ")" ? (auditStack.pop() ?? freshCmdState()) : freshCmdState();
+        continue;
+      }
+      if (token.kind === "cmd_open") {
+        if (cmd.expectRedirTarget) {
+          cmd.redirWordId = token.wordId;
+          cmd.expectRedirTarget = false;
+        } else if (
+          token.wordId === cmd.cmdNameWordId ||
+          (cmd.atCmdStart && token.wordId !== cmd.assignWordId && token.wordId !== cmd.redirWordId)
+        ) {
+          return { ok: false, reason: "command substitution in command position is forbidden", programs: [] };
+        } else if (
+          cmd.seenGh &&
+          token.wordId !== cmd.redirWordId &&
+          (token.isWordStart ||
+            (tokens[i - 1]?.wordId === token.wordId && tokens[i - 1]?.raw.replace(/['"\\]/g, "") === ""))
+        ) {
+          return { ok: false, reason: "standalone command substitution in gh argument is forbidden", programs: [] };
+        }
+        auditStack.push(cmd);
+        cmd = freshCmdState();
+        continue;
+      }
+      if (token.kind === "cmd_close") {
+        if (cmd.expectRedirTarget) return { ok: false, reason: "missing redirect target", programs: [] };
+        cmd = auditStack.pop() ?? freshCmdState();
         continue;
       }
       if (token.kind === "redir") {
-        expectRedirTarget = !token.hasTarget;
+        if (cmd.expectRedirTarget) return { ok: false, reason: "missing redirect target", programs: [] };
+        cmd.expectRedirTarget = !token.hasTarget;
+        cmd.redirWordId = null;
         continue;
       }
       if (token.kind !== "word") continue;
 
       const unquotedWord = token.raw.replace(/['"\\]/g, "");
       const baseCmd = unquotedWord.split("/").at(-1);
+      const isAssignStart =
+        token.isWordStart && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.exec(unquotedWord);
 
-      if (FORBIDDEN_SHELL_RUNNERS.has(baseCmd)) {
-        return {
-          ok: false,
-          reason: `${baseCmd} command runner is forbidden in audited workflow run blocks`,
-          programs: [],
-        };
+      if (
+        FORBIDDEN_SHELL_RUNNERS.has(baseCmd) ||
+        (cmd.atCmdStart && !cmd.expectRedirTarget && token.wordId !== cmd.redirWordId &&
+          token.wordId !== cmd.assignWordId && unquotedWord === ".")
+      ) {
+        return { ok: false, reason: `${baseCmd} command runner is forbidden in audited workflow run blocks`, programs: [] };
       }
 
       if (
         (baseCmd === "jq" && token.raw !== "jq") ||
         ((unquotedWord === "--jq" || unquotedWord.startsWith("--jq=")) &&
-          token.raw !== "--jq" &&
-          !token.raw.startsWith("--jq="))
+          token.raw !== "--jq" && !token.raw.startsWith("--jq="))
       ) {
-        return {
-          ok: false,
-          reason: `aliased or quoted jq token is forbidden: ${token.raw}`,
-          programs: [],
-        };
+        return { ok: false, reason: `aliased or quoted jq token is forbidden: ${token.raw}`, programs: [] };
       }
 
       const mutatedProtectedVar = findUnsafeProtectedVarReference(token.raw, pre.protectedVars);
@@ -808,38 +860,40 @@ export function auditWorkflowJqInvocations(workflowText) {
         };
       }
 
-      const unquotedAssign = unquotedWord.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=/);
       if (
-        unquotedAssign &&
-        !token.raw.startsWith("__VERIFIED_") &&
-        /(?:_query|_filter)$/.test(unquotedAssign[1])
+        isAssignStart && !token.raw.startsWith("__VERIFIED_") &&
+        /(?:_query|_filter)$/.test(isAssignStart[0].replace(/(?:\[[^\]]*\])?\+?=$/, ""))
       ) {
-        return {
-          ok: false,
-          reason: `non-single-quoted or duplicate ${unquotedAssign[1]} assignment is forbidden`,
-          programs: [],
-        };
+        return { ok: false, reason: `non-single-quoted or duplicate ${isAssignStart[0]} assignment is forbidden`, programs: [] };
       }
 
-      if (expectRedirTarget) {
-        expectRedirTarget = false;
+      if (cmd.expectRedirTarget) {
+        cmd.redirWordId = token.wordId;
+        cmd.expectRedirTarget = false;
         continue;
       }
+      if (token.wordId === cmd.redirWordId) continue;
 
-      if (baseCmd === "gh") {
-        seenGh = true;
+      if (cmd.atCmdStart) {
+        if (isAssignStart) {
+          cmd.assignWordId = token.wordId;
+        } else if (token.wordId !== cmd.assignWordId && !SHELL_CMD_PREFIX_WORDS.has(unquotedWord)) {
+          cmd.atCmdStart = false;
+          cmd.cmdNameWordId = token.wordId;
+        }
+      }
+
+      if (token.isWordStart && baseCmd === "gh") cmd.seenGh = true;
+
+      if (token.isWordStart && unquotedWord.startsWith("-") && tokens[i + 1]?.wordId === token.wordId) {
+        return { ok: false, reason: `command substitution inside option flag is forbidden: ${token.raw}`, programs: [] };
       }
 
       if (
-        unquotedWord === "-q" ||
-        unquotedWord.startsWith("-q") ||
-        (seenGh && /^-[A-Za-z]*q/.test(unquotedWord))
+        token.isWordStart &&
+        (unquotedWord === "-q" || unquotedWord.startsWith("-q") || (cmd.seenGh && /^-[A-Za-z]*q/.test(unquotedWord)))
       ) {
-        return {
-          ok: false,
-          reason: `-q shorthand is forbidden; use --jq (${token.raw})`,
-          programs: [],
-        };
+        return { ok: false, reason: `-q shorthand is forbidden; use --jq (${token.raw})`, programs: [] };
       }
 
       if (token.raw === "--jq" || token.raw.startsWith("--jq=")) {
@@ -853,16 +907,13 @@ export function auditWorkflowJqInvocations(workflowText) {
         }
         commandCount += 1;
         if (pre.queryRefVars.has(rawFilter)) {
-          const src = pre.queryRefVars.get(rawFilter);
-          const check = compileCheckJqInvocation(jqBin, src, []);
+          const check = compileCheckJqInvocation(jqBin, pre.queryRefVars.get(rawFilter), []);
           if (!check.ok) return { ok: false, reason: check.reason, programs: [] };
           if (token.raw === "--jq") i += 1;
           continue;
         }
         const parsed = parseFilterToken(rawFilter, pre.prefixVars);
-        if (!parsed) {
-          return { ok: false, reason: `--jq filter must be single-quoted, got: ${rawFilter}`, programs: [] };
-        }
+        if (!parsed) return { ok: false, reason: `--jq filter must be single-quoted, got: ${rawFilter}`, programs: [] };
         const check = compileCheckJqInvocation(jqBin, parsed.compiledProgram, []);
         if (!check.ok) return { ok: false, reason: check.reason, programs: [] };
         const bindingCheck = validateJqAsBindings(parsed.compiledProgram);
@@ -884,6 +935,7 @@ export function auditWorkflowJqInvocations(workflowText) {
         i = result.nextIndex;
       }
     }
+    if (cmd.expectRedirTarget) return { ok: false, reason: "missing redirect target", programs: [] };
   }
   return { ok: true, programs, commandCount };
 }
