@@ -347,11 +347,83 @@ jobs:
           }
           # paginated-read-end
           # authorization-marker-sync-begin
-          # 일반 push는 push 시각을 남기지 않으므로 committer date를 쓴다. committer
-          # date는 작성자가 조작할 수 있어 소유 계정 신뢰를 전제로 한 실수 방지이지 위조 방어가
-          # 아니다.
+          # 일반 push는 push 시각을 남기지 않으므로 committer date를 쓴다. committer date는
+          # 작성자가 조작할 수 있어 소유 계정 신뢰를 전제로 한 실수 방지이지 위조 방어가 아니다.
           marker_prefix="<!-- Automerge frozen discovery authorization: "
           base_update_prefix="<!-- Automerge base update requested: "
+          review_jq_defs="$(cat <<'JQ'
+            def is_coderabbit:
+              type == "object" and .author_association == "NONE" and (.user | type == "object") and
+              .user.login == "coderabbitai[bot]" and .user.id == 136622811 and .user.type == "Bot";
+            def is_trusted_human:
+              type == "object" and (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") and
+              (.user | type == "object") and (.user.login | type == "string" and length > 0) and .user.type == "User";
+            def strip_closed_markdown_code:
+              gsub("\\r\\n?"; "\n") |
+              gsub("(?m)^ {0,3}>.*$"; "") |
+              gsub("(?m)^[ \\t]*(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?^[ \\t]*\\1\\x60*[ \\t]*$|^[ \\t]*(~{3,})[^\\n]*\\n[\\s\\S]*?^[ \\t]*\\2~*[ \\t]*$|^[ \\t]*(?:\\x60{3,}[^\\x60\\n]*|~{3,}[^\\n]*)$|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n[ \\t]*<!--\\s*pstack-interrogate)[\\s\\S])*?(?<!\\x60)\\3(?!\\x60)"; "") |
+              gsub("(\\n[ \\t]*\\n|\\A)(?:(?: {4,}|\\t).*(\\n|$))+"; "\n");
+            def strip_markdown_code:
+              gsub("\\r\\n?"; "\n") |
+              gsub("(?m)^ {0,3}>.*$"; "") |
+              gsub("(?m)^[ \\t]*(\\x60{3,})[^\\x60\\n]*\\n[\\s\\S]*?(?:^[ \\t]*\\1\\x60*[ \\t]*$|\\z)|^[ \\t]*(~{3,})[^\\n]*\\n[\\s\\S]*?(?:^[ \\t]*\\2~*[ \\t]*$|\\z)|(?<!\\x60)(\\x60+)(?!\\x60)(?:(?!\\n[ \\t]*\\n)(?!\\n[ \\t]*<!--\\s*pstack-interrogate)[\\s\\S])*?(?<!\\x60)\\3(?!\\x60)"; "") |
+              gsub("(\\n[ \\t]*\\n|\\A)(?:(?: {4,}|\\t).*(\\n|$))+"; "\n");
+            def has_pstack_interrogate_marker:
+              (((.body // "") | strip_closed_markdown_code) as $clean | ([$clean | scan("<!--\\s*pstack-interrogate")] | length) > 0);
+            def is_valid_pstack_interrogate_on($expected_head):
+              ($expected_head | type == "string" and test("^[0-9a-f]{40}$")) and
+              is_trusted_human and .state == "COMMENTED" and .commit_id == $expected_head and
+              (((.body // "") | strip_closed_markdown_code) as $closed_clean |
+               (((.body // "") | strip_markdown_code) as $clean |
+                (([$closed_clean | scan("<!--\\s*pstack-interrogate")] | length) == 1 and
+                 ([$clean | scan("<!--\\s*pstack-interrogate")] | length) == 1 and
+                 ($clean | test("(?m)^<!-- pstack-interrogate head=" + $expected_head + " act-on=0 -->[ \\t]*$")))));
+            def is_current_pr_commit($commits):
+              ((.commit_id) as $cid | ($cid | type == "string" and length > 0) and ($commits | flatten | any(type == "object" and .sha == $cid)));
+            def reduce_review_states($current_head; $commits):
+              sort_by(.submitted_at, .id) |
+              reduce .[] as $review ({};
+                if $review.state == "DISMISSED" then del(.[$review.user.login])
+                elif $review.state == "APPROVED" then
+                  if ($review | is_trusted_human and is_current_pr_commit($commits)) then
+                    if ($current_head | length) > 0 and $review.commit_id == $current_head then .[$review.user.login] = "APPROVED"
+                    elif .[$review.user.login] != "ACT_ON_CURRENT" and .[$review.user.login] != "APPROVED" and .[$review.user.login] != "PSTACK_OK" then .[$review.user.login] = "APPROVED_PRIOR"
+                    else . end
+                  else .[$review.user.login] //= "COMMENTED" end
+                elif $review.state == "COMMENTED" then
+                  if ($review | is_trusted_human and has_pstack_interrogate_marker) then
+                    if ($review | is_valid_pstack_interrogate_on($current_head) and is_current_pr_commit($commits)) then
+                      .[$review.user.login] = "PSTACK_OK"
+                    elif ($review | is_valid_pstack_interrogate_on($review.commit_id) and is_current_pr_commit($commits)) then
+                      if .[$review.user.login] == null or .[$review.user.login] == "ACT_ON_PRIOR" then .[$review.user.login] = "COMMENTED" else . end
+                    elif ($current_head | length) > 0 and $review.commit_id == $current_head then .[$review.user.login] = "ACT_ON_CURRENT"
+                    else .[$review.user.login] = "ACT_ON_PRIOR" end
+                  else .[$review.user.login] //= "COMMENTED" end
+                else .[$review.user.login] = $review.state end);
+            def is_human_gate_discovery($current_head; $commits; $states):
+              is_current_pr_commit($commits) and
+              ((.state == "APPROVED" and .commit_id == $current_head and is_trusted_human and $states[.user.login] == "APPROVED") or
+               (is_valid_pstack_interrogate_on($current_head) and $states[.user.login] == "PSTACK_OK"));
+            def is_transferable_discovery($commits; $states):
+              is_current_pr_commit($commits) and .state == "COMMENTED" and is_coderabbit and $states[.user.login] == "COMMENTED";
+            def is_gate_discovery($current_head; $commits; $states): is_transferable_discovery($commits; $states) or is_human_gate_discovery($current_head; $commits; $states);
+            def states_are_clean($has_current_human_pass):
+              length > 0 and all(.[]; . == "APPROVED" or . == "APPROVED_PRIOR" or . == "PSTACK_OK" or . == "COMMENTED" or (. == "ACT_ON_PRIOR" and $has_current_human_pass));
+            def has_clean_gate_discovery($current_head; $reviews; $commits):
+              ($current_head | type == "string" and test("^[0-9a-f]{40}$")) and
+              (([($reviews | flatten[]) | select(is_trusted_human or is_coderabbit)]) as $trusted |
+              (($trusted | reduce_review_states($current_head; $commits)) as $states |
+              ((any($trusted[]; is_human_gate_discovery($current_head; $commits; $states))) as $has_current_human_pass |
+              ($states | states_are_clean($has_current_human_pass)) and
+              any($trusted[]; is_gate_discovery($current_head; $commits; $states)))));
+            def has_clean_transferable_discovery($reviews; $commits):
+              (([($reviews | flatten[]) | select(is_trusted_human or is_coderabbit)]) as $trusted |
+              (($trusted | reduce_review_states(""; $commits)) as $states |
+              ($states | length > 0 and all(.[]; . == "APPROVED_PRIOR" or . == "COMMENTED")) and
+              any($trusted[]; is_transferable_discovery($commits; $states))));
+          JQ
+          )"
+          # comments에서 github-actions[bot]가 남긴 `<prefix><40hex> -->` comment의 id·head 목록.
           canonical_bot_comment_heads() {
             jq -c --arg prefix "$1" '
               [flatten[] | select(
@@ -385,7 +457,7 @@ jobs:
           # 입력: pr, head, comments, reviews, commits(read_pages 페이지 배열). 출력: 갱신된 comments.
           sync_authorization_marker() {
             local marker_body markers marker_count marker_id marker_head records head_commit second_parent ancestry
-            local response events overflow head_date
+            local response normalized_response events overflow head_date
             marker_body="${marker_prefix}${head} -->"
             markers="$(canonical_bot_comment_heads "${marker_prefix}")"
             marker_count="$(jq 'length' <<<"${markers}")"
@@ -425,34 +497,8 @@ jobs:
                 return 0
               fi
             else
-              if ! jq -s -e --arg head "${head}" '
-                ((.[0]) as $reviews |
-                ((.[1]) as $commits |
-                def is_trusted_human:
-                  .author_association == "OWNER" or
-                  .author_association == "MEMBER" or
-                  .author_association == "COLLABORATOR";
-                def is_coderabbit:
-                  .author_association == "NONE" and
-                  .user.login == "coderabbitai[bot]" and
-                  .user.id == 136622811 and
-                  .user.type == "Bot";
-                def is_pstack_interrogate:
-                  ($head | type == "string" and test("^[0-9a-f]{40}$")) and
-                  is_trusted_human and
-                  .state == "COMMENTED" and
-                  .commit_id == $head and
-                  (([(.body // "") | scan("<!-- pstack-interrogate [^>]*-->")]) as $markers |
-                    ($markers | length) == 1 and
-                    $markers[0] == ("<!-- pstack-interrogate head=" + $head + " act-on=0 -->"));
-                def is_current_pr_commit($review):
-                  $commits | flatten | any(.sha == ($review.commit_id // ""));
-                (([($reviews | flatten[]) | select(is_trusted_human or is_coderabbit)]) as $trusted |
-                any($trusted[];
-                  is_current_pr_commit(.) and
-                    ((.state == "APPROVED" and .commit_id == $head) or
-                    (.state == "COMMENTED" and is_coderabbit) or
-                    is_pstack_interrogate)))))
+              if ! jq -s -e --arg head "${head}" "${review_jq_defs}"'
+                has_clean_gate_discovery($head; .[0]; .[1])
               ' \
                 <(printf '%s\n' "${reviews}") \
                 <(printf '%s\n' "${commits}") >/dev/null; then
@@ -500,11 +546,9 @@ jobs:
               echo "::warning::PR #${pr}: authorization marker response did not prove the current head; it is not used."
               return 0
             fi
-            comments="$(jq -c --argjson response "$(jq -c '{id, body, user}' <<<"${response}")" '
-              if any(flatten[]; .id? == $response.id)
-              then map(if type == "array" then map(if .id? == $response.id then $response else . end) else . end)
-              else . + [[$response]]
-              end
+            normalized_response="$(jq -c '{id, body, user}' <<<"${response}")"
+            comments="$(jq -c --argjson response "${normalized_response}" '
+              if any(flatten[]; .id? == $response.id) then map(if type == "array" then map(if .id? == $response.id then $response else . end) else . end) else . + [[$response]] end
             ' <<<"${comments}")"
             echo "PR #${pr}: authorization marker now covers ${head}."
           }
@@ -514,7 +558,7 @@ jobs:
           # rebase 안내를 남긴다. head가 바뀌거나 읽지 못하면 라벨을 유지하거나 복구한다. 라벨
           # 변경이 수렴하지 않으면 fail closed(exit 1)다. 호출한 쪽은 이어서 이 후보를 건너뛴다.
           owner_handoff() {
-            current_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq .headRefOid)" || {
+            current_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq '.headRefOid')" || {
               echo "::warning::PR #${pr} current head를 다시 읽지 못해 automerge label을 유지합니다."
               return 0
             }
@@ -526,7 +570,7 @@ jobs:
               echo "::error::PR #${pr} automerge label을 제거하지 못했습니다."
               exit 1
             }
-            post_remove_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq .headRefOid)" || {
+            post_remove_head="$(gh pr view "${pr}" --repo "${repo}" --json headRefOid --jq '.headRefOid')" || {
               echo "::warning::PR #${pr} label 제거 후 current head를 다시 읽지 못해 automerge label을 복구합니다."
               gh pr edit "${pr}" --repo "${repo}" --add-label automerge || {
                 echo "::error::PR #${pr} automerge label을 복구하지 못했습니다."
@@ -629,16 +673,16 @@ jobs:
             dependabot_compose_behind=false
             if [[ ( "${merge_state}" == "CLEAN" || "${merge_state}" == "BEHIND" ) && "${rest_pr_available}" == true && "${files_available}" == true && "${workflow_runs_available}" == true ]] &&
               jq -s -e --arg head "${head}" --arg head_ref "${head_ref}" --arg repo "${repo}" --arg head_repo "${head_repo}" '
-              ((.[0]) as $pr |
-              ((.[1]) as $files |
-              ((.[2]) as $commits |
-              ((.[3]) as $runs |
               def dependabot:
                 .login == "dependabot[bot]" and .id == 49699333 and .type == "Bot";
               def content_lines($patch):
                 $patch | split("\n") |
                 map(select((startswith("+") or startswith("-")) and
                            (startswith("+++") | not) and (startswith("---") | not)));
+              ((.[0]) as $pr |
+              ((.[1]) as $files |
+              ((.[2]) as $commits |
+              ((.[3]) as $runs |
               ($pr.user | dependabot) and
               ($pr.head | type == "object" and
                 .sha == $head and .ref == $head_ref and
@@ -676,6 +720,8 @@ jobs:
               (($commits | flatten) as $commit_set |
               ($commit_set | length == 1 and .[0].sha == $head and (.[0].author | dependabot))))))))
             ' <(printf '%s\n' "${rest_pr}") <(printf '%s\n' "${files}") <(printf '%s\n' "${commits}") <(printf '%s\n' "${workflow_runs}") >/dev/null; then
+              # 예외(Review·marker 면제)는 지금처럼 CLEAN에만 적용한다. 같은 모양의 BEHIND는
+              # 면제하지 않고 아래에서 소유 세션에 handoff한다.
               if [[ "${merge_state}" == "CLEAN" ]]; then
                 dependabot_compose=true
               else
@@ -700,52 +746,19 @@ jobs:
               sync_authorization_marker
               base_update_records="$(canonical_bot_comment_heads "${base_update_prefix}")"
             # review-state-filter-begin
-            if ! jq -s -e --arg head "${head}" '
-              ((.[0]) as $reviews |
-              ((.[2]) as $commits |
-              def is_trusted_human:
-                .author_association == "OWNER" or
-                .author_association == "MEMBER" or
-                .author_association == "COLLABORATOR";
-              def is_coderabbit:
-                .author_association == "NONE" and
-                .user.login == "coderabbitai[bot]" and
-                .user.id == 136622811 and
-                .user.type == "Bot";
-              def is_pstack_interrogate:
-                ($head | type == "string" and test("^[0-9a-f]{40}$")) and
-                is_trusted_human and
-                .state == "COMMENTED" and
-                .commit_id == $head and
-                (([(.body // "") | scan("<!-- pstack-interrogate [^>]*-->")]) as $markers |
-                  ($markers | length) == 1 and
-                  $markers[0] == ("<!-- pstack-interrogate head=" + $head + " act-on=0 -->"));
-              def is_exact_head_marker:
-                .user.login == "github-actions[bot]" and
-                .user.id == 41898282 and
-                .user.type == "Bot" and
-                (.body // "") == ("<!-- Automerge frozen discovery authorization: " + $head + " -->");
-              def is_current_pr_commit($review):
-                $commits | flatten | any(.sha == ($review.commit_id // ""));
-              (([($reviews | flatten[]) | select(is_trusted_human or is_coderabbit)]) as $trusted |
-              ((.[1]) as $comments | ($comments | flatten | any(is_exact_head_marker))) and
-              (($trusted |
-                sort_by(.submitted_at, .id) |
-                reduce .[] as $review ({};
-                  if $review.state == "COMMENTED" then
-                    .[$review.user.login] //= "COMMENTED"
-                  elif $review.state == "DISMISSED" then
-                    del(.[$review.user.login])
-                  else
-                    .[$review.user.login] = $review.state
-                  end
-                )) as $states |
-                ($states | length > 0 and all(.[]; . == "APPROVED" or . == "COMMENTED"))) and
-              any($trusted[];
-                is_current_pr_commit(.) and
-                  ((.state == "APPROVED" and .commit_id == $head) or
-                  (.state == "COMMENTED" and is_coderabbit) or
-                  is_pstack_interrogate)))))
+            # frozen discovery는 라벨 이벤트에서 GitHub Actions가 기록한 exact-head marker가
+            # 있을 때만 승계한다. 임의 author·다른 SHA·후속 push는 게이트를 통과하지 못한다.
+            if ! jq -s -e --arg head "${head}" "${review_jq_defs}"'
+              def is_canonical_actions_marker:
+                type == "object" and (.user | type == "object") and
+                .user.login == "github-actions[bot]" and .user.id == 41898282 and .user.type == "Bot" and
+                (.body | type == "string") and
+                (.body | test("^<!-- Automerge frozen discovery authorization: [0-9a-f]{40} -->$"));
+              ((.[1]) as $comments |
+              (([$comments | flatten[] | select(is_canonical_actions_marker)]) as $canonical_markers |
+              ($canonical_markers | length == 1) and
+              $canonical_markers[0].body == ("<!-- Automerge frozen discovery authorization: " + $head + " -->") and
+              has_clean_gate_discovery($head; .[0]; .[2])))
             ' \
               <(printf '%s\n' "${reviews}") \
               <(printf '%s\n' "${comments}") \
@@ -795,7 +808,7 @@ jobs:
                 (([.[].check_runs[] |
                   select(.name == $required_check.context) |
                   select($required_check.integration_id == null or .app.id == $required_check.integration_id)] |
-                  sort_by(.started_at, .id) |
+                  sort_by((.conclusion == null), (.started_at == null), (.started_at // ""), .id) |
                   last) as $run |
                 (([$status_records[] | select(.context == $required_check.context)] |
                   sort_by((.updated_at // .created_at // ""), .id) |
@@ -901,12 +914,15 @@ jobs:
                 fi
                 ;;
               BEHIND)
-                # preflight가 PAT 없는 BEHIND를 이미 handoff했으므로 여기에는 PAT가 있을 때만
-                # 닿는다. 게이트를 통과한 현재 head를 고정해 base만 갱신하고, 수락된 요청을
-                # 기록한 뒤 실행을 끝낸다. 새 head의 CI 완료가 다음 실행을 부르고, 그 실행이
-                # 기록으로 marker를 재발행한 뒤 같은 게이트를 다시 통과해야 병합한다.
                 if [[ "${HAS_AUTOMERGE_PAT}" != true ]]; then
                   echo "::warning::PR #${pr} is behind main without AUTOMERGE_PAT; its owning session must rebase and push."
+                  continue
+                fi
+                if [[ "${dependabot_compose:-false}" == true ]] ||
+                  ! jq -s -e "${review_jq_defs}"'
+                    has_clean_transferable_discovery(.[0]; .[1])
+                  ' <(printf '%s\n' "${reviews:-[]}") <(printf '%s\n' "${commits:-[]}") >/dev/null; then
+                  owner_handoff
                   continue
                 fi
                 if GH_TOKEN="${MERGE_GH_TOKEN}" gh api --method PUT "repos/${repo}/pulls/${pr}/update-branch" \
