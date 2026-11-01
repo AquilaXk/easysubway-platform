@@ -28,4 +28,4 @@ Related #
 - [ ] 실행한 명령과 결과 또는 미실행 사유를 기록했습니다.
 - [ ] deploy·recovery·auth·contract pin·Terraform·CI/CD 영향 없음을 확인했습니다.
 - [ ] GitHub PR Review 객체가 있는지 확인했습니다. CodeRabbit status check만으로는 리뷰 완료로 보지 않습니다.
-- [ ] CodeRabbit Review 객체가 없으면 폴백 리뷰를 단일 PR review로 게시했습니다.
+- [ ] 현재 head에 대한 `pstack` `interrogate` Review(`<!-- pstack-interrogate head=<40자 sha> act-on=0 -->`)를 단일 PR review로 게시했습니다.
