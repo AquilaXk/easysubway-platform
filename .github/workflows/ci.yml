@@ -123,7 +123,7 @@ jobs:
 
       - name: Validate Blackbox exporter configuration
         run: |
-          docker run --rm -v "${GITHUB_WORKSPACE}/infra/blackbox:/config:ro" prom/blackbox-exporter:v0.28.0 --config.file=/config/origin-certificate.yml --config.check
+          docker run --rm -v "${GITHUB_WORKSPACE}/infra/blackbox:/config:ro" prom/blackbox-exporter:v0.29.1 --config.file=/config/origin-certificate.yml --config.check
 
       - name: Validate Nginx configuration
         run: |
