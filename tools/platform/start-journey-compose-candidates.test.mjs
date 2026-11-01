@@ -25,6 +25,7 @@ const PUBLIC_KEY_PEM = publicKey.export({ type: "spki", format: "pem" });
 test("exact immutable inputs start only the existing inactive standby and emit one-host runtime", async () => {
   const fixture = await createFixture();
   const calls = [];
+  const networkCalls = [];
   let lifecycleEnvironment;
   const runtime = await startJourneyComposeCandidates({
     ...fixture.input,
@@ -39,6 +40,9 @@ test("exact immutable inputs start only the existing inactive standby and emit o
     },
     candidateEnvironmentConsumer: (environment) => {
       lifecycleEnvironment = environment;
+    },
+    networkEnsurer: async (request) => {
+      networkCalls.push({ request, composeCallsBefore: calls.length });
     },
     composeRunner: async (request) => {
       const envFile = request.args[request.args.indexOf("--env-file") + 1];
@@ -62,6 +66,10 @@ test("exact immutable inputs start only the existing inactive standby and emit o
   });
 
   assert.equal(calls.length, 2);
+  assert.equal(networkCalls.length, 1);
+  assert.equal(networkCalls[0].composeCallsBefore, 1, "the external default network is ensured after the ps check and before up");
+  assert.equal(networkCalls[0].request.projectName, "easysubway-production");
+  assert.deepEqual(networkCalls[0].request.env, { PATH: process.env.PATH, DOCKER_CONTEXT: "verified-test-context" }, "network calls get only the docker operational environment");
   assert.deepEqual(calls[0].args.slice(-4), [
     "ps", "--all", "--quiet",
     "backend-standby",
@@ -402,6 +410,7 @@ async function createFixture() {
     "EASYSUBWAY_POSTGRES_DB=easysubway\nEASYSUBWAY_BACKEND_BIND=127.0.0.1\n";
   const backendEnvText = "EASYSUBWAY_DATASOURCE_USERNAME=private\n";
   const deployLockState = { requests: [], verifyCount: 0, closeCount: 0 };
+  const networkRequests = [];
   const tuple = validTuple({
     backendConfigDigest: `sha256:${sha256(backendEnvText)}`,
   });
@@ -467,6 +476,7 @@ async function createFixture() {
     composeEnvText,
     backendEnvText,
     deployLockState,
+    networkRequests,
     serviceToken: TOKEN,
     currentPublicKeyPem: PUBLIC_KEY_PEM,
     inspectDescriptor: () => ({
@@ -479,6 +489,9 @@ async function createFixture() {
       projectName: "easysubway-production",
       operationId: digest("8"),
       trafficGeneration: 17,
+      networkEnsurer: async (request) => {
+        networkRequests.push({ ...request, verifiesBefore: deployLockState.verifyCount });
+      },
       deployLockRunner: async (request) => {
         deployLockState.requests.push(request);
         let active = true;
@@ -536,3 +549,27 @@ function sha256(value) {
 function digest(character) {
   return `sha256:${character.repeat(64)}`;
 }
+
+test("a compose network that cannot be ensured stops before the standby up", async () => {
+  const fixture = await createFixture();
+  const calls = [];
+  await assert.rejects(
+    startJourneyComposeCandidates({
+      ...fixture.input,
+      serviceToken: TOKEN,
+      currentPublicKeyPem: PUBLIC_KEY_PEM,
+      inspectDescriptor: fixture.inspectDescriptor,
+      ambientEnvironment: { PATH: process.env.PATH, DEPLOY_ROOT: fixture.root },
+      networkEnsurer: async () => {
+        throw new Error("easysubway_default has subnet 172.19.0.0/16, expected 172.18.0.0/16");
+      },
+      composeRunner: async (request) => {
+        calls.push(request);
+        return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+      },
+    }),
+    (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_NETWORK",
+  );
+  assert.deepEqual(calls.map((call) => call.args.includes("up")), [false], "only the ps check ran");
+  assert.equal(fixture.deployLockState.closeCount, 1);
+});

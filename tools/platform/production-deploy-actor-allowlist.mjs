@@ -8,6 +8,7 @@ const RELEASE_CHAIN_APP = "easysubway-release-chain[bot]";
 export const DEPLOY_ACTORS_BY_WORKFLOW = Object.freeze({
   ".github/workflows/data-workflow-scheduler-deploy.yml": Object.freeze([OWNER]),
   ".github/workflows/observability-config-deploy.yml": Object.freeze([OWNER]),
+  ".github/workflows/origin-certificate-renew.yml": Object.freeze([OWNER]),
   ".github/workflows/production-deploy-effective-admission-receipt.yml": Object.freeze([OWNER]),
   ".github/workflows/source-free-journey-deploy.yml": Object.freeze([OWNER]),
   ".github/workflows/source-free-journey-k3s-deploy.yml": Object.freeze([OWNER, RELEASE_CHAIN_APP]),

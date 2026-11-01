@@ -6,7 +6,7 @@ import test from "node:test";
 import { DEPLOY_ACTORS_BY_WORKFLOW } from "../platform/production-deploy-actor-allowlist.mjs";
 
 // production-deploy 환경의 사람 승인을 없애도 쓰기 권한이 있는 다른 계정·App이 운영 배포 경로를 열지 못하게 하는 행위자 게이트 계약(platform#244).
-// 여섯 workflow는 모두 workflow_dispatch만으로 시작하고(schedule·push·App dispatch 없음), 최근 run의 triggering_actor는 저장소 소유자뿐이다.
+// 일곱 workflow는 모두 workflow_dispatch만으로 시작하고(schedule·push·App dispatch 없음), 최근 run의 triggering_actor는 저장소 소유자뿐이다.
 // 릴리스 체인 App은 source-free-journey-k3s-deploy만 dispatch하므로 여기서는 허용하지 않는다(최소 권한).
 const ALLOWED = ["AquilaXk"];
 const GATE_IF = "github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'";
@@ -16,6 +16,8 @@ const targets = [
   { file: "cd.yml", job: "preflight", concurrency: null, condition: GATE_IF },
   { file: "data-workflow-scheduler-deploy.yml", job: "scheduler", concurrency: "data-workflow-scheduler-production", condition: GATE_IF },
   { file: "observability-config-deploy.yml", job: "observability", concurrency: "observability-config-production", condition: GATE_IF },
+  { file: "origin-certificate-renew.yml", job: "check", concurrency: null, condition: `${GATE_IF} && inputs.mode == 'CHECK'` },
+  { file: "origin-certificate-renew.yml", job: "renew", concurrency: "origin-certificate-production", condition: `${GATE_IF} && inputs.mode == 'RENEW'` },
   { file: "production-deploy-effective-admission-receipt.yml", job: "receipt", concurrency: null, condition: GATE_IF },
   { file: "source-free-journey-deploy.yml", job: "preview", concurrency: null, condition: "github.ref == 'refs/heads/main' && inputs.mode == 'PREVIEW' && github.run_attempt == 1 && github.triggering_actor == 'AquilaXk'" },
   { file: "source-reachability-probe-deploy.yml", job: "probe", concurrency: "source-reachability-probe-production", condition: GATE_IF },
@@ -53,7 +55,8 @@ for (const { file, job, concurrency, condition } of targets) {
     const block = jobBlock(workflow, job);
     const header = block.slice(0, block.indexOf("    environment: production-deploy"));
     assert.ok(header.includes(`    if: ${condition}\n`), "job if");
-    assert.equal((workflow.match(/triggering_actor ==/gu) ?? []).length, ALLOWED.length);
+    // job마다 job if에 허용 행위자 비교가 정확히 ALLOWED 수만큼 있다.
+    assert.equal((header.match(/triggering_actor ==/gu) ?? []).length, ALLOWED.length);
     // workflow 수준 concurrency는 건너뛴 job도 슬롯을 차지하므로 job 안에 둔다.
     assert.equal(/^concurrency:/mu.test(workflow), false);
     if (concurrency !== null) {
