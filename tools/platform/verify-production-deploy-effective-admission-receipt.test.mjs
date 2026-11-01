@@ -403,7 +403,7 @@ test("schema and receipt workflow remain closed, least-privilege contracts", () 
   assert.match(workflow, /^on:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n  actions: read$/m);
   assert.match(workflow, /^    if: github\.ref == 'refs\/heads\/main' && github\.run_attempt == 1 && github\.triggering_actor == 'AquilaXk'\n    environment: production-deploy$/m);
   assert.match(workflow, /^    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:$/m);
-  assert.match(workflow, /^      - name: Set up Node\.js\n        uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020\n        with:\n          node-version: 24$/m);
+  assert.match(workflow, /^      - name: Set up Node\.js\n        uses: actions\/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1\n        with:\n          node-version: 24$/m);
   assert.match(workflow, /^          GITHUB_TOKEN: \$\{\{ github\.token \}\}$/m);
   assert.match(workflow, /node tools\/platform\/verify-production-deploy-effective-admission-receipt\.mjs --repository "\$\{\{ github\.repository \}\}" --ref "\$\{\{ github\.ref \}\}" --workflow-sha "\$\{\{ github\.sha \}\}" --run-url/);
   assert.match(workflow, /receipt_path="\$\{RUNNER_TEMP\}\/production-deploy-effective-admission-receipt\.json"\n          node [^\n]+ > "\$\{receipt_path\}"\n          receipt_sha256="\$\(sha256sum "\$\{receipt_path\}" \| cut -d ' ' -f 1\)"\n          cat "\$\{receipt_path\}" >> "\$\{GITHUB_STEP_SUMMARY\}"/);
