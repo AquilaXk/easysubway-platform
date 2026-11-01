@@ -137,7 +137,7 @@ services:
         condition: service_healthy
 
   public-edge-probe:
-    image: prom/blackbox-exporter:v0.28.0
+    image: prom/blackbox-exporter:v0.29.1
     container_name: easysubway-public-edge-probe
     restart: unless-stopped
     profiles:
@@ -146,7 +146,7 @@ services:
   # 호스트 nginx 443의 원 서버 인증서 만료를 읽는 전용 blackbox다(platform#270). 운영 readiness를 보는 public-edge-probe와
   # 설정·수명을 분리해, 이 설정이 깨져도 readiness 감시가 같이 죽지 않는다.
   origin-certificate-probe:
-    image: prom/blackbox-exporter:v0.28.0
+    image: prom/blackbox-exporter:v0.29.1
     container_name: easysubway-origin-certificate-probe
     restart: unless-stopped
     profiles:
@@ -199,7 +199,7 @@ services:
       start_period: 20s
 
   prometheus:
-    image: prom/prometheus:v3.15.0
+    image: prom/prometheus:v3.15.1
     container_name: easysubway-prometheus
     profiles:
       - observability
@@ -237,7 +237,7 @@ services:
       - loki-data:/loki
 
   loki:
-    image: grafana/loki:3.7.8
+    image: grafana/loki:3.7.9
     container_name: easysubway-loki
     profiles:
       - observability
@@ -260,7 +260,7 @@ services:
       start_period: 20s
 
   grafana:
-    image: grafana/grafana:13.2.2
+    image: grafana/grafana:13.2.4
     container_name: easysubway-grafana
     profiles:
       - observability
@@ -286,7 +286,7 @@ services:
       start_period: 30s
 
   alloy:
-    image: grafana/alloy:v1.20.0
+    image: grafana/alloy:v1.21.2
     container_name: easysubway-alloy
     restart: unless-stopped
     profiles:
