@@ -176,7 +176,7 @@ services:
       - /dev/disk:/dev/disk:ro
 
   alertmanager:
-    image: prom/alertmanager:v0.34.1
+    image: prom/alertmanager:v0.34.2
     container_name: easysubway-alertmanager
     profiles:
       - observability
@@ -260,7 +260,7 @@ services:
       start_period: 20s
 
   grafana:
-    image: grafana/grafana:13.2.4
+    image: grafana/grafana:13.3.0
     container_name: easysubway-grafana
     profiles:
       - observability
@@ -286,7 +286,7 @@ services:
       start_period: 30s
 
   alloy:
-    image: grafana/alloy:v1.21.2
+    image: grafana/alloy:v1.21.3
     container_name: easysubway-alloy
     restart: unless-stopped
     profiles:
