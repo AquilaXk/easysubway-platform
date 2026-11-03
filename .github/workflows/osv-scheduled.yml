@@ -22,3 +22,4 @@ jobs:
       fail-on-vuln: true
       scan-args: |-
         -r .
+        --allow-no-lockfiles
