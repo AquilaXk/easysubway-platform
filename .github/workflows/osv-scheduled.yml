@@ -21,4 +21,4 @@ jobs:
       upload-sarif: true
       fail-on-vuln: true
       scan-args: |-
-        --directory=.
+        -r .
