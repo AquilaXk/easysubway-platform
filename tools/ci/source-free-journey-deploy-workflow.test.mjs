@@ -83,6 +83,13 @@ test("K3s injects DataPack callback secrets only for DEPLOY before environment p
   assert.equal(count(workflow, injection), 1);
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_WORKFLOW_TOKEN"), 1);
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN"), 1);
+  assert.equal(
+    count(
+      workflow,
+      "EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN: ${{ inputs.mode == 'DEPLOY' && secrets.EASYSUBWAY_DATAPACK_AUTOMATION_STATUS_TOKEN || '' }}",
+    ),
+    1,
+  );
   assert.equal(count(workflow, "secrets.EASYSUBWAY_DATAPACK_CALLBACK_HMAC_KEY"), 1);
   assert.match(workflow.slice(writeIndex, prepareIndex), /if \[\[ "\$\{MODE\}" == "DEPLOY" \]\]; then/);
   assert.match(workflow.slice(writeIndex, prepareIndex), /node tools\/platform\/inject-datapack-callback-secrets\.mjs\n/);
@@ -92,6 +99,17 @@ test("K3s injects DataPack callback secrets only for DEPLOY before environment p
     "${deploy_root}/source-free-inputs", "${deploy_root}/release-receipts",
     "acquire-platform-contract-bundle.mjs",
   ]) assert.ok(prepareIndex < workflow.indexOf(productionMutation), productionMutation);
+});
+
+test("repository root SECURITY.md defines bilingual private vulnerability reporting for main", () => {
+  const gitignore = readFileSync(new URL("../../.gitignore", import.meta.url), "utf8");
+  assert.match(gitignore, /^!\/SECURITY\.md$/m);
+  const securityMd = readFileSync(new URL("../../SECURITY.md", import.meta.url), "utf8");
+  assert.match(securityMd, /AquilaXk\/easysubway-platform/);
+  assert.match(securityMd, /`main`/);
+  assert.match(securityMd, /Security Advisories/);
+  assert.match(securityMd, /보안 취약점 제보/);
+  assert.match(securityMd, /Reporting a Vulnerability/);
 });
 
 test("both workflows inject Journey V3 runtime settings before environment preparation", () => {

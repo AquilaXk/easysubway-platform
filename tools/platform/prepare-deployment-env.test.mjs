@@ -54,6 +54,11 @@ test("required Platform CI owns the canonical report-secret preparation contract
 });
 
 test("canonical report and DataPack callback secrets are preserved without the legacy alias", () => {
+  const allowlist = readFileSync(backendAllowlist, "utf8").split("\n").filter(Boolean);
+  assert.equal(allowlist.filter((key) => key === datapackWorkflowTokenKey).length, 1);
+  assert.equal(allowlist.filter((key) => key === datapackAutomationStatusTokenKey).length, 1);
+  assert.equal(allowlist.filter((key) => key === datapackCallbackHmacKey).length, 1);
+
   const fixture = makeFixture();
   try {
     const result = run(fixture);

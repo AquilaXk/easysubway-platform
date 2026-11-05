@@ -4,6 +4,7 @@
 *.md
 !/README.md
 !/README.ko.md
+!/SECURITY.md
 !/.github/pull_request_template.md
 !/.github/PULL_REQUEST_TEMPLATE/*.md
 
