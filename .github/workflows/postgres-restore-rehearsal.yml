@@ -37,26 +37,8 @@ jobs:
 
       - name: Rehearse database backup restoration
         shell: bash
+        env:
+          BACKUP_FILE_INPUT: ${{ github.event.inputs.backup_file }}
         run: |
           set -euo pipefail
-
-          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
-          BACKUP_FILE="${{ github.event.inputs.backup_file }}"
-
-          if [[ -z "${BACKUP_FILE}" ]]; then
-            BACKUP_DIR="${DEPLOY_ROOT}/backups"
-            if [[ ! -d "${BACKUP_DIR}" ]]; then
-              echo "Backup directory ${BACKUP_DIR} not found; skipping rehearsal" >&2
-              exit 0
-            fi
-            LATEST_BACKUP="$(find "${BACKUP_DIR}" -name "postgres-*.dump" -type f | sort -r | head -n 1)"
-            if [[ -z "${LATEST_BACKUP}" ]]; then
-              echo "No backup dump found in ${BACKUP_DIR}; skipping rehearsal" >&2
-              exit 0
-            fi
-            BACKUP_FILE="${LATEST_BACKUP}"
-          fi
-
-          echo "Starting restore rehearsal with backup: ${BACKUP_FILE}"
-          bash tools/ops/postgres-restore-rehearsal.sh "${BACKUP_FILE}"
-          echo "Restore rehearsal completed successfully."
+          bash tools/ops/postgres-restore-rehearsal.sh "${BACKUP_FILE_INPUT:-}"
