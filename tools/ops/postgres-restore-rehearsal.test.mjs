@@ -86,15 +86,15 @@ function extractWorkflowStepRun(workflowText) {
     .join("\n");
 }
 
-test("postgres-restore-rehearsal workflow passes backup_file via env and fails closed on missing directory or dump", () => {
+test("postgres-restore-rehearsal workflow passes backup_file via env and delegates boundary checks to postgres-restore-rehearsal.sh", () => {
   const workflow = readFileSync(WORKFLOW_PATH, "utf8");
   const runScript = extractWorkflowStepRun(workflow);
 
   assert.doesNotMatch(runScript, /\$\{\{\s*github\.event\.inputs/u);
   assert.match(workflow, /BACKUP_FILE_INPUT:\s*\$\{\{\s*github\.event\.inputs\.backup_file\s*\}\}/u);
-  assert.match(workflow, /EASYSUBWAY_BACKUP_DIR:\s*\/opt\/easysubway\/backups/u);
+  assert.doesNotMatch(workflow, /EASYSUBWAY_BACKUP_DIR:\s*\/opt\/easysubway\/backups/u);
   assert.doesNotMatch(runScript, /\bexit 0\b/u);
-  assert.match(runScript, /-name 'easysubway-postgres-\*\.dump' -o -name 'postgres-\*\.dump'/u);
+  assert.match(runScript, /bash tools\/ops\/postgres-restore-rehearsal\.sh "\$\{BACKUP_FILE_INPUT:-\}"/u);
 
   const missingDirSandbox = createSandbox();
   const missingDirPath = path.join(missingDirSandbox.root, "missing-backups");
@@ -111,7 +111,7 @@ test("postgres-restore-rehearsal workflow passes backup_file via env and fails c
     },
   });
   assert.equal(missingDirResult.status, 1);
-  assert.match(missingDirResult.stderr + missingDirResult.stdout, /::error::Backup directory .* does not exist/u);
+  assert.match(missingDirResult.stderr + missingDirResult.stdout, /Invalid backup directory:/u);
 
   const emptyDirSandbox = createSandbox();
   const emptyDirResult = spawnSync("bash", ["-c", runScript], {
@@ -127,39 +127,33 @@ test("postgres-restore-rehearsal workflow passes backup_file via env and fails c
     },
   });
   assert.equal(emptyDirResult.status, 1);
-  assert.match(emptyDirResult.stderr + emptyDirResult.stdout, /::error::No PostgreSQL backup dump found in /u);
+  assert.match(emptyDirResult.stderr + emptyDirResult.stdout, /No PostgreSQL backup dump found in /u);
 
   const autoSelectSandbox = createSandbox();
-  writeBackupFixture(autoSelectSandbox.backupDir, DUMP_NAME);
+  const olderBytes = Buffer.from("PGDMP-older-legacy-payload");
+  const newerBytes = Buffer.from("PGDMP-newer-easysubway-payload");
+  writeBackupFixture(autoSelectSandbox.backupDir, "postgres-20260701T000000Z.dump", olderBytes);
+  writeFileSync(path.join(autoSelectSandbox.backupDir, "postgres-test.dump"), "not-a-valid-timestamped-dump");
+  writeBackupFixture(autoSelectSandbox.backupDir, DUMP_NAME, newerBytes);
   const autoSelectResult = spawnSync("bash", ["-c", runScript], {
     cwd: fileURLToPath(new URL("../..", import.meta.url)),
     encoding: "utf8",
     env: {
       ...process.env,
       PATH: `${autoSelectSandbox.binDir}:${process.env.PATH}`,
-      EASYSUBWAY_BACKUP_DIR: autoSelectSandbox.backupDir,
+      DEPLOY_ROOT: autoSelectSandbox.root,
+      EASYSUBWAY_BACKUP_DIR: "",
       BACKUP_FILE_INPUT: "",
       DOCKER_LOG_FILE: autoSelectSandbox.dockerLog,
       DOCKER_STDIN_FILE: autoSelectSandbox.dockerStdin,
     },
   });
   assert.equal(autoSelectResult.status, 0, autoSelectResult.stderr);
-  assert.equal(readFileSync(autoSelectSandbox.dockerStdin).equals(DUMP_BYTES), true);
+  assert.equal(readFileSync(autoSelectSandbox.dockerStdin).equals(newerBytes), true);
 
   const bareNameSandbox = createSandbox();
   writeBackupFixture(bareNameSandbox.backupDir, DUMP_NAME);
-  const bareNameResult = spawnSync("bash", ["-c", runScript], {
-    cwd: fileURLToPath(new URL("../..", import.meta.url)),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${bareNameSandbox.binDir}:${process.env.PATH}`,
-      EASYSUBWAY_BACKUP_DIR: bareNameSandbox.backupDir,
-      BACKUP_FILE_INPUT: DUMP_NAME,
-      DOCKER_LOG_FILE: bareNameSandbox.dockerLog,
-      DOCKER_STDIN_FILE: bareNameSandbox.dockerStdin,
-    },
-  });
+  const bareNameResult = runRehearsal(bareNameSandbox, DUMP_NAME);
   assert.equal(bareNameResult.status, 0, bareNameResult.stderr);
   assert.equal(readFileSync(bareNameSandbox.dockerStdin).equals(DUMP_BYTES), true);
 });

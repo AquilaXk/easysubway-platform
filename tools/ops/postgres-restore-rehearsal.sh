@@ -8,14 +8,41 @@ BACKUP_FILE="${1:-}"
 BACKUP_DIR="${EASYSUBWAY_BACKUP_DIR:-${DEPLOY_ROOT:-/opt/easysubway}/backups}"
 RESTORE_DB="${EASYSUBWAY_RESTORE_DB:-easysubway_restore_rehearsal}"
 
-if [[ -z "${BACKUP_FILE}" ]]; then
-	printf 'Usage: tools/ops/postgres-restore-rehearsal.sh <backup-file>\n' >&2
-	exit 2
-fi
-
 if [[ ! -d "${BACKUP_DIR}" || -L "${BACKUP_DIR}" ]]; then
 	printf 'Invalid backup directory: %s\n' "${BACKUP_DIR}" >&2
 	exit 1
+fi
+
+if [[ -z "${BACKUP_FILE}" ]]; then
+	latest_key=""
+	latest_path=""
+	shopt -s nullglob
+	for candidate in "${BACKUP_DIR}"/*.dump; do
+		if [[ -L "${candidate}" || ! -f "${candidate}" ]]; then
+			continue
+		fi
+		candidate_name="$(basename "${candidate}")"
+		if [[ "${candidate_name}" =~ ^(easysubway-)?postgres-([0-9]{8}T[0-9]{6}Z)(\.[A-Za-z0-9]+)?\.dump$ ]]; then
+			candidate_ts="${BASH_REMATCH[2]}"
+			candidate_prefix_rank="0"
+			if [[ -n "${BASH_REMATCH[1]}" ]]; then
+				candidate_prefix_rank="1"
+			fi
+			candidate_key="${candidate_ts}:${candidate_prefix_rank}:${candidate_name}"
+			if [[ -z "${latest_key}" || "${candidate_key}" > "${latest_key}" ]]; then
+				latest_key="${candidate_key}"
+				latest_path="${candidate}"
+			fi
+		fi
+	done
+	shopt -u nullglob
+	if [[ -z "${latest_path}" ]]; then
+		printf 'No PostgreSQL backup dump found in %s\n' "${BACKUP_DIR}" >&2
+		exit 1
+	fi
+	BACKUP_FILE="${latest_path}"
+elif [[ "${BACKUP_FILE}" != */* && "${BACKUP_FILE}" != *..* ]]; then
+	BACKUP_FILE="${BACKUP_DIR}/${BACKUP_FILE}"
 fi
 
 backup_parent_dir="$(dirname "${BACKUP_FILE}")"
