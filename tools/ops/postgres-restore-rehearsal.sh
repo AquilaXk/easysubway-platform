@@ -5,11 +5,64 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${EASYSUBWAY_ENV_FILE:-${ROOT_DIR}/.env.example}"
 COMPOSE_FILE="${EASYSUBWAY_COMPOSE_FILE:-${ROOT_DIR}/infra/docker-compose.yml}"
 BACKUP_FILE="${1:-}"
+BACKUP_DIR="${EASYSUBWAY_BACKUP_DIR:-${DEPLOY_ROOT:-/opt/easysubway}/backups}"
 RESTORE_DB="${EASYSUBWAY_RESTORE_DB:-easysubway_restore_rehearsal}"
 
-if [[ -z "${BACKUP_FILE}" || ! -f "${BACKUP_FILE}" ]]; then
+if [[ -z "${BACKUP_FILE}" ]]; then
 	printf 'Usage: tools/ops/postgres-restore-rehearsal.sh <backup-file>\n' >&2
 	exit 2
+fi
+
+if [[ ! -d "${BACKUP_DIR}" || -L "${BACKUP_DIR}" ]]; then
+	printf 'Invalid backup directory: %s\n' "${BACKUP_DIR}" >&2
+	exit 1
+fi
+
+backup_parent_dir="$(dirname "${BACKUP_FILE}")"
+if [[ "${BACKUP_FILE}" == *..* || ! -d "${backup_parent_dir}" || -L "${backup_parent_dir}" ]]; then
+	printf 'Backup file path traversal or invalid parent directory rejected: %s\n' "${BACKUP_FILE}" >&2
+	exit 1
+fi
+
+resolved_backup_dir="$(cd "${BACKUP_DIR}" && pwd -P)"
+resolved_file_dir="$(cd "${backup_parent_dir}" && pwd -P)"
+if [[ "${resolved_file_dir}" != "${resolved_backup_dir}" ]]; then
+	printf 'Backup file must reside directly inside %s: %s\n' "${resolved_backup_dir}" "${BACKUP_FILE}" >&2
+	exit 1
+fi
+
+backup_basename="$(basename "${BACKUP_FILE}")"
+if [[ ! "${backup_basename}" =~ ^(easysubway-)?postgres-[0-9]{8}T[0-9]{6}Z(\.[A-Za-z0-9]+)?\.dump$ ]]; then
+	printf 'Invalid backup filename pattern: %s\n' "${backup_basename}" >&2
+	exit 1
+fi
+
+if [[ -L "${BACKUP_FILE}" || ! -f "${BACKUP_FILE}" ]]; then
+	printf 'Backup file must be an existing regular non-symlink file: %s\n' "${BACKUP_FILE}" >&2
+	exit 1
+fi
+
+checksum_file="${BACKUP_FILE}.sha256"
+if [[ -L "${checksum_file}" || ! -f "${checksum_file}" ]]; then
+	printf 'Missing or invalid companion checksum file: %s\n' "${checksum_file}" >&2
+	exit 1
+fi
+
+expected_sha256="$(awk 'NR == 1 { print tolower($1) }' "${checksum_file}")"
+if [[ ! "${expected_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+	printf 'Malformed SHA-256 digest in checksum file: %s\n' "${checksum_file}" >&2
+	exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+	actual_sha256="$(sha256sum "${BACKUP_FILE}" | awk '{ print tolower($1) }')"
+else
+	actual_sha256="$(shasum -a 256 "${BACKUP_FILE}" | awk '{ print tolower($1) }')"
+fi
+
+if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
+	printf 'Backup SHA-256 checksum mismatch for %s\n' "${BACKUP_FILE}" >&2
+	exit 1
 fi
 
 cat "${BACKUP_FILE}" | docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T -e RESTORE_DB="${RESTORE_DB}" postgres sh -lc '

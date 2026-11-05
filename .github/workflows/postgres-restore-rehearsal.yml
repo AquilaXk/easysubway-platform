@@ -37,24 +37,28 @@ jobs:
 
       - name: Rehearse database backup restoration
         shell: bash
+        env:
+          BACKUP_FILE_INPUT: ${{ github.event.inputs.backup_file }}
+          EASYSUBWAY_BACKUP_DIR: /opt/easysubway/backups
         run: |
           set -euo pipefail
 
-          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/easysubway}"
-          BACKUP_FILE="${{ github.event.inputs.backup_file }}"
+          if [[ ! -d "${EASYSUBWAY_BACKUP_DIR}" || -L "${EASYSUBWAY_BACKUP_DIR}" ]]; then
+            echo "::error::Backup directory ${EASYSUBWAY_BACKUP_DIR} does not exist" >&2
+            exit 1
+          fi
 
-          if [[ -z "${BACKUP_FILE}" ]]; then
-            BACKUP_DIR="${DEPLOY_ROOT}/backups"
-            if [[ ! -d "${BACKUP_DIR}" ]]; then
-              echo "Backup directory ${BACKUP_DIR} not found; skipping rehearsal" >&2
-              exit 0
-            fi
-            LATEST_BACKUP="$(find "${BACKUP_DIR}" -name "postgres-*.dump" -type f | sort -r | head -n 1)"
+          if [[ -z "${BACKUP_FILE_INPUT:-}" ]]; then
+            LATEST_BACKUP="$(find "${EASYSUBWAY_BACKUP_DIR}" -maxdepth 1 -type f \( -name 'easysubway-postgres-*.dump' -o -name 'postgres-*.dump' \) | sort -r | head -n 1)"
             if [[ -z "${LATEST_BACKUP}" ]]; then
-              echo "No backup dump found in ${BACKUP_DIR}; skipping rehearsal" >&2
-              exit 0
+              echo "::error::No PostgreSQL backup dump found in ${EASYSUBWAY_BACKUP_DIR}" >&2
+              exit 1
             fi
             BACKUP_FILE="${LATEST_BACKUP}"
+          elif [[ "${BACKUP_FILE_INPUT}" != */* ]]; then
+            BACKUP_FILE="${EASYSUBWAY_BACKUP_DIR}/${BACKUP_FILE_INPUT}"
+          else
+            BACKUP_FILE="${BACKUP_FILE_INPUT}"
           fi
 
           echo "Starting restore rehearsal with backup: ${BACKUP_FILE}"
