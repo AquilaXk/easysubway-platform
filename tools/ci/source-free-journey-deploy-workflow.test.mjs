@@ -52,10 +52,11 @@ test("fixed-host workflow is PREVIEW-only and K3s is the sole Journey DEPLOY own
   assert.match(k3sWorkflow, /options:\s*\n\s*- PREVIEW\s*\n\s*- DEPLOY/);
   assert.match(k3sWorkflow, /cancel-in-progress: false/);
   assert.match(k3sWorkflow, /run-k3s-journey-activation\.mjs/);
+  assert.match(k3sWorkflow, /prune-host-backend-images\.mjs --mode EXECUTE --keep-count 3 --best-effort/);
   assert.doesNotMatch(k3sWorkflow, /run-fixed-host-journey-activation\.mjs/);
   assert.doesNotMatch(k3sWorkflow, /docker compose/);
   assert.equal(count(`${workflow}\n${k3sWorkflow}`, "--mode DEPLOY"), 0, "only K3s MODE dispatch may own DEPLOY");
-  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 6, "K3s owns the sole DEPLOY execution branch and conditional callback-secret exposure");
+  assert.equal(count(k3sWorkflow, "inputs.mode == 'DEPLOY'"), 7, "K3s owns the sole DEPLOY execution branch, post-commit image prune, and conditional callback-secret exposure");
 });
 
 test("workflow has no sibling source checkout, legacy deploy, Route V2, retry or mutable artifact lookup", () => {

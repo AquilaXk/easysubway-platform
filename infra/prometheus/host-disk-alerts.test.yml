@@ -1,0 +1,184 @@
+# promtool test rules infra/prometheus/host-disk-alerts.test.yml
+# 호스트 루트 파일시스템(/) 디스크 사용률 경보(platform#269 21행)의 구간·경계·2026-10-30 사고 수치(79%)·
+# 주의->긴급 전환 시 keep_firing_for: 5m 무음 구간 부재를 시뮬레이션으로 검증한다.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 1) 정상 구간(60%): 어떤 경보도 발화하지 않는다.
+  - interval: 1m
+    name: host root disk usage at 60 percent raises nothing
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '60000000000x10'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x10'
+    promql_expr_test:
+      - expr: easysubway:host_root_disk_usage_ratio
+        eval_time: 6m
+        exp_samples:
+          - labels: 'easysubway:host_root_disk_usage_ratio'
+            value: 0.6
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+
+  # 2) 경계 구간(74%): 75% 미만이므로 어떤 경보도 발화하지 않는다.
+  - interval: 1m
+    name: host root disk usage at 74 percent boundary raises nothing
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '74000000000x10'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x10'
+    promql_expr_test:
+      - expr: easysubway:host_root_disk_usage_ratio
+        eval_time: 6m
+        exp_samples:
+          - labels: 'easysubway:host_root_disk_usage_ratio'
+            value: 0.74
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+
+  # 3) 주의 하한 경계(75%): 5분 지속 뒤 HostRootDiskUsageWarning만 발화한다.
+  - interval: 1m
+    name: host root disk usage at 75 percent raises warning after 5m
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '75000000000x10'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts:
+          - &warning
+            exp_labels:
+              severity: warning
+              service: aquila-host-disk
+            exp_annotations:
+              summary: Host root filesystem disk usage is 75% or higher
+              description: Host root filesystem (/) disk usage reported by docker_runtime_probe has remained between 75% and 85% for at least 5 minutes.
+              title_ko: "호스트 루트 디스크 사용률 75% 이상"
+              impact_ko: "루트 디스크 여유 공간이 줄어 백엔드 이미지 pull, 컨테이너 로그 기록, PostgreSQL 작업이 공간 부족으로 실패할 위험이 커집니다."
+              action_ko: "node tools/platform/prune-host-backend-images.mjs --mode DRY_RUN 으로 정리 대상을 확인한 뒤, k3s crictl rmi 및 docker image prune 으로 옛 컨테이너 이미지를 정리하고 디스크 점유 상위 경로를 점검하세요."
+      - eval_time: 6m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+
+  # 4) 주의 구간(79% — 2026-10-30 실제 사고 수치): HostRootDiskUsageWarning만 발화한다.
+  - interval: 1m
+    name: host root disk usage at 79 percent incident level raises warning only
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '79000000000x10'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x10'
+    promql_expr_test:
+      - expr: easysubway:host_root_disk_usage_ratio
+        eval_time: 6m
+        exp_samples:
+          - labels: 'easysubway:host_root_disk_usage_ratio'
+            value: 0.79
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: [*warning]
+      - eval_time: 6m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+
+  # 5) 긴급 하한 경계(85%): 5분 지속 뒤 HostRootDiskUsageCritical만 발화한다.
+  - interval: 1m
+    name: host root disk usage at 85 percent raises critical after 5m
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '85000000000x10'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts:
+          - &critical
+            exp_labels:
+              severity: critical
+              service: aquila-host-disk
+            exp_annotations:
+              summary: Host root filesystem disk usage is 85% or higher
+              description: Host root filesystem (/) disk usage reported by docker_runtime_probe has remained at or above 85% for at least 5 minutes. Immediate disk reclamation is required before K3s kubelet disk-pressure eviction or PostgreSQL write failure occurs.
+              title_ko: "호스트 루트 디스크 사용률 85% 이상 긴급"
+              impact_ko: "루트 디스크 포화가 임박해 K3s 노드의 ImageFS/NodeHasDiskPressure 축출(eviction), 신규 배포 실패, 데이터베이스 쓰기 중단이 발생할 수 있습니다."
+              action_ko: "즉시 node tools/platform/prune-host-backend-images.mjs --mode EXECUTE --keep-count 3 --best-effort 또는 k3s crictl rmi / docker image prune 으로 미사용 이미지를 회수하고 루트 디스크 여유 공간을 25% 이상 확보하세요."
+
+  # 6) 긴급 구간(92%): HostRootDiskUsageCritical만 발화한다.
+  - interval: 1m
+    name: host root disk usage at 92 percent raises critical only
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '92000000000x10'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x10'
+    promql_expr_test:
+      - expr: easysubway:host_root_disk_usage_ratio
+        eval_time: 6m
+        exp_samples:
+          - labels: 'easysubway:host_root_disk_usage_ratio'
+            value: 0.92
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: [*critical]
+
+  # 7) 주의(79%) -> 긴급(88%) 전환 시 keep_firing_for: 5m로 critical이 pending인 5분 동안 warning이 유지되어 무음 구간이 없다.
+  # 0m~10m(11개 표본): 79% -> warning은 5m에 발화해 10m까지 참.
+  # 11m~20m: 88% -> critical은 11m부터 5분 pending 뒤 16m에 발화. warning은 keep_firing_for: 5m 덕분에 15m까지 발화 상태를 유지하고 16m에 해소.
+  - interval: 1m
+    name: crossing from 79 percent warning to 88 percent critical keeps warning firing until critical fires
+    input_series:
+      - series: 'container_fs_usage_bytes{job="docker_runtime_probe",id="/"}'
+        values: '79000000000x10 88000000000x15'
+      - series: 'container_fs_limit_bytes{job="docker_runtime_probe",id="/"}'
+        values: '100000000000x26'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: [*warning]
+      - eval_time: 10m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: [*warning]
+      - eval_time: 15m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: HostRootDiskUsageCritical
+        exp_alerts: [*critical]
+      - eval_time: 16m
+        alertname: HostRootDiskUsageWarning
+        exp_alerts: []
