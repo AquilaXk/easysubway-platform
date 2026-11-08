@@ -13,6 +13,7 @@
     "name": "journey-active",
     "namespace": "easysubway-journey",
     "clusterIP": "10.43.11.187",
-    "port": 8080
+    "port": 8080,
+    "managementPort": 8081
   }
 }

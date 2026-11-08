@@ -75,6 +75,7 @@ const CANARY_PROBE_FIELDS = Object.freeze([
 ]);
 const OVERRIDE_KEYS = new Set([
   "SPRING_PROFILES_ACTIVE",
+  "EASYSUBWAY_MANAGEMENT_PORT",
   "EASYSUBWAY_PUSH_DELIVERY_ENABLED",
   "EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_PATH",
   "EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_SHA256",
@@ -707,6 +708,16 @@ export function createK3sJourneyActivationEffects({
       replacement.metadata.labels = rendered.activationPlan.activeServiceTemplate.metadata.labels;
       replacement.metadata.annotations = releaseAnnotations(request);
       replacement.spec.selector = rendered.activationPlan.selectorPatch;
+      const existingPortsByName = new Map(
+        (preparedActiveService.currentService?.spec?.ports ?? []).map((port) => [port.name, port]),
+      );
+      replacement.spec.ports = rendered.activationPlan.activeServiceTemplate.spec.ports.map((templatePort) => {
+        const existingPort = existingPortsByName.get(templatePort.name);
+        if (templatePort.nodePort === undefined && Number.isSafeInteger(existingPort?.nodePort)) {
+          return { ...structuredClone(templatePort), nodePort: existingPort.nodePort };
+        }
+        return structuredClone(templatePort);
+      });
       return commitServiceCasWithReconciliation({
         replace: async () => parseJson(Buffer.from((await kubectl([
           "replace", "-f", "-", "-o", "json"],
@@ -1005,28 +1016,55 @@ async function readObservabilityContract() {
   return parseJson(await readStableRegularFile(OBSERVABILITY_CONTRACT_PATH));
 }
 
-// 보안 경계(Issue #221 F1): backend ingress의 모든 규칙은 TCP 8080 하나만 연다. ipBlock 출처는 노드 /32와
-// 계약 compose subnet 둘뿐이고 except가 붙지 않아야 하며, 그 밖의 출처는 자기 namespace selector뿐이다.
+// 보안 경계(Issue #221 F1, Issue #225): backend ingress는 TCP 8080(본 서비스)과 TCP 8081(actuator 전용)
+// 두 규칙으로 분리한다. TCP 8080은 노드 /32와 자기 namespace만 열고 compose subnet에는 열지 않으며,
+// TCP 8081은 노드 /32(kubelet·호스트 Nginx probe), 계약 compose subnet, 자기 namespace만 연다.
 // 각 조건은 서로를 대신하지 않도록 독립적으로 검사한다.
 function renderMatchesObservability(value, observability, nodeInternalIp) {
   const policy = value?.candidateObjects?.find((object) => object?.kind === "NetworkPolicy");
   const ingress = policy?.spec?.ingress;
-  if (value?.activationPlan?.activeServiceTemplate?.spec?.clusterIP !== observability.activeService.clusterIP ||
+  const activePorts = value?.activationPlan?.activeServiceTemplate?.spec?.ports;
+  const managementPort = observability?.activeService?.managementPort;
+  if (value?.activationPlan?.activeServiceTemplate?.spec?.clusterIP !== observability?.activeService?.clusterIP ||
+    managementPort !== 8081 ||
+    !Array.isArray(activePorts) ||
+    !activePorts.some((port) =>
+      port?.name === "http" && port?.port === 8080 && port?.targetPort === 8080 && port?.nodePort === 32080) ||
+    !activePorts.some((port) =>
+      port?.name === "management" && port?.port === managementPort && port?.targetPort === managementPort) ||
     !Array.isArray(ingress) || ingress.length === 0) return false;
-  const onlyPort8080 = ingress.every((rule) =>
-    JSON.stringify(rule?.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }]));
-  const sources = ingress.flatMap((rule) => (Array.isArray(rule?.from) ? rule.from : [undefined]));
-  const allowedCidrs = new Set([`${nodeInternalIp}/32`, observability.composeNetwork.subnet]);
-  const ipBlocksAllowed = sources.every((source) => source?.ipBlock === undefined ||
-    allowedCidrs.has(source.ipBlock.cidr));
-  const noExcept = sources.every((source) => source?.ipBlock?.except === undefined);
+  const port8080Spec = JSON.stringify([{ protocol: "TCP", port: 8080 }]);
+  const managementPortSpec = JSON.stringify([{ protocol: "TCP", port: managementPort }]);
+  const httpRules = ingress.filter((rule) => JSON.stringify(rule?.ports) === port8080Spec);
+  const managementRules = ingress.filter((rule) => JSON.stringify(rule?.ports) === managementPortSpec);
+  if (httpRules.length === 0 || managementRules.length === 0 ||
+    httpRules.length + managementRules.length !== ingress.length) return false;
+  const httpSources = httpRules.flatMap((rule) => (Array.isArray(rule?.from) ? rule.from : [undefined]));
+  const managementSources = managementRules.flatMap((rule) => (Array.isArray(rule?.from) ? rule.from : [undefined]));
+  const allSources = [...httpSources, ...managementSources];
+  const httpIpBlocksAllowed = httpSources.every((source) =>
+    source?.ipBlock === undefined || source.ipBlock.cidr === `${nodeInternalIp}/32`);
+  const managementIpBlocksAllowed = managementSources.every((source) =>
+    source?.ipBlock === undefined ||
+    source.ipBlock.cidr === `${nodeInternalIp}/32` ||
+    source.ipBlock.cidr === observability.composeNetwork.subnet);
+  const noExcept = allSources.every((source) => source?.ipBlock?.except === undefined);
   const ownNamespaceSelector = JSON.stringify({
     namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } },
   });
-  const otherSourcesAllowed = sources.every((source) =>
+  const otherSourcesAllowed = allSources.every((source) =>
     source?.ipBlock !== undefined || JSON.stringify(source) === ownNamespaceSelector);
-  const subnetAdmitted = sources.some((source) => source?.ipBlock?.cidr === observability.composeNetwork.subnet);
-  return onlyPort8080 && ipBlocksAllowed && noExcept && otherSourcesAllowed && subnetAdmitted;
+  const nodeAdmittedOnHttp = httpSources.some(
+    (source) => source?.ipBlock?.cidr === `${nodeInternalIp}/32`,
+  );
+  const nodeAdmittedOnManagement = managementSources.some(
+    (source) => source?.ipBlock?.cidr === `${nodeInternalIp}/32`,
+  );
+  const subnetAdmitted = managementSources.some(
+    (source) => source?.ipBlock?.cidr === observability.composeNetwork.subnet,
+  );
+  return httpIpBlocksAllowed && managementIpBlocksAllowed && noExcept &&
+    otherSourcesAllowed && nodeAdmittedOnHttp && nodeAdmittedOnManagement && subnetAdmitted;
 }
 
 function validateRender(value, request, observability, nodeInternalIp) {
@@ -1467,15 +1505,28 @@ export function renderK3sNginxConfig(current) {
   const source = new TextDecoder("utf-8", { fatal: true }).decode(current);
   const composeTarget = "proxy_pass http://127.0.0.1:8080;";
   const k3sTarget = "proxy_pass http://127.0.0.1:32080;";
-  const composeTargetCount = source.split(composeTarget).length - 1;
-  const k3sTargetCount = source.split(k3sTarget).length - 1;
-  if (!((composeTargetCount === 3 && k3sTargetCount === 0) ||
-    (composeTargetCount === 0 && k3sTargetCount === 3))) {
+  const k3sManagementTarget = "proxy_pass http://10.43.11.187:8081;";
+  const healthLocationPattern = /(location\s*=\s*\/actuator\/health\/(?:readiness|liveness)\s*\{[^}]*?)proxy_pass http:\/\/(?:127\.0\.0\.1:(?:8080|32080)|10\.43\.11\.187:8081);([^}]*\})/g;
+  let healthMatchCount = 0;
+  const withManagementProbes = source.replace(healthLocationPattern, (_match, prefix, suffix) => {
+    healthMatchCount += 1;
+    return `${prefix}${k3sManagementTarget}${suffix}`;
+  });
+  if (healthMatchCount !== 2) {
     throw new Error("installed Nginx backend target does not match the cutover contract");
   }
-  return composeTargetCount === 3
-    ? Buffer.from(source.replaceAll(composeTarget, k3sTarget), "utf8")
-    : Buffer.from(current);
+  const composeTargetCount = withManagementProbes.split(composeTarget).length - 1;
+  const k3sTargetCount = withManagementProbes.split(k3sTarget).length - 1;
+  if (!((composeTargetCount === 1 && k3sTargetCount === 0) ||
+    (composeTargetCount === 0 && k3sTargetCount === 1) ||
+    (composeTargetCount === 4 && k3sTargetCount === 0) ||
+    (composeTargetCount === 0 && k3sTargetCount === 4))) {
+    throw new Error("installed Nginx backend target does not match the cutover contract");
+  }
+  const rendered = composeTargetCount > 0
+    ? withManagementProbes.replaceAll(composeTarget, k3sTarget)
+    : withManagementProbes;
+  return rendered === source ? Buffer.from(current) : Buffer.from(rendered, "utf8");
 }
 
 function validTimestamp(value) {

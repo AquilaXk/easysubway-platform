@@ -152,6 +152,7 @@ test("renderer produces deterministic source-free candidate objects and an inact
     rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION,
     input.releaseTuple.deploymentRevision,
   );
+  assert.equal(rendered.configPlan.overrides.EASYSUBWAY_MANAGEMENT_PORT, "8081");
   assert.equal(
     rendered.configPlan.overrides.EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_PATH,
     "/etc/easysubway/journey-profile-resource-policy.json",
@@ -219,6 +220,10 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.deepEqual(pod.nodeSelector, { "kubernetes.io/arch": "arm64" });
   assert.deepEqual(pod.securityContext, { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: "RuntimeDefault" } });
   assert.equal(container.image, `ghcr.io/aquilaxk/easysubway-backend@${input.releaseTuple.backendImageDigest}`);
+  assert.deepEqual(container.ports, [
+    { name: "http", containerPort: 8080, protocol: "TCP" },
+    { name: "management", containerPort: 8081, protocol: "TCP" },
+  ]);
   assert.equal(container.securityContext.readOnlyRootFilesystem, true);
   assert.equal(container.securityContext.allowPrivilegeEscalation, false);
   assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
@@ -247,11 +252,18 @@ test("renderer produces deterministic source-free candidate objects and an inact
     emptyDir: { medium: "Memory", sizeLimit: "256Mi" },
   });
   for (const probe of [container.startupProbe, container.readinessProbe, container.livenessProbe]) {
-    assert.equal(probe.httpGet.port, 8080);
+    assert.equal(probe.httpGet.port, 8081);
   }
   const startupBudgetSeconds = container.startupProbe.initialDelaySeconds
     + (container.startupProbe.periodSeconds * container.startupProbe.failureThreshold);
   assert.ok(startupBudgetSeconds < deployment.spec.progressDeadlineSeconds);
+
+  const candidateService = objects.find(({ kind, metadata }) =>
+    kind === "Service" && metadata.name === rendered.activationPlan.candidateServiceName);
+  assert.deepEqual(candidateService.spec.ports, [
+    { name: "http", port: 8080, protocol: "TCP", targetPort: 8080 },
+    { name: "management", port: 8081, protocol: "TCP", targetPort: 8081 },
+  ]);
 
   const postgresSlice = objects.find(({ kind, metadata }) => kind === "EndpointSlice" && metadata.name === "journey-postgres-v1");
   const objectSlice = objects.find(({ kind, metadata }) => kind === "EndpointSlice" && metadata.name === "journey-object-storage-v1");
@@ -281,7 +293,10 @@ test("renderer produces deterministic source-free candidate objects and an inact
   assert.equal(egressAllows(networkPolicy, "203.0.113.10", 443), true);
 
   assert.equal(rendered.activationPlan.activeServiceTemplate.spec.type, "NodePort");
-  assert.equal(rendered.activationPlan.activeServiceTemplate.spec.ports[0].nodePort, 32080);
+  assert.deepEqual(rendered.activationPlan.activeServiceTemplate.spec.ports, [
+    { name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 },
+    { name: "management", port: 8081, protocol: "TCP", targetPort: 8081 },
+  ]);
   assert.deepEqual(rendered.activationPlan.nodePortAddresses, ["127.0.0.0/8"]);
   assert.equal(
     rendered.activationPlan.candidateProbeBoundary,

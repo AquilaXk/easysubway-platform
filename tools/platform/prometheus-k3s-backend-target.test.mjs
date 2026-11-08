@@ -61,30 +61,41 @@ test("observability contract pins the compose network subnet and the active Serv
   assert.equal(contract.activeService.namespace, "easysubway-journey");
   assert.match(contract.activeService.clusterIP, /^(?:\d{1,3}\.){3}\d{1,3}$/);
   assert.equal(contract.activeService.port, 8080);
+  assert.equal(contract.activeService.managementPort, 8081);
 });
 
-test("rendered active Service pins the contract ClusterIP and NetworkPolicy admits only the compose subnet on 8080", () => {
+test("rendered active Service exposes HTTP and management ports and NetworkPolicy admits the compose subnet only on the management port", () => {
   const contract = observabilityContract();
   const rendered = render();
   const active = rendered.activationPlan.activeServiceTemplate;
   assert.equal(active.metadata.name, contract.activeService.name);
   assert.equal(active.metadata.namespace, contract.activeService.namespace);
   assert.equal(active.spec.clusterIP, contract.activeService.clusterIP);
-  assert.equal(active.spec.ports[0].port, contract.activeService.port);
+  assert.deepEqual(active.spec.ports, [
+    { name: "http", port: contract.activeService.port, protocol: "TCP", targetPort: contract.activeService.port, nodePort: 32080 },
+    { name: "management", port: contract.activeService.managementPort, protocol: "TCP", targetPort: contract.activeService.managementPort },
+  ]);
 
-  // 보안 경계(F1): ingress 출처는 정확히 [namespace, 노드 /32, 계약 subnet]이고 포트는 TCP 8080 하나뿐이다.
+  // 보안 경계(F1, Issue #225): TCP 8080은 [namespace, 노드 /32]에만 열고, compose subnet은 management 포트(8081)에만 연다.
   // egress는 Issue #221 이전 규칙과 정확히 같아야 한다(관측 경로 추가가 egress를 넓히지 않는다).
   const policy = rendered.candidateObjects.find(({ kind }) => kind === "NetworkPolicy");
-  assert.deepEqual(policy.spec.ingress, [{
-    from: [
-      { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
-      { ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } },
-      { ipBlock: { cidr: contract.composeNetwork.subnet } },
-    ],
-    ports: [{ protocol: "TCP", port: 8080 }],
-  }]);
-  assert.ok(policy.spec.ingress.every((rule) =>
-    JSON.stringify(rule.ports) === JSON.stringify([{ protocol: "TCP", port: 8080 }])));
+  assert.deepEqual(policy.spec.ingress, [
+    {
+      from: [
+        { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+        { ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } },
+      ],
+      ports: [{ protocol: "TCP", port: contract.activeService.port }],
+    },
+    {
+      from: [
+        { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+        { ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } },
+        { ipBlock: { cidr: contract.composeNetwork.subnet } },
+      ],
+      ports: [{ protocol: "TCP", port: contract.activeService.managementPort }],
+    },
+  ]);
   assert.deepEqual(policy.spec.egress, [
     {
       to: [{ ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } }],
@@ -106,10 +117,12 @@ test("rendered active Service pins the contract ClusterIP and NetworkPolicy admi
   ]);
 });
 
-test("Prometheus backend probe and app metrics scrape target the rendered active Service", () => {
+test("Prometheus backend probe and app metrics scrape target the rendered active Service management port", () => {
   const contract = observabilityContract();
   const active = render().activationPlan.activeServiceTemplate;
-  const address = `${active.spec.clusterIP}:${active.spec.ports[0].port}`;
+  const managementPort = active.spec.ports.find(({ name }) => name === "management")?.port;
+  assert.equal(managementPort, contract.activeService.managementPort);
+  const address = `${active.spec.clusterIP}:${managementPort}`;
   const jobs = scrapeTargetsByJob(readText("infra/prometheus/prometheus.yml"));
 
   assert.deepEqual(jobs.get("easysubway-backend"), [`http://${address}/actuator/health/readiness`]);
@@ -128,12 +141,12 @@ test("no Prometheus scrape target points at a compose backend that K3s activatio
   }
 });
 
-test("backend scrape down alerts still fire and no longer describe the drained compose backend", () => {
+test("backend scrape down alerts still fire and no longer describe the drained compose backend or main HTTP port", () => {
   const alerts = readText("infra/prometheus/alerts.yml");
   const alertTests = readText("infra/prometheus/alerts.test.yml");
   assert.match(alerts, /expr: min\(up\{job="backend_app_metrics"\}\) < 1/);
-  assert.doesNotMatch(alerts, /backend:8080/);
-  assert.doesNotMatch(alertTests, /backend:8080/);
+  assert.doesNotMatch(alerts, /backend:8080|ClusterIP:8080|10\.43\.11\.187:8080/);
+  assert.doesNotMatch(alertTests, /backend:8080|ClusterIP:8080|10\.43\.11\.187:8080/);
   assert.match(alertTests, /name: backend app metrics scrape down fires dead-mans switch/);
   // F4: probe 경로 실패는 dead-man 경보와 별개의 probe_success 경보로 드러난다.
   assert.match(alerts, /- alert: AquilaBackendReadinessProbeFailed\n\s+expr: min\(probe_success\{job="easysubway-backend"\}\) < 1\n\s+for: 5m/);
