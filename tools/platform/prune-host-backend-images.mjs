@@ -43,9 +43,14 @@ async function defaultCommandRunner(command, args) {
 
 export function isBackendImageReference(image) {
   if (typeof image !== "string" || image.trim() === "") return false;
-  const repository = image.trim().split("@")[0].replace(/:[^/]*$/, "");
-  const lastSegment = repository.split("/").pop() ?? "";
-  return lastSegment.startsWith("easysubway-backend");
+  const withoutDigest = image.trim().split("@")[0];
+  const lastSlashIndex = withoutDigest.lastIndexOf("/");
+  const lastSegmentWithTag =
+    lastSlashIndex >= 0 ? withoutDigest.slice(lastSlashIndex + 1) : withoutDigest;
+  const colonIndex = lastSegmentWithTag.indexOf(":");
+  const repoName =
+    colonIndex >= 0 ? lastSegmentWithTag.slice(0, colonIndex) : lastSegmentWithTag;
+  return repoName.startsWith("easysubway-backend");
 }
 
 function normalizeDigest(value) {
@@ -80,30 +85,36 @@ function recordImageReference(rawValue, protectedDigests, protectedImageIds) {
   }
 }
 
+function collectPodSpecImages(pod, protectedDigests, protectedImageIds) {
+  const specContainers = [
+    ...(pod?.spec?.containers ?? []),
+    ...(pod?.spec?.initContainers ?? []),
+    ...(pod?.spec?.ephemeralContainers ?? []),
+  ];
+  for (const container of specContainers) {
+    recordImageReference(container?.image, protectedDigests, protectedImageIds);
+  }
+}
+
+function collectPodStatusImages(pod, protectedDigests, protectedImageIds) {
+  const statusContainers = [
+    ...(pod?.status?.containerStatuses ?? []),
+    ...(pod?.status?.initContainerStatuses ?? []),
+    ...(pod?.status?.ephemeralContainerStatuses ?? []),
+  ];
+  for (const status of statusContainers) {
+    recordImageReference(status?.image, protectedDigests, protectedImageIds);
+    recordImageReference(status?.imageID, protectedDigests, protectedImageIds);
+  }
+}
+
 function collectPodProtection(podsPayload, protectedDigests, protectedImageIds) {
   const pods = Array.isArray(podsPayload?.items) ? podsPayload.items : [];
   for (const pod of pods) {
     const phase = pod?.status?.phase;
     if (phase === "Succeeded" || phase === "Failed") continue;
-
-    const specContainers = [
-      ...(pod?.spec?.containers ?? []),
-      ...(pod?.spec?.initContainers ?? []),
-      ...(pod?.spec?.ephemeralContainers ?? []),
-    ];
-    for (const container of specContainers) {
-      recordImageReference(container?.image, protectedDigests, protectedImageIds);
-    }
-
-    const statusContainers = [
-      ...(pod?.status?.containerStatuses ?? []),
-      ...(pod?.status?.initContainerStatuses ?? []),
-      ...(pod?.status?.ephemeralContainerStatuses ?? []),
-    ];
-    for (const status of statusContainers) {
-      recordImageReference(status?.image, protectedDigests, protectedImageIds);
-      recordImageReference(status?.imageID, protectedDigests, protectedImageIds);
-    }
+    collectPodSpecImages(pod, protectedDigests, protectedImageIds);
+    collectPodStatusImages(pod, protectedDigests, protectedImageIds);
   }
 }
 
@@ -120,6 +131,95 @@ function extractConfigMapBackendDigest(configMap) {
   return null;
 }
 
+function collectServiceProtectionItem(item, currentActiveToken, protectedDigests, protectedImageIds) {
+  const annotations = item?.metadata?.annotations;
+  recordImageReference(
+    annotations?.["easysubway.io/backend-image-digest"],
+    protectedDigests,
+    protectedImageIds,
+  );
+  recordImageReference(
+    annotations?.["easysubway.io/previous-backend-image-digest"],
+    protectedDigests,
+    protectedImageIds,
+  );
+  if ((item?.metadata?.name ?? "") !== ACTIVE_SERVICE_NAME) {
+    return currentActiveToken;
+  }
+  const selector = item?.spec?.selector ?? {};
+  return (
+    selector["easysubway.io/candidate-token"] ??
+    selector["easysubway.io/candidate"] ??
+    currentActiveToken
+  );
+}
+
+function collectDeploymentProtectionItem(item, protectedDigests, protectedImageIds) {
+  recordImageReference(
+    item?.metadata?.annotations?.["easysubway.io/backend-image-digest"],
+    protectedDigests,
+    protectedImageIds,
+  );
+  recordImageReference(
+    item?.spec?.template?.metadata?.annotations?.["easysubway.io/backend-image-digest"],
+    protectedDigests,
+    protectedImageIds,
+  );
+  const containers = [
+    ...(item?.spec?.template?.spec?.containers ?? []),
+    ...(item?.spec?.template?.spec?.initContainers ?? []),
+  ];
+  for (const container of containers) {
+    recordImageReference(container?.image, protectedDigests, protectedImageIds);
+  }
+}
+
+function isCandidateConfigMap(item) {
+  const name = item?.metadata?.name ?? "";
+  return name.startsWith(CONFIG_NAME_PREFIX);
+}
+
+function collectCandidateConfigMapProtection(
+  items,
+  activeToken,
+  protectedDigests,
+  protectedImageIds,
+) {
+  const candidateConfigMaps = items.filter(isCandidateConfigMap);
+  const inactiveWithDigest = [];
+
+  for (let index = 0; index < candidateConfigMaps.length; index += 1) {
+    const cm = candidateConfigMaps[index];
+    const token = cm.metadata.name.slice(CONFIG_NAME_PREFIX.length);
+    const digest = extractConfigMapBackendDigest(cm);
+    if (!digest) continue;
+
+    if (activeToken && token === activeToken) {
+      protectedDigests.add(digest);
+      protectedImageIds.add(digest);
+      continue;
+    }
+    const parsedTs = Date.parse(cm?.metadata?.creationTimestamp ?? "");
+    inactiveWithDigest.push({
+      digest,
+      timestampMs: Number.isFinite(parsedTs) ? parsedTs : -Infinity,
+      index,
+    });
+  }
+
+  inactiveWithDigest.sort((left, right) =>
+    right.timestampMs !== left.timestampMs
+      ? right.timestampMs - left.timestampMs
+      : right.index - left.index,
+  );
+
+  const protectFromInactiveCount = activeToken ? 1 : 2;
+  for (const entry of inactiveWithDigest.slice(0, protectFromInactiveCount)) {
+    protectedDigests.add(entry.digest);
+    protectedImageIds.add(entry.digest);
+  }
+}
+
 function collectJourneyResourceProtection(journeyPayload, protectedDigests, protectedImageIds) {
   const items = Array.isArray(journeyPayload?.items) ? journeyPayload.items : [];
   let activeToken = null;
@@ -128,83 +228,50 @@ function collectJourneyResourceProtection(journeyPayload, protectedDigests, prot
     const kind = item?.kind ?? "";
     const name = item?.metadata?.name ?? "";
     if (kind === "Service" || name === ACTIVE_SERVICE_NAME) {
-      if (name === ACTIVE_SERVICE_NAME) {
-        const selector = item?.spec?.selector ?? {};
-        activeToken =
-          selector["easysubway.io/candidate-token"] ??
-          selector["easysubway.io/candidate"] ??
-          activeToken;
-      }
-      recordImageReference(
-        item?.metadata?.annotations?.["easysubway.io/backend-image-digest"],
-        protectedDigests,
-        protectedImageIds,
-      );
-      recordImageReference(
-        item?.metadata?.annotations?.["easysubway.io/previous-backend-image-digest"],
+      activeToken = collectServiceProtectionItem(
+        item,
+        activeToken,
         protectedDigests,
         protectedImageIds,
       );
     } else if (kind === "Deployment" || name.startsWith("journey-candidate-")) {
-      recordImageReference(
-        item?.metadata?.annotations?.["easysubway.io/backend-image-digest"],
-        protectedDigests,
-        protectedImageIds,
-      );
-      recordImageReference(
-        item?.spec?.template?.metadata?.annotations?.["easysubway.io/backend-image-digest"],
-        protectedDigests,
-        protectedImageIds,
-      );
-      const containers = [
-        ...(item?.spec?.template?.spec?.containers ?? []),
-        ...(item?.spec?.template?.spec?.initContainers ?? []),
-      ];
-      for (const container of containers) {
-        recordImageReference(container?.image, protectedDigests, protectedImageIds);
-      }
+      collectDeploymentProtectionItem(item, protectedDigests, protectedImageIds);
     }
   }
 
-  const candidateConfigMaps = items.filter((item) => {
-    const name = item?.metadata?.name ?? "";
-    return (item?.kind === "ConfigMap" || name.startsWith(CONFIG_NAME_PREFIX)) &&
-      name.startsWith(CONFIG_NAME_PREFIX);
-  });
+  collectCandidateConfigMapProtection(items, activeToken, protectedDigests, protectedImageIds);
+}
 
-  const inactiveWithDigest = [];
-  for (let index = 0; index < candidateConfigMaps.length; index += 1) {
-    const cm = candidateConfigMaps[index];
-    const name = cm.metadata.name;
-    const token = name.slice(CONFIG_NAME_PREFIX.length);
-    const digest = extractConfigMapBackendDigest(cm);
-    if (!digest) continue;
-
-    if (activeToken && token === activeToken) {
-      protectedDigests.add(digest);
-      protectedImageIds.add(digest);
-    } else {
-      const parsedTs = Date.parse(cm?.metadata?.creationTimestamp ?? "");
-      inactiveWithDigest.push({
-        token,
-        digest,
-        timestampMs: Number.isFinite(parsedTs) ? parsedTs : -Infinity,
-        index,
-      });
-    }
+function assertSingleTargetSafe(
+  target,
+  normalizedProtectedDigests,
+  normalizedProtectedIds,
+) {
+  const rawId = typeof target === "string" ? target : target?.id;
+  const normalizedId = normalizeImageId(rawId);
+  const isProtectedId =
+    !rawId ||
+    normalizedProtectedIds.has(normalizedId) ||
+    normalizedProtectedIds.has(String(rawId).toLowerCase()) ||
+    normalizedProtectedDigests.has(normalizedId);
+  if (isProtectedId) {
+    fail(
+      "E_IMAGE_PRUNE_PROTECTED_TARGET",
+      `refusing to prune protected image ID: ${String(rawId)}`,
+    );
   }
-
-  inactiveWithDigest.sort((left, right) => {
-    if (right.timestampMs !== left.timestampMs) {
-      return right.timestampMs - left.timestampMs;
+  const digests = Array.isArray(target?.digests) ? target.digests : [];
+  for (const digestValue of digests) {
+    const normalizedDigest = normalizeDigest(digestValue) ?? String(digestValue).toLowerCase();
+    if (
+      normalizedProtectedDigests.has(normalizedDigest) ||
+      normalizedProtectedIds.has(normalizedDigest)
+    ) {
+      fail(
+        "E_IMAGE_PRUNE_PROTECTED_TARGET",
+        `refusing to prune image ${rawId} with protected digest ${digestValue}`,
+      );
     }
-    return right.index - left.index;
-  });
-
-  const protectFromInactiveCount = activeToken ? 1 : 2;
-  for (const entry of inactiveWithDigest.slice(0, protectFromInactiveCount)) {
-    protectedDigests.add(entry.digest);
-    protectedImageIds.add(entry.digest);
   }
 }
 
@@ -221,34 +288,8 @@ export function assertSafeImagePruneTargets(
   const normalizedProtectedIds = new Set(
     [...protectedImageIds].map((id) => normalizeImageId(id) ?? String(id).toLowerCase()),
   );
-
   for (const target of targets) {
-    const rawId = typeof target === "string" ? target : target?.id;
-    const normalizedId = normalizeImageId(rawId);
-    if (
-      !rawId ||
-      normalizedProtectedIds.has(normalizedId) ||
-      normalizedProtectedIds.has(String(rawId).toLowerCase()) ||
-      normalizedProtectedDigests.has(normalizedId)
-    ) {
-      fail(
-        "E_IMAGE_PRUNE_PROTECTED_TARGET",
-        `refusing to prune protected image ID: ${String(rawId)}`,
-      );
-    }
-    const digests = Array.isArray(target?.digests) ? target.digests : [];
-    for (const digestValue of digests) {
-      const normalizedDigest = normalizeDigest(digestValue) ?? String(digestValue).toLowerCase();
-      if (
-        normalizedProtectedDigests.has(normalizedDigest) ||
-        normalizedProtectedIds.has(normalizedDigest)
-      ) {
-        fail(
-          "E_IMAGE_PRUNE_PROTECTED_TARGET",
-          `refusing to prune image ${rawId} with protected digest ${digestValue}`,
-        );
-      }
-    }
+    assertSingleTargetSafe(target, normalizedProtectedDigests, normalizedProtectedIds);
   }
 }
 
@@ -276,45 +317,13 @@ function isImageProtected(entry, protectedDigests, protectedImageIds) {
   return false;
 }
 
-function planCrictlBackendImagePrune(
-  crictlPayload,
+function partitionBackendImageRetention(
+  byId,
   { keepCount, protectedDigests, protectedImageIds },
 ) {
-  const rawImages = Array.isArray(crictlPayload?.images) ? crictlPayload.images : [];
-  const byId = new Map();
-
-  for (const img of rawImages) {
-    const id = typeof img?.id === "string" ? img.id.trim() : "";
-    if (!id) continue;
-    const repoTags = Array.isArray(img?.repoTags) ? img.repoTags : [];
-    const repoDigests = Array.isArray(img?.repoDigests) ? img.repoDigests : [];
-    const refs = [...repoTags, ...repoDigests];
-    if (!refs.some(isBackendImageReference)) continue;
-
-    const extractedDigests = new Set();
-    for (const ref of repoDigests) {
-      const matches = String(ref).match(EMBEDDED_DIGEST_PATTERN) ?? [];
-      for (const match of matches) {
-        extractedDigests.add(match.toLowerCase());
-      }
-    }
-
-    const existing = byId.get(id);
-    if (existing) {
-      for (const d of extractedDigests) existing.digests.add(d);
-      if (img?.pinned === true) existing.pinned = true;
-    } else {
-      byId.set(id, {
-        id,
-        pinned: img?.pinned === true,
-        digests: extractedDigests,
-      });
-    }
-  }
-
   const backendImages = [...byId.values()].map((entry) => ({
     id: entry.id,
-    pinned: entry.pinned,
+    pinned: Boolean(entry.pinned),
     digests: [...entry.digests],
   }));
 
@@ -342,6 +351,75 @@ function planCrictlBackendImagePrune(
   };
 }
 
+function extractEmbeddedDigests(repoDigests) {
+  const extractedDigests = new Set();
+  for (const ref of repoDigests) {
+    const matches = String(ref).match(EMBEDDED_DIGEST_PATTERN) ?? [];
+    for (const match of matches) {
+      extractedDigests.add(match.toLowerCase());
+    }
+  }
+  return extractedDigests;
+}
+
+function addCrictlBackendImageEntry(byId, img) {
+  const id = typeof img?.id === "string" ? img.id.trim() : "";
+  if (!id) return;
+  const repoTags = Array.isArray(img?.repoTags) ? img.repoTags : [];
+  const repoDigests = Array.isArray(img?.repoDigests) ? img.repoDigests : [];
+  if (![...repoTags, ...repoDigests].some(isBackendImageReference)) return;
+
+  const extractedDigests = extractEmbeddedDigests(repoDigests);
+  const existing = byId.get(id);
+  if (existing) {
+    for (const d of extractedDigests) existing.digests.add(d);
+    if (img?.pinned === true) existing.pinned = true;
+    return;
+  }
+  byId.set(id, {
+    id,
+    pinned: img?.pinned === true,
+    digests: extractedDigests,
+  });
+}
+
+function planCrictlBackendImagePrune(
+  crictlPayload,
+  { keepCount, protectedDigests, protectedImageIds },
+) {
+  const rawImages = Array.isArray(crictlPayload?.images) ? crictlPayload.images : [];
+  const byId = new Map();
+  for (const img of rawImages) {
+    addCrictlBackendImageEntry(byId, img);
+  }
+  return partitionBackendImageRetention(byId, {
+    keepCount,
+    protectedDigests,
+    protectedImageIds,
+  });
+}
+
+function addDockerBackendImageLine(byId, line) {
+  const [repository = "", id = "", rawDigest = ""] = line.split("\t");
+  const trimmedRepo = repository.trim();
+  const trimmedId = id.trim();
+  if (!trimmedId || !isBackendImageReference(trimmedRepo)) return;
+
+  const normalizedDigest = normalizeDigest(rawDigest);
+  const existing = byId.get(trimmedId);
+  if (existing) {
+    if (normalizedDigest) existing.digests.add(normalizedDigest);
+    return;
+  }
+  const digests = new Set();
+  if (normalizedDigest) digests.add(normalizedDigest);
+  byId.set(trimmedId, {
+    id: trimmedId,
+    pinned: false,
+    digests,
+  });
+}
+
 function planDockerBackendImagePrune(
   dockerImagesStdout,
   { keepCount, protectedDigests, protectedImageIds },
@@ -353,53 +431,13 @@ function planDockerBackendImagePrune(
 
   const byId = new Map();
   for (const line of lines) {
-    const [repository = "", id = "", rawDigest = ""] = line.split("\t");
-    const trimmedRepo = repository.trim();
-    const trimmedId = id.trim();
-    if (!trimmedId || !isBackendImageReference(trimmedRepo)) continue;
-
-    const normalizedDigest = normalizeDigest(rawDigest);
-    const existing = byId.get(trimmedId);
-    if (existing) {
-      if (normalizedDigest) existing.digests.add(normalizedDigest);
-    } else {
-      const digests = new Set();
-      if (normalizedDigest) digests.add(normalizedDigest);
-      byId.set(trimmedId, {
-        id: trimmedId,
-        digests,
-      });
-    }
+    addDockerBackendImageLine(byId, line);
   }
-
-  const backendImages = [...byId.values()].map((entry) => ({
-    id: entry.id,
-    pinned: false,
-    digests: [...entry.digests],
-  }));
-
-  const keptImageIds = [];
-  const pruneTargets = [];
-
-  for (let index = 0; index < backendImages.length; index += 1) {
-    const entry = backendImages[index];
-    const withinKeepCount = index < keepCount;
-    const protectedEntry = isImageProtected(entry, protectedDigests, protectedImageIds);
-    if (withinKeepCount || protectedEntry) {
-      keptImageIds.push(entry.id);
-    } else {
-      pruneTargets.push(entry);
-    }
-  }
-
-  assertSafeImagePruneTargets(pruneTargets, { protectedDigests, protectedImageIds });
-
-  return {
-    totalBackendImages: backendImages.length,
-    keptImageIds,
-    pruneTargets,
-    pruneTargetIds: pruneTargets.map((entry) => entry.id),
-  };
+  return partitionBackendImageRetention(byId, {
+    keepCount,
+    protectedDigests,
+    protectedImageIds,
+  });
 }
 
 function validateOptions({ mode, keepCount, activeDigest, previousDigest }) {
@@ -420,42 +458,64 @@ function validateOptions({ mode, keepCount, activeDigest, previousDigest }) {
   }
 }
 
-export async function pruneHostBackendImages({
-  mode = "DRY_RUN",
-  keepCount = DEFAULT_KEEP_COUNT,
-  activeDigest = undefined,
-  previousDigest = undefined,
-  bestEffort = false,
-  commandRunner = defaultCommandRunner,
-  kubectlPrefix = ["sudo", "--non-interactive", "k3s", "kubectl"],
-  crictlPrefix = ["sudo", "--non-interactive", "k3s", "crictl"],
-  dockerPrefix = ["docker"],
-} = {}) {
-  validateOptions({ mode, keepCount, activeDigest, previousDigest });
+function runSequentially(items, asyncAction) {
+  return items.reduce(
+    (chain, item) => chain.then(() => asyncAction(item)),
+    Promise.resolve(),
+  );
+}
 
-  const protectedDigests = new Set();
-  const protectedImageIds = new Set();
-  const warnings = [];
+function formatErrorMessage(error) {
+  return error?.message ?? String(error);
+}
 
-  if (activeDigest) {
-    const normalized = normalizeDigest(activeDigest);
-    protectedDigests.add(normalized);
-    protectedImageIds.add(normalized);
+async function removeSingleTarget({
+  target,
+  execFn,
+  argsPrefix,
+  removedIds,
+  bestEffort,
+  errorCode,
+  errorLabel,
+  warningPrefix,
+  warnings,
+}) {
+  try {
+    await execFn([...argsPrefix, target.id]);
+    removedIds.push(target.id);
+  } catch (rmiError) {
+    if (!bestEffort) {
+      fail(
+        errorCode,
+        `failed to remove ${errorLabel} image ${target.id}: ${formatErrorMessage(rmiError)}`,
+        rmiError,
+      );
+    }
+    warnings.push(`${warningPrefix} failed for ${target.id}: ${formatErrorMessage(rmiError)}`);
   }
-  if (previousDigest) {
-    const normalized = normalizeDigest(previousDigest);
-    protectedDigests.add(normalized);
-    protectedImageIds.add(normalized);
+}
+
+function handleSubsystemError(error, { bestEffort, errorCode, errorPrefix, skipPrefix, warnings }) {
+  if (error instanceof HostBackendImagePruneError && error.code === "E_IMAGE_PRUNE_PROTECTED_TARGET") {
+    throw error;
   }
+  if (!bestEffort) {
+    if (error instanceof HostBackendImagePruneError) throw error;
+    fail(errorCode, `${errorPrefix}: ${formatErrorMessage(error)}`, error);
+  }
+  warnings.push(`${skipPrefix}: ${formatErrorMessage(error)}`);
+}
 
-  const [kubectlCmd, ...kubectlBaseArgs] = kubectlPrefix;
-  const [crictlCmd, ...crictlBaseArgs] = crictlPrefix;
-  const [dockerCmd, ...dockerBaseArgs] = dockerPrefix;
-
-  const kubectlExec = (args) => commandRunner(kubectlCmd, [...kubectlBaseArgs, ...args]);
-  const crictlExec = (args) => commandRunner(crictlCmd, [...crictlBaseArgs, ...args]);
-  const dockerExec = (args) => commandRunner(dockerCmd, [...dockerBaseArgs, ...args]);
-
+async function executeK3sBackendImagePrune({
+  mode,
+  keepCount,
+  bestEffort,
+  kubectlExec,
+  crictlExec,
+  protectedDigests,
+  protectedImageIds,
+  warnings,
+}) {
   let k3sPlan = {
     totalBackendImages: 0,
     keptImageIds: [],
@@ -483,39 +543,82 @@ export async function pruneHostBackendImages({
     });
 
     if (mode === "EXECUTE") {
-      for (const target of k3sPlan.pruneTargets) {
-        try {
-          await crictlExec(["rmi", target.id]);
-          k3sRemovedImageIds.push(target.id);
-        } catch (rmiError) {
-          if (!bestEffort) {
-            fail(
-              "E_IMAGE_PRUNE_K3S_RMI_FAILED",
-              `failed to remove K3s image ${target.id}: ${rmiError?.message ?? String(rmiError)}`,
-              rmiError,
-            );
-          }
-          warnings.push(
-            `k3s crictl rmi failed for ${target.id}: ${rmiError?.message ?? String(rmiError)}`,
-          );
-        }
-      }
-    }
-  } catch (k3sError) {
-    if (k3sError instanceof HostBackendImagePruneError && k3sError.code === "E_IMAGE_PRUNE_PROTECTED_TARGET") {
-      throw k3sError;
-    }
-    if (!bestEffort) {
-      if (k3sError instanceof HostBackendImagePruneError) throw k3sError;
-      fail(
-        "E_IMAGE_PRUNE_K3S_FAILED",
-        `K3s image prune failed: ${k3sError?.message ?? String(k3sError)}`,
-        k3sError,
+      await runSequentially(k3sPlan.pruneTargets, (target) =>
+        removeSingleTarget({
+          target,
+          execFn: crictlExec,
+          argsPrefix: ["rmi"],
+          removedIds: k3sRemovedImageIds,
+          bestEffort,
+          errorCode: "E_IMAGE_PRUNE_K3S_RMI_FAILED",
+          errorLabel: "K3s",
+          warningPrefix: "k3s crictl rmi",
+          warnings,
+        }),
       );
     }
-    warnings.push(`K3s image inspection/prune skipped: ${k3sError?.message ?? String(k3sError)}`);
+  } catch (k3sError) {
+    handleSubsystemError(k3sError, {
+      bestEffort,
+      errorCode: "E_IMAGE_PRUNE_K3S_FAILED",
+      errorPrefix: "K3s image prune failed",
+      skipPrefix: "K3s image inspection/prune skipped",
+      warnings,
+    });
   }
 
+  return { k3sPlan, k3sRemovedImageIds };
+}
+
+async function collectRunningDockerImages(dockerExec, protectedDigests, protectedImageIds) {
+  const psRes = await dockerExec(["ps", "-q"]);
+  const runningContainerIds = String(psRes?.stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (runningContainerIds.length === 0) return;
+
+  const inspectRes = await dockerExec([
+    "inspect",
+    "--format",
+    "{{.Image}}",
+    ...runningContainerIds,
+  ]);
+  const runningImageIds = String(inspectRes?.stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const runningImageId of runningImageIds) {
+    recordImageReference(runningImageId, protectedDigests, protectedImageIds);
+  }
+}
+
+async function runDockerDanglingPrune(dockerExec, bestEffort, warnings) {
+  try {
+    await dockerExec(["image", "prune", "-f"]);
+    return true;
+  } catch (pruneError) {
+    if (!bestEffort) {
+      fail(
+        "E_IMAGE_PRUNE_DOCKER_PRUNE_FAILED",
+        `docker image prune -f failed: ${formatErrorMessage(pruneError)}`,
+        pruneError,
+      );
+    }
+    warnings.push(`docker image prune -f failed: ${formatErrorMessage(pruneError)}`);
+    return false;
+  }
+}
+
+async function executeDockerBackendImagePrune({
+  mode,
+  keepCount,
+  bestEffort,
+  dockerExec,
+  protectedDigests,
+  protectedImageIds,
+  warnings,
+}) {
   let dockerPlan = {
     totalBackendImages: 0,
     keptImageIds: [],
@@ -526,28 +629,7 @@ export async function pruneHostBackendImages({
   let dockerDanglingPruned = false;
 
   try {
-    const psRes = await dockerExec(["ps", "-q"]);
-    const runningContainerIds = String(psRes?.stdout ?? "")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (runningContainerIds.length > 0) {
-      const inspectRes = await dockerExec([
-        "inspect",
-        "--format",
-        "{{.Image}}",
-        ...runningContainerIds,
-      ]);
-      const runningImageIds = String(inspectRes?.stdout ?? "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
-      for (const runningImageId of runningImageIds) {
-        recordImageReference(runningImageId, protectedDigests, protectedImageIds);
-      }
-    }
-
+    await collectRunningDockerImages(dockerExec, protectedDigests, protectedImageIds);
     const imagesRes = await dockerExec([
       "images",
       "--no-trunc",
@@ -561,57 +643,90 @@ export async function pruneHostBackendImages({
     });
 
     if (mode === "EXECUTE") {
-      for (const target of dockerPlan.pruneTargets) {
-        try {
-          await dockerExec(["rmi", "-f", target.id]);
-          dockerRemovedImageIds.push(target.id);
-        } catch (rmiError) {
-          if (!bestEffort) {
-            fail(
-              "E_IMAGE_PRUNE_DOCKER_RMI_FAILED",
-              `failed to remove Docker image ${target.id}: ${rmiError?.message ?? String(rmiError)}`,
-              rmiError,
-            );
-          }
-          warnings.push(
-            `docker rmi -f failed for ${target.id}: ${rmiError?.message ?? String(rmiError)}`,
-          );
-        }
-      }
-
-      try {
-        await dockerExec(["image", "prune", "-f"]);
-        dockerDanglingPruned = true;
-      } catch (pruneError) {
-        if (!bestEffort) {
-          fail(
-            "E_IMAGE_PRUNE_DOCKER_PRUNE_FAILED",
-            `docker image prune -f failed: ${pruneError?.message ?? String(pruneError)}`,
-            pruneError,
-          );
-        }
-        warnings.push(`docker image prune -f failed: ${pruneError?.message ?? String(pruneError)}`);
-      }
+      await runSequentially(dockerPlan.pruneTargets, (target) =>
+        removeSingleTarget({
+          target,
+          execFn: dockerExec,
+          argsPrefix: ["rmi", "-f"],
+          removedIds: dockerRemovedImageIds,
+          bestEffort,
+          errorCode: "E_IMAGE_PRUNE_DOCKER_RMI_FAILED",
+          errorLabel: "Docker",
+          warningPrefix: "docker rmi -f",
+          warnings,
+        }),
+      );
+      dockerDanglingPruned = await runDockerDanglingPrune(dockerExec, bestEffort, warnings);
     }
   } catch (dockerError) {
-    if (
-      dockerError instanceof HostBackendImagePruneError &&
-      dockerError.code === "E_IMAGE_PRUNE_PROTECTED_TARGET"
-    ) {
-      throw dockerError;
-    }
-    if (!bestEffort) {
-      if (dockerError instanceof HostBackendImagePruneError) throw dockerError;
-      fail(
-        "E_IMAGE_PRUNE_DOCKER_FAILED",
-        `Docker image prune failed: ${dockerError?.message ?? String(dockerError)}`,
-        dockerError,
-      );
-    }
-    warnings.push(
-      `Docker image inspection/prune skipped: ${dockerError?.message ?? String(dockerError)}`,
-    );
+    handleSubsystemError(dockerError, {
+      bestEffort,
+      errorCode: "E_IMAGE_PRUNE_DOCKER_FAILED",
+      errorPrefix: "Docker image prune failed",
+      skipPrefix: "Docker image inspection/prune skipped",
+      warnings,
+    });
   }
+
+  return { dockerPlan, dockerRemovedImageIds, dockerDanglingPruned };
+}
+
+function addExplicitProtectedDigest(rawDigest, protectedDigests, protectedImageIds) {
+  if (!rawDigest) return;
+  const normalized = normalizeDigest(rawDigest);
+  protectedDigests.add(normalized);
+  protectedImageIds.add(normalized);
+}
+
+export async function pruneHostBackendImages({
+  mode = "DRY_RUN",
+  keepCount = DEFAULT_KEEP_COUNT,
+  activeDigest = undefined,
+  previousDigest = undefined,
+  bestEffort = false,
+  commandRunner = defaultCommandRunner,
+  kubectlPrefix = ["sudo", "--non-interactive", "k3s", "kubectl"],
+  crictlPrefix = ["sudo", "--non-interactive", "k3s", "crictl"],
+  dockerPrefix = ["docker"],
+} = {}) {
+  validateOptions({ mode, keepCount, activeDigest, previousDigest });
+
+  const protectedDigests = new Set();
+  const protectedImageIds = new Set();
+  const warnings = [];
+
+  addExplicitProtectedDigest(activeDigest, protectedDigests, protectedImageIds);
+  addExplicitProtectedDigest(previousDigest, protectedDigests, protectedImageIds);
+
+  const [kubectlCmd, ...kubectlBaseArgs] = kubectlPrefix;
+  const [crictlCmd, ...crictlBaseArgs] = crictlPrefix;
+  const [dockerCmd, ...dockerBaseArgs] = dockerPrefix;
+
+  const kubectlExec = (args) => commandRunner(kubectlCmd, [...kubectlBaseArgs, ...args]);
+  const crictlExec = (args) => commandRunner(crictlCmd, [...crictlBaseArgs, ...args]);
+  const dockerExec = (args) => commandRunner(dockerCmd, [...dockerBaseArgs, ...args]);
+
+  const { k3sPlan, k3sRemovedImageIds } = await executeK3sBackendImagePrune({
+    mode,
+    keepCount,
+    bestEffort,
+    kubectlExec,
+    crictlExec,
+    protectedDigests,
+    protectedImageIds,
+    warnings,
+  });
+
+  const { dockerPlan, dockerRemovedImageIds, dockerDanglingPruned } =
+    await executeDockerBackendImagePrune({
+      mode,
+      keepCount,
+      bestEffort,
+      dockerExec,
+      protectedDigests,
+      protectedImageIds,
+      warnings,
+    });
 
   return {
     schemaVersion: "PLATFORM_HOST_BACKEND_IMAGE_PRUNE_V1",
@@ -648,51 +763,64 @@ function readNextFlagValue(argv, index, flagName) {
   return next;
 }
 
+function parseKeepCountValue(rawCount) {
+  if (!/^[1-9]\d*$/.test(rawCount)) {
+    fail("E_IMAGE_PRUNE_USAGE", `--keep-count must be a positive integer (got ${rawCount})`);
+  }
+  return Number(rawCount);
+}
+
 export function parseCliArgs(argv) {
-  let mode = "DRY_RUN";
-  let keepCount = DEFAULT_KEEP_COUNT;
-  let activeDigest;
-  let previousDigest;
-  let bestEffort = false;
+  const state = {
+    mode: "DRY_RUN",
+    keepCount: DEFAULT_KEEP_COUNT,
+    activeDigest: undefined,
+    previousDigest: undefined,
+    bestEffort: false,
+  };
+
+  const valueFlags = {
+    "--mode": (val) => {
+      state.mode = val;
+    },
+    "--keep-count": (val) => {
+      state.keepCount = parseKeepCountValue(val);
+    },
+    "--active-digest": (val) => {
+      state.activeDigest = val;
+    },
+    "--previous-digest": (val) => {
+      state.previousDigest = val;
+    },
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--mode") {
-      mode = readNextFlagValue(argv, index, "--mode");
+    if (Object.hasOwn(valueFlags, arg)) {
+      valueFlags[arg](readNextFlagValue(argv, index, arg));
       index += 1;
     } else if (arg === "--dry-run") {
-      mode = "DRY_RUN";
+      state.mode = "DRY_RUN";
     } else if (arg === "--execute") {
-      mode = "EXECUTE";
-    } else if (arg === "--keep-count") {
-      const rawCount = readNextFlagValue(argv, index, "--keep-count");
-      if (!/^[1-9]\d*$/.test(rawCount)) {
-        fail("E_IMAGE_PRUNE_USAGE", `--keep-count must be a positive integer (got ${rawCount})`);
-      }
-      keepCount = Number(rawCount);
-      index += 1;
-    } else if (arg === "--active-digest") {
-      activeDigest = readNextFlagValue(argv, index, "--active-digest");
-      index += 1;
-    } else if (arg === "--previous-digest") {
-      previousDigest = readNextFlagValue(argv, index, "--previous-digest");
-      index += 1;
+      state.mode = "EXECUTE";
     } else if (arg === "--best-effort") {
-      bestEffort = true;
+      state.bestEffort = true;
     } else {
       fail("E_IMAGE_PRUNE_USAGE", `unknown argument: ${arg}`);
     }
   }
 
-  validateOptions({ mode, keepCount, activeDigest, previousDigest });
-  return { mode, keepCount, activeDigest, previousDigest, bestEffort };
+  validateOptions(state);
+  return state;
 }
 
 function isMainModule() {
   if (!process.argv[1]) return false;
   try {
-    return realpathSync(fileURLToPath(import.meta.url)) ===
-      realpathSync(path.resolve(process.argv[1]));
+    return (
+      realpathSync(fileURLToPath(import.meta.url)) ===
+      realpathSync(path.resolve(process.argv[1]))
+    );
   } catch {
     return fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
   }
@@ -707,7 +835,9 @@ async function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (bestEffortRequested && !(error instanceof HostBackendImagePruneError && error.code === "E_IMAGE_PRUNE_USAGE")) {
+    const isUsageError =
+      error instanceof HostBackendImagePruneError && error.code === "E_IMAGE_PRUNE_USAGE";
+    if (bestEffortRequested && !isUsageError) {
       const fallbackSummary = {
         schemaVersion: "PLATFORM_HOST_BACKEND_IMAGE_PRUNE_V1",
         status: "DEGRADED",
