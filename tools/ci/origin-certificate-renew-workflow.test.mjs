@@ -65,16 +65,24 @@ test("두 job 모두 실행자 게이트와 영수증 검증을 모든 sudo보�
 test("공개 로그에 원 서버 주소가 찍힐 수 있는 certbot·journal 출력을 남기지 않는다 (#270)", () => {
   assert.doesNotMatch(workflow, /journalctl|--dry-run/u);
   assert.match(job("renew"), /certbot renew [^\n]*--quiet >\/dev\/null 2>&1 \|\| rc=\$\?\n/u);
-  // check는 certbot certificates 출력 중 만료 줄만 남긴다.
-  assert.doesNotMatch(job("check"), /echo "\$\{lineage\}"\s*$/mu);
-  assert.match(job("check"), /expiry="\$\(echo "\$\{lineage\}" \| grep -E '\^\\s\*Expiry Date:' \| sed /u);
+  // check는 certbot certificates 출력 중 만료 줄만 grep -o로 남긴다.
+  const check = job("check");
+  assert.doesNotMatch(check, /echo "\$\{lineage\}"\s*$/mu);
+  assert.match(check, /expiry="\$\(echo "\$\{lineage\}" \| grep -o 'Expiry Date:\.\*'\)"/u);
+  assert.doesNotMatch(check, /\bsed\b/u);
 });
 
 test("권한은 workflow 수준에서 비우고 job마다 필요한 만큼만 선언한다 (#270)", () => {
   assert.match(workflow, /^permissions: \{\}\n/mu);
 });
 
-test("renew의 바꾸는 step과 검증 step은 errexit로 돌고 검증은 SERVED_HOSTS 전체를 돈다 (#270)", () => {
+test("check 판정 step과 renew의 바꾸는·검증 step은 errexit로 돌고 내보내는 인증서 판정은 공용 스크립트로 SERVED_HOSTS 전체를 돈다 (#270)", () => {
+  const check = job("check");
+  const checkAt = check.indexOf("      - name: Origin certificate / Judge served and on-disk expiry\n");
+  assert.ok(checkAt !== -1);
+  assert.match(check.slice(checkAt), /run: \|\n\s*set -euo pipefail\n/u);
+  assert.match(check.slice(checkAt), /min_days=14\n[\s\S]*bash tools\/platform\/judge-origin-certificate\.sh "\$\{judge_args\[@\]\}"/u);
+
   const renew = job("renew");
   for (const name of ["Origin certificate / Renew and reload nginx", "Origin certificate / Verify served certificate and public readiness"]) {
     const at = renew.indexOf(`      - name: ${name}\n`);
@@ -82,7 +90,7 @@ test("renew의 바꾸는 step과 검증 step은 errexit로 돌고 검증은 SERV
     const end = renew.indexOf("\n      - name:", at + 1);
     assert.match(renew.slice(at, end === -1 ? undefined : end), /run: \|\n\s*set -euo pipefail\n/u, name);
   }
-  assert.match(renew, /for host in \$\{SERVED_HOSTS\}; do\n/u);
+  assert.match(renew, /min_days=30\n\s*bash tools\/platform\/judge-origin-certificate\.sh --days "\$\{min_days\}" --attempts 10\n/u);
 });
 
 test("공개 health 주소와 서비스 호스트는 nginx 템플릿과 인증서 이름에 맞는다 (#270)", () => {
@@ -107,33 +115,52 @@ test("check는 concurrency group 밖에 있고 renew만 group에 있다 (#270)",
   assert.doesNotMatch(job("check"), /systemctl|renewal-hooks/u);
 });
 
-// check step을 대역 sudo·openssl·timeout으로 실제 실행해 종료 코드와 출력을 본다.
-function checkScript() {
-  const check = job("check");
-  const at = check.indexOf("      - name: Origin certificate / Judge served and on-disk expiry\n");
-  const body = check.slice(check.indexOf("        run: |\n", at) + "        run: |\n".length);
-  return body.split("\n").map((line) => line.replace(/^ {10}/u, "")).join("\n");
+const repoRoot = new URL("../..", import.meta.url).pathname;
+
+function stepScript(jobName, stepName) {
+  const body = job(jobName);
+  const at = body.indexOf(`      - name: ${stepName}\n`);
+  assert.notEqual(at, -1, `${jobName}: ${stepName}`);
+  const end = body.indexOf("\n      - name:", at + 1);
+  const section = body.slice(at, end === -1 ? undefined : end);
+  const runBody = section.slice(section.indexOf("        run: |\n") + "        run: |\n".length);
+  return runBody.split("\n").map((line) => line.replace(/^ {10}/u, "")).join("\n");
 }
+
+const checkScript = () => stepScript("check", "Origin certificate / Judge served and on-disk expiry");
+const verifyScript = () => stepScript("renew", "Origin certificate / Verify served certificate and public readiness");
 
 const STUBS = {
   timeout: '#!/bin/bash\nshift\nexec "$@"\n',
+  sleep: "#!/bin/bash\nexit 0\n",
   sudo: '#!/bin/bash\n[[ "$*" == "--non-interactive certbot certificates --cert-name ${CERT_NAME}" ]] || exit 99\nprintf "%b" "${STUB_LINEAGE}"\nprintf "%b" "${STUB_LEAK:-}" >&2\nexit "${STUB_LINEAGE_RC}"\n',
+  curl: '#!/bin/bash\nprintf "%s" "${STUB_READINESS_STATUS:-200}"\nexit 0\n',
   openssl: [
     "#!/bin/bash",
-    'if [[ "$1" == s_client ]]; then [[ "${STUB_SERVED}" == 1 ]] && echo "PEM ${@: -1}"; exit 0; fi',
+    'if [[ "$1" == s_client ]]; then',
+    '  if [[ -n "${STUB_ATTEMPT_FILE:-}" ]]; then',
+    '    count=0',
+    '    [[ -f "${STUB_ATTEMPT_FILE}" ]] && count="$(cat "${STUB_ATTEMPT_FILE}")"',
+    '    count=$(( count + 1 ))',
+    '    printf "%s" "${count}" > "${STUB_ATTEMPT_FILE}"',
+    '    if (( count < ${STUB_PASS_AT_ATTEMPT:-1} )); then exit 0; fi',
+    "  fi",
+    '  [[ "${STUB_SERVED}" == 1 ]] && echo "PEM ${@: -1}"',
+    "  exit 0",
+    "fi",
     'input="$(cat)"; [[ -n "${input}" ]] || exit 1',
     'bad() { [[ -n "${STUB_BAD_HOST:-}" && "${input}" == "PEM ${STUB_BAD_HOST}" ]]; }',
     'case " $* " in',
-    '  *" -checkend "*) [[ " $* " == *" -checkend 1209600 "* ]] || exit 98; bad && [[ "${STUB_BAD}" == expiry ]] && exit 1; exit 0 ;;',
+    '  *" -checkend "*) [[ " $* " == *" -checkend ${STUB_EXPECTED_CHECKEND} "* ]] || exit 98; bad && [[ "${STUB_BAD}" == expiry ]] && exit 1; exit 0 ;;',
     '  *" -checkhost "*) if bad && [[ "${STUB_BAD}" == name ]]; then echo "Hostname ${@: -1} does NOT match certificate"; else echo "Hostname ${@: -1} does match certificate"; fi ;;',
-    '  *" -enddate "*) echo "notAfter=Jan 1 00:00:00 2027 GMT" ;;',
+    '  *" -enddate "*) if bad && [[ -n "${STUB_BAD_ENDDATE:-}" ]]; then echo "notAfter=${STUB_BAD_ENDDATE}"; else echo "notAfter=${STUB_ENDDATE:-Jan 1 00:00:00 2027 GMT}"; fi ;;',
     '  *) echo "${input}" ;;',
     "esac",
     "",
   ].join("\n"),
 };
 
-function runCheck(overrides) {
+function runStepWithStubs(script, overrides) {
   const dir = mkdtempSync(join(tmpdir(), "origin-cert-check-"));
   try {
     for (const [name, text] of Object.entries(STUBS)) {
@@ -144,44 +171,152 @@ function runCheck(overrides) {
       PATH: `${dir}:${process.env.PATH}`,
       CERT_NAME: "a.example",
       SERVED_HOSTS: "a.example b.example",
+      PUBLIC_HEALTH_URL: "https://a.example/actuator/health/readiness",
       STUB_SERVED: "1",
       STUB_BAD_HOST: "",
       STUB_BAD: "",
+      STUB_EXPECTED_CHECKEND: String(14 * 86400),
       STUB_LINEAGE: "  Certificate Name: a.example\\n    Domains: a.example b.example\\n    Expiry Date: 2027-01-01 00:00:00+00:00 (VALID: 62 days)\\n",
       STUB_LINEAGE_RC: "0",
+      STUB_ATTEMPT_FILE: join(dir, "attempts"),
       ...overrides,
     };
     // GitHub은 `shell: bash` step을 `bash --noprofile --norc -eo pipefail`로 돌린다.
-    return spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", checkScript()], { encoding: "utf8", env });
+    return spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], { cwd: repoRoot, encoding: "utf8", env });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("check 실행: 건강하면 통과하고 만료·불일치·읽기 실패·만료 줄 없음·INVALID는 실패한다 (#270)", () => {
-  const healthy = runCheck({});
+const runCheck = (overrides) => runStepWithStubs(checkScript(), overrides);
+const runVerify = (overrides) => runStepWithStubs(verifyScript(), { STUB_EXPECTED_CHECKEND: String(30 * 86400), ...overrides });
+
+test("check 실행: 건강하면 통과하고 만료·불일치·reload 누락·빈 SERVED_HOSTS·읽기 실패·만료 줄 없음·INVALID는 실패한다 (#270)", () => {
+  const healthy = runCheck({ STUB_LEAK: "secret 203.0.113.9 healthy stderr\\n" });
   assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
   assert.equal((healthy.stdout.match(/^on-disk /gmu) ?? []).length, 1);
-  assert.match(healthy.stdout, /^on-disk Expiry Date: 2027-01-01/mu);
-  assert.doesNotMatch(healthy.stdout + healthy.stderr, /Domains|Certificate Name/u);
+  assert.equal((healthy.stdout.match(/Expiry Date:/gu) ?? []).length, 1);
+  assert.match(healthy.stdout, /^on-disk Expiry Date: 2027-01-01 00:00:00\+00:00 \(VALID: 62 days\)$/mu);
+  assert.doesNotMatch(healthy.stdout + healthy.stderr, /Domains|Certificate Name|203\.0\.113\.9/u);
   const cases = {
-    "first host expiring": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "expiry" }, /^a\.example: served certificate is expired or expires within 14 days \(RENEW needed\)$/mu],
-    "second host expiring": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "expiry" }, /^b\.example: served certificate is expired or expires within 14 days/mu],
-    "first host mismatch": [{ STUB_BAD_HOST: "a.example", STUB_BAD: "name" }, /^a\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu],
-    "second host mismatch": [{ STUB_BAD_HOST: "b.example", STUB_BAD: "name" }, /^b\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu],
-    "nothing served": [{ STUB_SERVED: "0" }, /a\.example: no certificate read/u],
-    "lineage read failed": [{ STUB_LINEAGE: "secret 203.0.113.9 detail\\n", STUB_LEAK: "secret 203.0.113.9 stderr\\n", STUB_LINEAGE_RC: "1" }, /on-disk lineage could not be read \(exit 1\)/u],
-    "no lineage": [{ STUB_LINEAGE: "No certificates found.\\n" }, /on-disk lineage has no expiry line/u],
-    "invalid lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" }, /^on-disk certificate is not marked valid \(check the lineage on the host\)$/mu],
-    "reworded lineage": [{ STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (EXPIRED)\\n" }, /on-disk certificate is not marked valid/u],
-    "lineage exits 124": [{ STUB_LINEAGE: "", STUB_LINEAGE_RC: "124" }, /could not be read \(exit 124\)/u],
+    "first host expiring": {
+      env: { STUB_BAD_HOST: "a.example", STUB_BAD: "expiry" },
+      line: /^a\.example: served certificate is expired or expires within 14 days \(RENEW needed\)$/mu,
+      expectRenewHint: true,
+    },
+    "second host expiring": {
+      env: { STUB_BAD_HOST: "b.example", STUB_BAD: "expiry" },
+      line: /^b\.example: served certificate is expired or expires within 14 days \(RENEW needed\)$/mu,
+      expectRenewHint: true,
+    },
+    "on-disk expiring": {
+      env: { STUB_LINEAGE: "    Expiry Date: 2027-01-01 00:00:00+00:00 (VALID: 10 days)\\n" },
+      line: /^on-disk certificate expires within 14 days \(10 days left; RENEW needed\)$/mu,
+      expectRenewHint: true,
+    },
+    "served expiry behind on-disk": {
+      env: { STUB_BAD_HOST: "a.example", STUB_BAD_ENDDATE: "Dec 15 00:00:00 2026 GMT" },
+      line: /^a\.example: served certificate expiry \(2026-12-15 00:00:00\+00:00\) does not match on-disk lineage \(2027-01-01 00:00:00\+00:00\) \(nginx reload needed\)$/mu,
+      expectRenewHint: false,
+    },
+    "first host mismatch": {
+      env: { STUB_BAD_HOST: "a.example", STUB_BAD: "name" },
+      line: /^a\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu,
+      expectRenewHint: false,
+    },
+    "second host mismatch": {
+      env: { STUB_BAD_HOST: "b.example", STUB_BAD: "name" },
+      line: /^b\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu,
+      expectRenewHint: false,
+    },
+    "nothing served": {
+      env: { STUB_SERVED: "0" },
+      line: /^a\.example: no certificate read from 127\.0\.0\.1:443$/mu,
+      expectRenewHint: false,
+    },
+    "empty SERVED_HOSTS": {
+      env: { SERVED_HOSTS: "   " },
+      line: /^SERVED_HOSTS must not be empty$/mu,
+      expectRenewHint: false,
+    },
+    "lineage read failed": {
+      env: { STUB_LINEAGE: "secret 203.0.113.9 detail\\n", STUB_LEAK: "secret 203.0.113.9 stderr\\n", STUB_LINEAGE_RC: "1" },
+      line: /^on-disk lineage could not be read \(exit 1\)$/mu,
+      expectRenewHint: false,
+    },
+    "no lineage": {
+      env: { STUB_LINEAGE: "No certificates found.\\n" },
+      line: /^on-disk lineage has no expiry line$/mu,
+      expectRenewHint: false,
+    },
+    "invalid lineage": {
+      env: { STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (INVALID: EXPIRED)\\n" },
+      line: /^on-disk certificate is not marked valid \(check the lineage on the host\)$/mu,
+      expectRenewHint: false,
+    },
+    "reworded lineage": {
+      env: { STUB_LINEAGE: "    Expiry Date: 2026-10-26 13:24:00+00:00 (EXPIRED)\\n" },
+      line: /^on-disk certificate is not marked valid \(check the lineage on the host\)$/mu,
+      expectRenewHint: false,
+    },
+    "lineage exits 124": {
+      env: { STUB_LINEAGE: "", STUB_LINEAGE_RC: "124" },
+      line: /^on-disk lineage could not be read \(exit 124\)$/mu,
+      expectRenewHint: false,
+    },
   };
-  for (const [name, [env, line]] of Object.entries(cases)) {
+  for (const [name, { env, line, expectRenewHint }] of Object.entries(cases)) {
     const run = runCheck(env);
     assert.equal(run.status, 1, name);
-    // RENEW로 고쳐지는 만료만 RENEW를 권한다.
-    if (!/expiring/u.test(name)) assert.doesNotMatch(run.stdout, /RENEW needed/u, name);
+    assert.equal(/RENEW needed/u.test(run.stdout), expectRenewHint, name);
     assert.match(run.stdout, line, name);
     assert.doesNotMatch(run.stdout + run.stderr, /203\.0\.113\.9|No certificates found/u, name);
+  }
+});
+
+test("renew 검증 실행: 30일 기준(-checkend 2592000)으로 재시도 후 통과하고 만료·불일치·빈 SERVED_HOSTS·readiness 실패는 실패한다 (#270)", () => {
+  const healthy = runVerify({ STUB_PASS_AT_ATTEMPT: "3" });
+  assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
+  assert.match(healthy.stdout, /^a\.example: served notAfter=Jan 1 00:00:00 2027 GMT$/mu);
+  assert.match(healthy.stdout, /^b\.example: served notAfter=Jan 1 00:00:00 2027 GMT$/mu);
+  assert.match(healthy.stdout, /^public readiness: 200$/mu);
+
+  const cases = {
+    "first host expiring within 30d": {
+      env: { STUB_BAD_HOST: "a.example", STUB_BAD: "expiry" },
+      line: /^a\.example: served certificate is expired or expires within 30 days \(RENEW needed\)$/mu,
+      expectRenewHint: true,
+    },
+    "second host expiring within 30d": {
+      env: { STUB_BAD_HOST: "b.example", STUB_BAD: "expiry" },
+      line: /^b\.example: served certificate is expired or expires within 30 days \(RENEW needed\)$/mu,
+      expectRenewHint: true,
+    },
+    "second host mismatch": {
+      env: { STUB_BAD_HOST: "b.example", STUB_BAD: "name" },
+      line: /^b\.example: served certificate does not name this host \(check the nginx server block and lineage domains\)$/mu,
+      expectRenewHint: false,
+    },
+    "nothing served": {
+      env: { STUB_SERVED: "0" },
+      line: /^a\.example: no certificate read from 127\.0\.0\.1:443$/mu,
+      expectRenewHint: false,
+    },
+    "empty SERVED_HOSTS": {
+      env: { SERVED_HOSTS: "" },
+      line: /^SERVED_HOSTS must not be empty$/mu,
+      expectRenewHint: false,
+    },
+    "readiness non-200": {
+      env: { STUB_READINESS_STATUS: "502" },
+      line: /^public readiness: 502$/mu,
+      expectRenewHint: false,
+    },
+  };
+  for (const [name, { env, line, expectRenewHint }] of Object.entries(cases)) {
+    const run = runVerify(env);
+    assert.equal(run.status, 1, name);
+    assert.equal(/RENEW needed/u.test(run.stdout), expectRenewHint, name);
+    assert.match(run.stdout + run.stderr, line, name);
   }
 });

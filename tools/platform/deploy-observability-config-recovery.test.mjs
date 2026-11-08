@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -38,19 +38,27 @@ test("DEPLOY는 어떤 호스트 호출보다 먼저 <deployRoot>/deploy.lock을
   }
 });
 
-test("평소 배포의 reference 삭제는 중단용 1.5초 제한이 아니라 정리용 제한으로 돌고, 남은 reference 정리 실패는 배포를 막지 않는다", async () => {
+test("평소 배포의 reference 삭제는 60초 제한으로 돌고, 남은 reference 정리 실패는 경고와 영수증에 남기며 catch는 docker 호출만 감싼다", async () => {
   const box = sandbox();
   try {
-    const host = createHost();
+    const host = createHost({ leftoverReferences: [referenceName(PREVIOUS, 424242)] });
     const removals = [];
+    const warnings = [];
     const commandRunner = (command, args, options = {}) => {
       if (args[0] === "ps" && args.some((arg) => arg.startsWith("name=^easysubway-observability-ref-"))) return Promise.reject(new Error("host command timed out"));
       if (args[0] === "rm") removals.push(options.timeoutMs);
       return host.runner(command, args, options);
     };
-    await deploy(box, host, { commandRunner });
-    assert.ok(removals.length > 0);
-    assert.ok(removals.every((timeoutMs) => timeoutMs >= 60_000), `reference rm ran with ${removals.join(",")} ms`);
+    const result = await deploy(box, host, { commandRunner, warn: (line) => warnings.push(line) });
+    assert.ok(removals.length > 0 && removals.every((timeoutMs) => timeoutMs >= 60_000), `reference rm ran with ${removals.join(",")} ms`);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /stale reference cleanup failed: host command timed out/u);
+    assert.deepEqual(result.staleReferenceCleanup, { removed: [], error: "host command timed out" });
+    await assert.rejects(
+      deploy(box, createHost({ leftoverReferences: [referenceName(PREVIOUS, 424242)] }), { runId: "124", isProcessAlive: () => { throw new TypeError("isProcessAlive bug"); } }),
+      TypeError,
+      "docker 호출 밖의 프로그래밍 오류는 삼키지 않는다",
+    );
   } finally {
     box.cleanup();
   }
@@ -181,7 +189,7 @@ test("기본 네트워크의 서브넷이 계약과 다르면 바꾸지 않고 r
     assert.equal(failure.restore, "NOT_STARTED");
     assert.equal(failure.error.code, "E_OBS_DEPLOY_NETWORK");
     assert.equal(failure.composeNetwork, null, "보장에 실패했으므로 결과가 없다");
-    assert.equal(failure.previousCommit, null, "current를 읽기 전에 멈췄다");
+    assert.equal(failure.previousCommit, PREVIOUS, "네트워크 보장 전에 current를 읽어 직전 release를 남긴다");
   } finally {
     box.cleanup();
   }
@@ -334,7 +342,9 @@ test("지난 실패가 prometheus를 떼어 둔 채 끝났으면 기준선을 �
     const host = createHost({ detachedBefore: true, connectFails: true });
     await assert.rejects(deploy(refused, host), /E_OBS_DEPLOY_NETWORK: managed containers are not attached to easysubway_default: .*reconnecting it failed/u);
     assert.equal(verbs(host).includes("compose:up"), false);
-    assert.equal(failureReceipt(refused).restore, "NOT_STARTED");
+    const failure = failureReceipt(refused);
+    assert.equal(failure.restore, "NOT_STARTED");
+    assert.deepEqual(actionsOf(failure.baselineAttachment), [["prometheus", "RECONNECT_FAILED"], ["origin-certificate-probe", "ATTACHED"]], "재연결에 실패해도 그 증거를 NOT_STARTED 영수증에 남긴다");
   } finally {
     refused.cleanup();
   }
@@ -524,7 +534,7 @@ test("잠금을 잃은 뒤의 오류는 단계와 무관하게 E_OBS_DEPLOY_LOCK
     ["적용 전 검증의 reference", isReferenceExec(COMMIT), {}, { error: "E_OBS_DEPLOY_LOCK_LOST", restore: "NOT_STARTED", restoreError: null, current: PREVIOUS }],
     ["네트워크 보장", isNetworkLs, {}, { error: "E_OBS_DEPLOY_LOCK_LOST", restore: "NOT_STARTED", restoreError: null, current: PREVIOUS }],
     ["적용 compose up", nthComposeUp(1), {}, { error: "E_OBS_DEPLOY_LOCK_LOST", restore: "LOCK_LOST", restoreError: "E_OBS_DEPLOY_LOCK_LOST", current: COMMIT }],
-    ["복원 compose up", nthComposeUp(2), { liveAfter: snapshot({ revision: "old" }) }, { error: "E_OBS_DEPLOY_VERIFY", restore: "FAILED", restoreError: "E_OBS_DEPLOY_LOCK_LOST", current: PREVIOUS }],
+    ["복원 compose up", nthComposeUp(2), { liveAfter: snapshot({ revision: "old" }) }, { error: "E_OBS_DEPLOY_LOCK_LOST", restore: "FAILED", restoreError: "E_OBS_DEPLOY_LOCK_LOST", current: PREVIOUS }],
   ];
   for (const [label, predicate, hostOptions, expected] of stages) {
     const box = sandbox();
@@ -542,6 +552,7 @@ test("잠금을 잃은 뒤의 오류는 단계와 무관하게 E_OBS_DEPLOY_LOCK
       assert.equal(isGone(blocking.blockedPid()), true, `${label}: 떠 있던 docker 자식이 끝났다`);
       const failure = failureReceipt(box);
       assert.deepEqual({ error: failure.error.code, restore: failure.restore, restoreError: failure.restoreError?.code ?? null }, { error: expected.error, restore: expected.restore, restoreError: expected.restoreError }, label);
+      if (label === "복원 compose up") assert.match(failure.error.detail, /forward failure E_OBS_DEPLOY_VERIFY/u, "복원 중 잠금 상실도 정방향 원인을 error.detail에 남긴다");
       assert.equal(readlinkSync(join(box.observability, "current")), join("releases", expected.current), label);
       assert.deepEqual([...host.state.references], [], `${label}: reference 컨테이너가 남지 않는다`);
     } finally {
@@ -595,5 +606,184 @@ test("current 전환 전 어느 단계에서 signal이 와도 진행 중인 자�
     } finally {
       box.cleanup();
     }
+  }
+});
+
+test("중단 뒤 시작하는 reference rm은 1.5초 제한으로 돌고, rm 도중 중단이 오면 지연 abort가 1.5초 뒤에 끊는다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const host = createHost();
+    const hooked = signalled("SIGTERM");
+    const rmOptions = [];
+    const paused = pauseOn(host, isReferenceExec(COMMIT), hooked.emit);
+    const runner = (command, args, options = {}) => {
+      if (args[0] === "rm") rmOptions.push({ timeoutMs: options.timeoutMs, abortedAtStart: Boolean(options.signal?.aborted) });
+      return paused.runner(command, args, options);
+    };
+    await assert.rejects(deploy(box, host, { ...hooked.options, commandRunner: runner }), /E_OBS_DEPLOY_INTERRUPTED/u);
+    assert.deepEqual(rmOptions, [{ timeoutMs: 1500, abortedAtStart: false }], "중단 뒤 시작하는 reference rm은 짧은 제한과 살아 있는 signal을 받는다");
+  } finally {
+    box.cleanup();
+  }
+  const midRm = sandbox();
+  try {
+    seedPreviousRelease(midRm);
+    const host = createHost();
+    const hooked = signalled("SIGINT");
+    let delayedAbortMs = null;
+    const runner = (command, args, options = {}) => {
+      if (args[0] !== "rm") return host.runner(command, args, options);
+      host.calls.push({ command, args, env: options.env });
+      const startedAt = Date.now();
+      return new Promise((_, reject) => {
+        options.signal.addEventListener("abort", () => {
+          delayedAbortMs = Date.now() - startedAt;
+          reject(new Error("rm timed out after delayed abort"));
+        }, { once: true });
+        setImmediate(hooked.emit);
+      });
+    };
+    await assert.rejects(deploy(midRm, host, { ...hooked.options, commandRunner: runner }), /E_OBS_DEPLOY_INTERRUPTED/u);
+    assert.ok(delayedAbortMs !== null && delayedAbortMs >= 100 && delayedAbortMs < 3000, `delayed abort fired in ${delayedAbortMs}ms`);
+  } finally {
+    midRm.cleanup();
+  }
+});
+
+test("PREVIEW도 실행 도중이나 대기 중에 signal이 오면 reference·staging을 치우고 signal 종료 코드로 바로 끝난다", async () => {
+  const execPause = sandbox();
+  try {
+    const host = createHost();
+    const hooked = signalled("SIGTERM");
+    const paused = pauseOn(host, isReferenceExec(COMMIT), hooked.emit);
+    await assert.rejects(
+      deployObservabilityConfig(base(execPause, host, { mode: "PREVIEW", deployRoot: undefined, ...hooked.options, commandRunner: paused.runner })),
+      /E_OBS_DEPLOY_INTERRUPTED: SIGTERM received/u,
+    );
+    assert.deepEqual(hooked.exits, [143]);
+    assert.deepEqual([...host.state.references], [], "PREVIEW도 중단 뒤 reference 컨테이너를 남기지 않는다");
+    assert.deepEqual(readdirSync(execPause.stagingRoot), [], "PREVIEW도 staging을 치운다");
+  } finally {
+    execPause.cleanup();
+  }
+  const sleepPause = sandbox();
+  try {
+    let attempts = 0;
+    const host = createHost();
+    const hooked = signalled("SIGINT");
+    const runner = (command, args, options) => {
+      if (args[0] === "exec" && args[1] === referenceName(COMMIT) && String(args.at(-1)).endsWith("/-/ready") && attempts++ === 0) {
+        return Promise.resolve({ stdout: "not ready\n", stderr: "" });
+      }
+      return host.runner(command, args, options);
+    };
+    const sleep = async () => { hooked.emit(); };
+    await assert.rejects(
+      deployObservabilityConfig(base(sleepPause, host, { mode: "PREVIEW", deployRoot: undefined, ...hooked.options, commandRunner: runner, sleep })),
+      /E_OBS_DEPLOY_INTERRUPTED: SIGINT received/u,
+    );
+    assert.deepEqual(hooked.exits, [130]);
+    assert.equal(attempts, 1, "sleep 도중 중단되면 다음 반복을 돌지 않는다");
+    assert.deepEqual([...host.state.references], []);
+  } finally {
+    sleepPause.cleanup();
+  }
+});
+
+test("같은 커밋 release가 이미 있어도 전환 전 중단·잠금 상실은 전환 전 실패(NOT_STARTED)로 분류하고 current를 바꾸지 않는다", async () => {
+  for (const kind of ["signal", "lock"]) {
+    const box = sandbox();
+    try {
+      seedPreviousRelease(box);
+      const existingCommitRelease = join(box.observability, "releases", COMMIT);
+      mkdirSync(existingCommitRelease, { recursive: true });
+      cpSync(join(box.sourceRoot, "infra"), existingCommitRelease, { recursive: true });
+      const host = createHost();
+      const hooked = signalled("SIGINT");
+      const trigger = kind === "signal" ? hooked.emit : () => host.lock.lose();
+      const runner = signalOnLastReadBeforeInstall(host, trigger);
+      await assert.rejects(
+        deploy(box, host, { ...(kind === "signal" ? hooked.options : {}), commandRunner: runner }),
+        kind === "signal" ? /E_OBS_DEPLOY_INTERRUPTED: SIGINT received before the release switch/u : /E_OBS_DEPLOY_LOCK_LOST/u,
+        kind,
+      );
+      assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS), `${kind}: current를 바꾸지 않는다`);
+      const failure = failureReceipt(box);
+      assert.equal(failure.outcome, "FAILED", kind);
+      assert.equal(failure.restore, "NOT_STARTED", `${kind}: 전환 전 실패로 분류한다`);
+      assert.equal(failure.error.code, kind === "signal" ? "E_OBS_DEPLOY_INTERRUPTED" : "E_OBS_DEPLOY_LOCK_LOST", kind);
+    } finally {
+      box.cleanup();
+    }
+  }
+});
+
+test("복원 검증이 이미 RESTORED로 끝난 뒤 마지막 정리 도중 signal이 와도 검증된 RESTORED 판정을 덮어쓰지 않는다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const host = createHost({ liveAfter: snapshot({ revision: "old" }) });
+    const hooked = signalled("SIGTERM");
+    let restoreVerified = false;
+    const runner = async (command, args, options) => {
+      const result = await host.runner(command, args, options);
+      if (args[0] === "volume" && args[1] === "inspect" && host.calls.filter((call) => call.args.includes("up")).length === 2) {
+        restoreVerified = true;
+      }
+      if (restoreVerified && args[0] === "inspect" && args.includes("easysubway-prometheus")) {
+        hooked.emit();
+      }
+      return result;
+    };
+    await assert.rejects(deploy(box, host, { ...hooked.options, commandRunner: runner }), /E_OBS_DEPLOY_VERIFY.*restored previous release/su);
+    assert.deepEqual(hooked.exits, [143]);
+    const failure = failureReceipt(box);
+    assert.equal(failure.outcome, "FAILED");
+    assert.equal(failure.restore, "RESTORED", "이미 검증된 복원 판정을 LINK_RESTORED로 덮어쓰지 않는다");
+    assert.equal(failure.restoreError, null);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("blackbox 없는 release를 배포하다 실패할 때는 멈춰 있는 비관리 probe 때문에 복원을 실패로 판정하지 않는다(managedBefore ∩ units)", async () => {
+  const box = sandbox();
+  try {
+    const previous = seedPreviousRelease(box);
+    rmSync(join(previous, "blackbox"), { recursive: true });
+    rmSync(join(box.sourceRoot, "infra", "blackbox"), { recursive: true });
+    const host = createHost({ composeDefines: ["prometheus"], probeRunning: false, liveAfter: snapshot({ revision: "old" }) });
+    await assert.rejects(deploy(box, host), (error) => {
+      assert.equal(error.code, "E_OBS_DEPLOY_VERIFY", "복원은 성공했으므로 E_OBS_DEPLOY_RESTORE가 아니다");
+      return true;
+    });
+    const failure = failureReceipt(box);
+    assert.equal(failure.restore, "RESTORED");
+    assert.deepEqual(actionsOf(failure.networkAttachment.reattach), [["prometheus", "ATTACHED"]]);
+    assert.deepEqual(actionsOf(failure.networkAttachment.recheck), [["prometheus", "ATTACHED"]]);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("crash 뒤 같은 커밋을 다시 실행하다 실패하면 current(자기 자신)가 아니라 previous symlink의 직전 release로 복원한다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const crashedCommitRelease = join(box.observability, "releases", COMMIT);
+    mkdirSync(crashedCommitRelease, { recursive: true });
+    cpSync(join(box.sourceRoot, "infra"), crashedCommitRelease, { recursive: true });
+    symlinkSync(join("releases", PREVIOUS), join(box.observability, "previous"));
+    rmSync(join(box.observability, "current"));
+    symlinkSync(join("releases", COMMIT), join(box.observability, "current"));
+    const host = createHost({ liveAfter: snapshot({ revision: "old" }) });
+    await assert.rejects(deploy(box, host), /E_OBS_DEPLOY_VERIFY.*restored previous release b{40}/su);
+    assert.equal(readlinkSync(join(box.observability, "current")), join("releases", PREVIOUS));
+    const failure = failureReceipt(box);
+    assert.equal(failure.previousCommit, PREVIOUS);
+    assert.equal(failure.restore, "RESTORED");
+  } finally {
+    box.cleanup();
   }
 });

@@ -550,26 +550,62 @@ function digest(character) {
   return `sha256:${character.repeat(64)}`;
 }
 
-test("a compose network that cannot be ensured stops before the standby up", async () => {
-  const fixture = await createFixture();
-  const calls = [];
-  await assert.rejects(
-    startJourneyComposeCandidates({
-      ...fixture.input,
-      serviceToken: TOKEN,
-      currentPublicKeyPem: PUBLIC_KEY_PEM,
-      inspectDescriptor: fixture.inspectDescriptor,
-      ambientEnvironment: { PATH: process.env.PATH, DEPLOY_ROOT: fixture.root },
-      networkEnsurer: async () => {
-        throw new Error("easysubway_default has subnet 172.19.0.0/16, expected 172.18.0.0/16");
-      },
-      composeRunner: async (request) => {
-        calls.push(request);
-        return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
-      },
-    }),
-    (error) => error instanceof CandidateStartError && error.code === "CANDIDATE_START_NETWORK",
-  );
-  assert.deepEqual(calls.map((call) => call.args.includes("up")), [false], "only the ps check ran");
-  assert.equal(fixture.deployLockState.closeCount, 1);
+import { symlink } from "node:fs/promises";
+import { ComposeNetworkMismatch } from "./ensure-compose-network.mjs";
+
+test("a compose network that cannot be ensured stops before the standby up and distinguishes subnet mismatch from docker error", async () => {
+  for (const [name, errorToThrow, expectedCode, expectedExitCode] of [
+    [
+      "subnet mismatch",
+      new ComposeNetworkMismatch("easysubway_default has subnet 172.19.0.0/16, expected 172.18.0.0/16"),
+      "CANDIDATE_START_NETWORK_MISMATCH",
+      2,
+    ],
+    [
+      "docker error",
+      new Error("docker daemon unavailable"),
+      "CANDIDATE_START_NETWORK",
+      1,
+    ],
+  ]) {
+    const fixture = await createFixture();
+    const calls = [];
+    await assert.rejects(
+      startJourneyComposeCandidates({
+        ...fixture.input,
+        serviceToken: TOKEN,
+        currentPublicKeyPem: PUBLIC_KEY_PEM,
+        inspectDescriptor: fixture.inspectDescriptor,
+        ambientEnvironment: { PATH: process.env.PATH, DEPLOY_ROOT: fixture.root },
+        networkEnsurer: async () => {
+          throw errorToThrow;
+        },
+        composeRunner: async (request) => {
+          calls.push(request);
+          return { status: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+        },
+      }),
+      (error) =>
+        error instanceof CandidateStartError &&
+        error.code === expectedCode &&
+        error.exitCode === expectedExitCode,
+      name,
+    );
+    assert.deepEqual(calls.map((call) => call.args.includes("up")), [false], `${name}: only the ps check ran`);
+    assert.equal(fixture.deployLockState.closeCount, 1, name);
+  }
+
+  const symlinkRoot = await mkdtemp(join(tmpdir(), "journey-candidate-link-"));
+  const linkedScript = join(symlinkRoot, "start-journey-compose-candidates-link.mjs");
+  await symlink(SCRIPT.pathname, linkedScript);
+  const linkedResult = spawnSync(process.execPath, [linkedScript], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN: TOKEN,
+      EASYSUBWAY_JOURNEY_CURRENT_PUBLIC_KEY_PEM: PUBLIC_KEY_PEM,
+    },
+  });
+  assert.equal(linkedResult.status, 2);
+  assert.match(linkedResult.stderr, /^CANDIDATE_START_USAGE /);
 });

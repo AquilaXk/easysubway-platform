@@ -4,6 +4,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { deployObservabilityConfig, pollLive } from "./deploy-observability-config.mjs";
+import { PROMETHEUS } from "./observability-release.mjs";
+import { liveSeriesOf, newestSample } from "./observability-series.mjs";
 import {
   EPOCH0, PREVIOUS, PROBE_EXPIRY_SERIES, PROBE_SERIES, PROBE_SUCCESS_SERIES,
   base, clockOf, createHost, failureReceipt, sandbox, seedCurrentRelease, seedPreviousRelease, snapshot,
@@ -130,7 +132,7 @@ test("외부 상태 때문에 probe 성공이 계속 0이면 직전 release에�
     assert.doesNotMatch(failure.externalSeries.detail, /no fresh sample/u, "표본은 새것이고 값만 나쁘다");
     assert.deepEqual(failure.externalSeries.series.map((reading) => [reading.series, reading.value]), [[PROBE_EXPIRY_SERIES, null], [PROBE_SUCCESS_SERIES, "0"]], "서버에 닿지 않으면 만료 시계열은 없다");
     assert.ok(host.state.reads[PROBE_SUCCESS_SERIES] >= 20, "적용 검증은 창을 다 기다린다");
-    assert.deepEqual(host.state.restoreReads, { [PROBE_SUCCESS_SERIES]: 2, [PROBE_EXPIRY_SERIES]: 1 }, "복원은 scrape 증거를 한 번 확인하고 기록만 한다: 두 번째 창이 없다");
+    assert.deepEqual(host.state.restoreReads, { [PROBE_SUCCESS_SERIES]: 1, [PROBE_EXPIRY_SERIES]: 1 }, "복원 poll이 읽은 probe_success 표본을 그대로 재사용해 만료 시계열만 한 번 더 읽는다");
   } finally {
     box.cleanup();
   }
@@ -159,7 +161,7 @@ test("복원한 probe의 probe_success가 수렴 뒤 새로 scrape되지 않으�
 test("복원 뒤 만료 시계열 표본이 없거나 읽지 못해도 복원은 RESTORED이고 externalSeries가 원인 쪽을 구분해 남긴다", async () => {
   const cases = [
     ["새 표본 없음", { missing: [PROBE_EXPIRY_SERIES] }, /returned no sample.*no fresh sample/u, [[PROBE_EXPIRY_SERIES, null], [PROBE_SUCCESS_SERIES, "1"]]],
-    ["읽기 실패", { unreadable: [PROBE_EXPIRY_SERIES] }, /live prometheus was not readable/u, [[PROBE_EXPIRY_SERIES, null], [PROBE_SUCCESS_SERIES, null]]],
+    ["읽기 실패", { unreadable: [PROBE_EXPIRY_SERIES] }, /live prometheus was not readable.*probe_ssl_earliest_cert_expiry\{job="origin_certificate_probe"\}/u, [[PROBE_EXPIRY_SERIES, null], [PROBE_SUCCESS_SERIES, null]]],
   ];
   for (const [label, restoreSeries, detail, readings] of cases) {
     const box = sandbox();
@@ -178,10 +180,57 @@ test("복원 뒤 만료 시계열 표본이 없거나 읽지 못해도 복원은
   }
 });
 
-test("신선도 검사는 notBefore 없이는 시작하지 않는다", async () => {
+test("시계열 읽기는 순차 실행이라 첫 selector가 실패하면 둘째 selector는 질의하지 않고 실패 문구에 selector 이름을 담는다", async () => {
+  const box = sandbox();
+  try {
+    seedPreviousRelease(box);
+    const host = createHost({ unreadableSeries: [PROBE_EXPIRY_SERIES] });
+    await assert.rejects(
+      deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })),
+      (error) => error.code === "E_OBS_DEPLOY_VERIFY" && error.message.includes(`live prometheus was not readable: ${PROBE_EXPIRY_SERIES}:`) && error.message.includes("restored previous release"),
+    );
+    assert.ok((host.state.reads[PROBE_EXPIRY_SERIES] ?? 0) >= 20, "첫 selector는 검증 창 동안 시도한다");
+    assert.equal(host.state.reads[PROBE_SUCCESS_SERIES], undefined, "첫 selector가 실패하면 같은 회차의 둘째 selector는 질의하지 않는다");
+  } finally {
+    box.cleanup();
+  }
+});
+
+test("신선도 검사는 series 배열과 유한한 notBefore가 모두 있어야 시작한다", async () => {
   const series = [{ selector: PROBE_SUCCESS_SERIES, expectedValue: null, scrapeProof: true }];
-  for (const freshness of [{ series }, { series, notBefore: Number.NaN }, undefined]) {
+  for (const freshness of [{ series }, { series, notBefore: Number.NaN }, { notBefore: EPOCH0 }, null, undefined]) {
     await assert.rejects(pollLive({ docker: null, sleep: async () => {}, expected: snapshot(), flagKeys: [], freshness }), (error) => error.code === "E_OBS_DEPLOY_USAGE", JSON.stringify(freshness));
+  }
+});
+
+test("newestSample은 여러 시계열에서 가장 늦은 시각을 고르고 같은 시각이면 더 작은(보수적인) 수치 값을 결정론적으로 고른다", () => {
+  assert.deepEqual(newestSample([]), { sampleTime: null, value: null });
+  assert.deepEqual(
+    newestSample([
+      { values: [[100, "2000"], [105, "1800"]] },
+      { values: [[102, "300"], [105, "900"]] },
+      { values: [[105, "1200"]] },
+    ]),
+    { sampleTime: 105, value: "900" },
+  );
+  assert.deepEqual(
+    newestSample([
+      { values: [[110, "1500"]] },
+      { values: [[120, "2500"]] },
+    ]),
+    { sampleTime: 120, value: "2500" },
+  );
+});
+
+test("liveSeriesOf는 MANAGED_UNITS의 job·scrapeProof·liveSeries 불변식이 어긋나면 즉시 실패한다", () => {
+  assert.deepEqual(liveSeriesOf([PROMETHEUS]), []);
+  for (const [label, brokenUnit, pattern] of [
+    ["job 없이 liveSeries 지정", { ...PROMETHEUS, service: "bad-no-job", liveSeries: [{ metric: "up" }], scrapeProof: "up" }, /E_OBS_DEPLOY_USAGE.*bad-no-job.*must declare job, scrapeProof, and a matching liveSeries metric together/u],
+    ["liveSeries 없이 scrapeProof만 지정", { ...PROMETHEUS, service: "bad-empty-series", job: "j", scrapeProof: "up", liveSeries: [] }, /E_OBS_DEPLOY_USAGE.*bad-empty-series.*declares job\/scrapeProof without liveSeries/u],
+    ["scrapeProof 누락", { ...PROMETHEUS, service: "bad-no-proof", job: "j", scrapeProof: null, liveSeries: [{ metric: "up" }] }, /E_OBS_DEPLOY_USAGE.*bad-no-proof.*must declare job, scrapeProof, and a matching liveSeries metric together/u],
+    ["scrapeProof가 liveSeries에 없음", { ...PROMETHEUS, service: "bad-mismatch-proof", job: "j", scrapeProof: "probe_success", liveSeries: [{ metric: "probe_ssl_earliest_cert_expiry" }] }, /E_OBS_DEPLOY_USAGE.*bad-mismatch-proof.*must declare job, scrapeProof, and a matching liveSeries metric together/u],
+  ]) {
+    assert.throws(() => liveSeriesOf([brokenUnit]), pattern, label);
   }
 });
 

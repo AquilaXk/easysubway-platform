@@ -29,19 +29,20 @@ export const PROMETHEUS = Object.freeze({
   scrapeProof: null,
   liveSeries: Object.freeze([]),
 });
+export const ORIGIN_CERTIFICATE_PROBE = Object.freeze({
+  service: "origin-certificate-probe",
+  container: "easysubway-origin-certificate-probe",
+  configDirs: Object.freeze(["blackbox"]),
+  optional: true,
+  healthy: false,
+  mounts: Object.freeze([["/etc/blackbox_exporter/origin-certificate.yml", "blackbox/origin-certificate.yml"]]),
+  job: "origin_certificate_probe",
+  scrapeProof: "probe_success",
+  liveSeries: Object.freeze([Object.freeze({ metric: "probe_ssl_earliest_cert_expiry" }), Object.freeze({ metric: "probe_success", value: "1" })]),
+});
 export const MANAGED_UNITS = Object.freeze([
   PROMETHEUS,
-  Object.freeze({
-    service: "origin-certificate-probe",
-    container: "easysubway-origin-certificate-probe",
-    configDirs: Object.freeze(["blackbox"]),
-    optional: true,
-    healthy: false,
-    mounts: Object.freeze([["/etc/blackbox_exporter/origin-certificate.yml", "blackbox/origin-certificate.yml"]]),
-    job: "origin_certificate_probe",
-    scrapeProof: "probe_success",
-    liveSeries: Object.freeze([Object.freeze({ metric: "probe_ssl_earliest_cert_expiry" }), Object.freeze({ metric: "probe_success", value: "1" })]),
-  }),
+  ORIGIN_CERTIFICATE_PROBE,
 ]);
 const CONFIG_DIRS = Object.freeze([...MATERIALIZED_ONLY_DIRS, ...MANAGED_UNITS.flatMap((unit) => unit.configDirs)].toSorted(codepointCompare));
 const OPTIONAL_DIRS = Object.freeze(MANAGED_UNITS.filter((unit) => unit.optional).flatMap((unit) => unit.configDirs));

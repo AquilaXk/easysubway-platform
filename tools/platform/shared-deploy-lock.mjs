@@ -3,6 +3,7 @@
 // 배타 flock(2)을 건다. Node에는 flock이 없으므로 `flock --nonblock --exclusive <lock> node <이 파일> --hold-shared-deploy-lock`을 띄워
 // 그 자식이 잠금을 쥔 채 stdin이 닫힐 때까지 기다리게 한다. 다른 쪽이 잠금을 쥐고 있으면 flock이 바로 실패하므로 기다리지 않는다.
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -54,12 +55,23 @@ class SharedDeployLock {
   }
 }
 
-/** 잠금을 잡으면 SharedDeployLock으로, 못 잡으면 SharedDeployLockError로 거부한다. lostError는 verify()가 던질 오류를 만든다. */
-export function acquireSharedDeployLock({ lockPath, env = {}, lostError = () => new Error("shared deploy lock was lost") }) {
+/**
+ * 잠금을 잡으면 SharedDeployLock으로, 못 잡으면 SharedDeployLockError로 거부한다. lostError는 verify()가 던질 오류를 만든다.
+ * holder는 부모와 다른 프로세스 그룹(detached)으로 띄워, 부모 프로세스 그룹 전체에 SIGINT·SIGTERM이 와도 복구가 끝나 close()를 부를 때까지
+ * 잠금을 잃지 않게 한다. 부모가 강제 종료(SIGKILL)되면 커널이 stdin 파이프를 닫아 holder도 곧바로 끝난다.
+ */
+export function acquireSharedDeployLock({
+  lockPath,
+  env = {},
+  lostError = () => new Error("shared deploy lock was lost"),
+  flockCommand = FLOCK,
+  flockArgs = ["--nonblock", "--exclusive", "--conflict-exit-code", String(CONFLICT_EXIT_CODE), lockPath],
+}) {
   return new Promise((resolveLock, rejectLock) => {
-    const child = spawn(FLOCK, ["--nonblock", "--exclusive", "--conflict-exit-code", String(CONFLICT_EXIT_CODE), lockPath, process.execPath, fileURLToPath(import.meta.url), HOLDER_ARGUMENT], {
+    const child = spawn(flockCommand, [...flockArgs, process.execPath, fileURLToPath(import.meta.url), HOLDER_ARGUMENT], {
       env,
       shell: false,
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
     });
     const lock = new SharedDeployLock(child, lostError);
@@ -90,10 +102,10 @@ export function acquireSharedDeployLock({ lockPath, env = {}, lostError = () => 
         resolveLock(lock);
       }
     });
-    child.once("error", (error) => unavailable(`${FLOCK} could not start: ${error.message}`));
+    child.once("error", (error) => unavailable(`${flockCommand} could not start: ${error.message}`));
     child.once("close", (code, signal) => {
       if (code === CONFLICT_EXIT_CODE) fail(new SharedDeployLockError(true));
-      else unavailable(`${FLOCK} exited ${code ?? signal}: ${stderr.trim() || "no stderr"}`);
+      else unavailable(`${flockCommand} exited ${code ?? signal}: ${stderr.trim() || "no stderr"}`);
     });
   });
 }
@@ -107,5 +119,13 @@ async function holdSharedDeployLock() {
   });
 }
 
-const isMainModule = process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-if (isMainModule && process.argv.length === 3 && process.argv[2] === HOLDER_ARGUMENT) await holdSharedDeployLock();
+function isMainModule() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+  } catch {
+    return pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+  }
+}
+
+if (isMainModule() && process.argv.length === 3 && process.argv[2] === HOLDER_ARGUMENT) await holdSharedDeployLock();

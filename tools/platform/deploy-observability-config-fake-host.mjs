@@ -4,6 +4,7 @@ import { COMPOSE_NETWORK } from "./ensure-compose-network.mjs";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROMETHEUS_ORIGIN } from "./observability-prometheus.mjs";
 
 // deploy-observability-config.test.mjs가 쓰는 가짜 호스트와 시나리오 도구. docker·git 호출을 흉내 내고 상태 전이를 만든다.
 export const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -28,7 +29,6 @@ export const COMMAND = [
   "--web.enable-lifecycle",
   "--web.external-url=http://localhost:9090",
 ];
-const PROMETHEUS_ORIGIN = "http://127.0.0.1:9090";
 export const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 export const RUN_URL = "https://github.com/AquilaXk/easysubway-platform/actions/runs/123";
 // 이름과 서브넷은 실제 코드와 같은 계약 파일 값이다.
@@ -89,22 +89,65 @@ function httpBody(path, data) {
 const ok = (stdout) => ({ stdout, stderr: "" });
 const QUERY_PATH = "/api/v1/query?query=";
 
-function hostContext({
-  existingContainerId = "1".repeat(64), recreateOnUp = true, restartFixesLive = true, promtoolFails = null,
-  liveAfter = null, liveBefore = snapshot({ revision: "old" }), expected = snapshot(), health = "healthy",
-  headCommit = COMMIT, projectContainers = null, volumeAfter = null, upFails = false, composeCommand = COMMAND, containerMissing = false,
-  mounts = [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }], changeOthersOnUp = null, liveWarmupReads = 0, networksAfterUp = null, extraHostsAfterUp = null, mountedBefore = "stale", liveAfterRestore = null, probeExistingId = "a".repeat(64), probeMountedBefore = "current", composeDefines = ["prometheus", PROBE_SERVICE],
-  seriesWarmupReads = 0, missingSeries = [], staleSeriesReads = 0, staleSampleAt = EPOCH0 - 20, probeSuccessValue = "1", restoreSeries = {},
-  composeNetwork = { exists: true, subnet: COMPOSE_SUBNET }, detachOnFailedUp = false, connectFails = false, composeNetworkConfig = undefined, changeOnRestoreUp = null,
-  forwardUpFails = false, detachedBefore = false, restoreComposeNetworkConfig = undefined, leftoverReferences = [], probeRunning = true, probeDetached = false,
-} = {}) {
+const HOST_DEFAULTS = Object.freeze({
+  existingContainerId: "1".repeat(64),
+  recreateOnUp: true,
+  restartFixesLive: true,
+  promtoolFails: null,
+  pullFails: null,
+  liveAfter: null,
+  liveBefore: null,
+  expected: null,
+  health: "healthy",
+  headCommit: COMMIT,
+  projectContainers: null,
+  volumeAfter: null,
+  upFails: false,
+  composeCommand: COMMAND,
+  probeImage: PROBE_IMAGE,
+  containerMissing: false,
+  mounts: [{ Type: "volume", Name: "easysubway_prometheus-data", Destination: "/prometheus" }],
+  changeOthersOnUp: null,
+  liveWarmupReads: 0,
+  networksAfterUp: null,
+  extraHostsAfterUp: null,
+  mountedBefore: "stale",
+  liveAfterRestore: null,
+  probeExistingId: "a".repeat(64),
+  probeMountedBefore: "current",
+  composeDefines: ["prometheus", PROBE_SERVICE],
+  seriesWarmupReads: 0,
+  missingSeries: [],
+  unreadableSeries: [],
+  staleSeriesReads: 0,
+  staleSampleAt: EPOCH0 - 20,
+  probeSuccessValue: "1",
+  restoreSeries: {},
+  composeNetwork: { exists: true, subnet: COMPOSE_SUBNET },
+  detachOnFailedUp: false,
+  connectFails: false,
+  composeNetworkConfig: undefined,
+  changeOnRestoreUp: null,
+  forwardUpFails: false,
+  detachedBefore: false,
+  restoreComposeNetworkConfig: undefined,
+  leftoverReferences: [],
+  probeRunning: true,
+  probeDetached: false,
+});
+
+function hostContext(options = {}) {
+  const opts = { ...HOST_DEFAULTS, ...options };
+  const liveBefore = opts.liveBefore ?? snapshot({ revision: "old" });
+  const expected = opts.expected ?? snapshot();
   const state = {
-    containerId: existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: mountedBefore,
-    probe: { id: probeExistingId, mounted: probeMountedBefore, networks: probeDetached ? [] : [COMPOSE_NETWORK_NAME], running: probeRunning }, dirs: {}, upAttempts: 0, networks: detachedBefore ? [] : [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
-    composeNetwork: { ...composeNetwork }, detachedReads: 0, references: new Set(leftoverReferences),
+    containerId: opts.existingContainerId, live: liveBefore, generation: 0, warmup: 0, queries: [], reads: {}, restoreReads: {}, clock: EPOCH0, mounted: opts.mountedBefore,
+    probe: { id: opts.probeExistingId, mounted: opts.probeMountedBefore, networks: opts.probeDetached ? [] : [COMPOSE_NETWORK_NAME], running: opts.probeRunning },
+    dirs: {}, upAttempts: 0, networks: opts.detachedBefore ? [] : [COMPOSE_NETWORK_NAME], extraHosts: [HOST_GATEWAY],
+    composeNetwork: { ...opts.composeNetwork }, detachedReads: 0, references: new Set(opts.leftoverReferences), pulledImages: [],
   };
   const volume = { Name: "easysubway_prometheus-data", Mountpoint: "/var/lib/easysubway-data/docker/volumes/easysubway_prometheus-data/_data", CreatedAt: "2026-06-30T18:05:00Z", Labels: { "com.docker.compose.project": "easysubway", "com.docker.compose.volume": "prometheus-data" } };
-  const others = projectContainers ?? [
+  const others = opts.projectContainers ?? [
     { name: "easysubway-postgres", id: "2".repeat(64), image: "sha256:postgres", startedAt: "2026-06-30T00:00:00Z" },
     { name: "easysubway-alertmanager", id: "3".repeat(64), image: "sha256:alertmanager", startedAt: "2026-06-30T00:00:01Z" },
     { name: "easysubway-grafana", id: "4".repeat(64), image: "sha256:grafana", startedAt: "2026-06-30T00:00:02Z" },
@@ -113,9 +156,9 @@ function hostContext({
   // 각 단계는 첫 표본이 늦게 나오는 회차(warmupReads), 사라진 시계열(missing), 수렴 전 표본만 남은 회차(staleReads), probe_success 값,
   // 질의 실패(unreadable)를 가진다. 적용 단계는 위 옵션으로, 복원 단계는 restoreSeries로 정하고 복원한 직전 release의 probe는 기본이 정상이다.
   // 서버에 닿지 않으면(probe_success 0) blackbox는 만료 시계열을 내지 않으므로 그 단계에서 만료 시계열은 비어 있다.
-  const applyBehavior = { warmupReads: seriesWarmupReads, missing: missingSeries, staleReads: staleSeriesReads, successValue: probeSuccessValue, unreadable: [] };
-  const restoreBehavior = { warmupReads: 0, missing: [], staleReads: 0, successValue: probeSuccessValue, unreadable: [], ...restoreSeries };
-  const config = { recreateOnUp, restartFixesLive, promtoolFails, liveAfter, expected, health, headCommit, volumeAfter, upFails, composeCommand, containerMissing, mounts, changeOthersOnUp, liveWarmupReads, networksAfterUp, extraHostsAfterUp, liveAfterRestore, composeDefines, staleSampleAt, applyBehavior, restoreBehavior, detachOnFailedUp, connectFails, composeNetworkConfig, changeOnRestoreUp, forwardUpFails, restoreComposeNetworkConfig };
+  const applyBehavior = { warmupReads: opts.seriesWarmupReads, missing: opts.missingSeries, staleReads: opts.staleSeriesReads, successValue: opts.probeSuccessValue, unreadable: opts.unreadableSeries };
+  const restoreBehavior = { warmupReads: 0, missing: [], staleReads: 0, successValue: opts.probeSuccessValue, unreadable: [], ...opts.restoreSeries };
+  const config = { ...opts, expected, applyBehavior, restoreBehavior };
   return { calls: [], state, volume, others, config, reference: null };
 }
 
@@ -136,7 +179,15 @@ function seriesSamples({ state, config }, query) {
   return [{ metric: {}, values: samples }];
 }
 
-const dockerPull = () => ok("");
+function dockerPull(ctx, args, line) {
+  assert.equal(args.length, 2, line);
+  const image = args[1];
+  ctx.state.pulledImages.push(image);
+  if (ctx.config.pullFails === image || ctx.config.pullFails === "all") {
+    throw new Error(`manifest for ${image} not found`);
+  }
+  return ok("");
+}
 
 function dockerCompose(ctx, args, line) {
   if (args.includes("config")) return composeConfig(ctx.config, ctx.state.upAttempts >= 1 ? "restore" : "apply");
@@ -145,8 +196,8 @@ function dockerCompose(ctx, args, line) {
 }
 
 // compose config 출력. 기본 네트워크 정의는 적용 단계와 복원 단계(첫 compose up 시도 뒤)에 따로 정할 수 있다.
-function composeConfig({ composeDefines, composeCommand, composeNetworkConfig, restoreComposeNetworkConfig }, phase) {
-  const services = Object.fromEntries(composeDefines.map((name) => [name, name === "prometheus" ? { image: IMAGE, command: composeCommand } : { image: PROBE_IMAGE, command: PROBE_COMMAND }]));
+function composeConfig({ composeDefines, composeCommand, probeImage, composeNetworkConfig, restoreComposeNetworkConfig }, phase) {
+  const services = Object.fromEntries(composeDefines.map((name) => [name, name === "prometheus" ? { image: IMAGE, command: composeCommand } : { image: probeImage, command: PROBE_COMMAND }]));
   const network = phase === "restore" && restoreComposeNetworkConfig !== undefined ? restoreComposeNetworkConfig : composeNetworkConfig;
   return ok(JSON.stringify({ services, ...(network ? { networks: { default: network } } : {}) }));
 }
