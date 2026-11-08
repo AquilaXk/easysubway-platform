@@ -50,7 +50,7 @@
       "ownerIssueTitle": "[Security][Platform][P1] public datapack private delivery로 CKV_OCI_10 bounded risk 제거",
       "ownerIssueState": "OPEN",
       "removalCondition": "지원 consumer의 private delivery 전환, public URL 의존 0, NoPublicAccess 적용·anonymous GET/list 실패, CKV_OCI_10 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     },
     {
       "scanner": "CHECKOV",
@@ -66,7 +66,7 @@
       "ownerIssueTitle": "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision",
       "ownerIssueState": "OPEN",
       "removalCondition": "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     },
     {
       "scanner": "CHECKOV",
@@ -82,7 +82,7 @@
       "ownerIssueTitle": "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소",
       "ownerIssueState": "OPEN",
       "removalCondition": "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     },
     {
       "scanner": "CHECKOV",
@@ -98,7 +98,7 @@
       "ownerIssueTitle": "[Security][Platform][P2] datapack bucket object-event 필요성 판정 및 CKV_OCI_7 decision",
       "ownerIssueState": "OPEN",
       "removalCondition": "승인된 object-event consumer·retention·alert/audit owner·failure handling 확정, CKV_OCI_7 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     },
     {
       "scanner": "CHECKOV",
@@ -114,7 +114,7 @@
       "ownerIssueTitle": "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소",
       "ownerIssueState": "OPEN",
       "removalCondition": "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, bucket kms_key_id plan evidence, CKV_OCI_9 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     },
     {
       "scanner": "CHECKOV",
@@ -130,7 +130,7 @@
       "ownerIssueTitle": "[Resilience][Platform][P1] OCI data volume backup·restore contract로 CKV_OCI_2 해소",
       "ownerIssueState": "OPEN",
       "removalCondition": "scanner가 cross-root state relationship을 검증하거나 volume과 assignment가 하나의 안전한 managed state로 통합되면 CKV_OCI_2 decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     },
     {
       "scanner": "CHECKOV",
@@ -146,7 +146,7 @@
       "ownerIssueTitle": "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소",
       "ownerIssueState": "OPEN",
       "removalCondition": "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, volume kms_key_id plan evidence, CKV_OCI_3 0, policy decision 삭제",
-      "expiresAt": "2026-11-07"
+      "expiresAt": "2027-02-06"
     }
   ]
 }

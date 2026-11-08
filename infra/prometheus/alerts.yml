@@ -417,3 +417,48 @@ groups:
           title_ko: "원 서버 인증서 점검 실패"
           impact_ko: "원 서버 인증서 만료 시각을 읽지 못해 만료 21일·7일 전 경보가 조용히 멈춥니다."
           action_ko: "origin-certificate-probe 컨테이너와 blackbox 설정(origin_tls_expiry module), compose 네트워크에서 호스트 443으로 가는 경로(방화벽 포함)를 확인하세요."
+
+  # 호스트 루트 파일시스템(/) 디스크 사용률 감시(platform#269 21행).
+  # docker-runtime-probe(cAdvisor)는 호스트 / 를 /rootfs:ro 로 마운트하여 id="/" 파일시스템 사용량·한계를 노출하고,
+  # prometheus.yml의 docker_runtime_probe job이 15초마다 수집한다.
+  # 75% 이상~85% 미만은 주의(warning), 85% 이상은 긴급(critical)으로 분리하되, 85%를 넘을 때 critical이 5분 pending인 동안
+  # warning이 먼저 풀려 무음 구간이 생기지 않도록 keep_firing_for: 5m를 둔다.
+  - name: easysubway-host-disk
+    rules:
+      - record: easysubway:host_root_disk_usage_ratio
+        expr: |
+          max(
+            container_fs_usage_bytes{job="docker_runtime_probe",id="/"}
+            /
+            (container_fs_limit_bytes{job="docker_runtime_probe",id="/"} > 0)
+          )
+
+      - alert: HostRootDiskUsageWarning
+        expr: |
+          easysubway:host_root_disk_usage_ratio >= 0.75
+          and
+          easysubway:host_root_disk_usage_ratio < 0.85
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+          service: aquila-host-disk
+        annotations:
+          summary: Host root filesystem disk usage is 75% or higher
+          description: Host root filesystem (/) disk usage reported by docker_runtime_probe has remained between 75% and 85% for at least 5 minutes.
+          title_ko: "호스트 루트 디스크 사용률 75% 이상"
+          impact_ko: "루트 디스크 여유 공간이 줄어 백엔드 이미지 pull, 컨테이너 로그 기록, PostgreSQL 작업이 공간 부족으로 실패할 위험이 커집니다."
+          action_ko: "node tools/platform/prune-host-backend-images.mjs --mode DRY_RUN 으로 정리 대상을 확인한 뒤, k3s crictl rmi 및 docker image prune 으로 옛 컨테이너 이미지를 정리하고 디스크 점유 상위 경로를 점검하세요."
+
+      - alert: HostRootDiskUsageCritical
+        expr: easysubway:host_root_disk_usage_ratio >= 0.85
+        for: 5m
+        labels:
+          severity: critical
+          service: aquila-host-disk
+        annotations:
+          summary: Host root filesystem disk usage is 85% or higher
+          description: Host root filesystem (/) disk usage reported by docker_runtime_probe has remained at or above 85% for at least 5 minutes. Immediate disk reclamation is required before K3s kubelet disk-pressure eviction or PostgreSQL write failure occurs.
+          title_ko: "호스트 루트 디스크 사용률 85% 이상 긴급"
+          impact_ko: "루트 디스크 포화가 임박해 K3s 노드의 ImageFS/NodeHasDiskPressure 축출(eviction), 신규 배포 실패, 데이터베이스 쓰기 중단이 발생할 수 있습니다."
+          action_ko: "즉시 node tools/platform/prune-host-backend-images.mjs --mode EXECUTE --keep-count 3 --best-effort 또는 k3s crictl rmi / docker image prune 으로 미사용 이미지를 회수하고 루트 디스크 여유 공간을 25% 이상 확보하세요."

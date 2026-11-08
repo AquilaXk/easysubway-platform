@@ -105,6 +105,7 @@ jobs:
           node --test tools/platform/observability-network.test.mjs
           node --test tools/platform/shared-deploy-lock.test.mjs
           node --test tools/platform/prune-k3s-candidate-configs.test.mjs
+          node --test tools/platform/prune-host-backend-images.test.mjs
           node --test tools/ci/observability-config-deploy-workflow.test.mjs
           node --test tools/ci/origin-certificate-renew-workflow.test.mjs
           node --test tools/ci/production-deploy-actor-gates.test.mjs

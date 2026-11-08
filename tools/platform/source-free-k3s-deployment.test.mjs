@@ -740,7 +740,9 @@ test("contract and workflow keep K3s activation source-free, protected and Compo
   assert.match(workflow, /acquire-platform-contract-bundle\.mjs/);
   assert.match(workflow, /prepare-source-free-k3s-deployment\.mjs/);
   assert.match(workflow, /run-k3s-journey-activation\.mjs/);
+  assert.match(workflow, /prune-host-backend-images\.mjs --mode EXECUTE --keep-count 3 --best-effort/);
   assert.ok(workflow.indexOf("acquire-platform-contract-bundle.mjs") < workflow.indexOf("prepare-source-free-k3s-deployment.mjs"));
+  assert.ok(workflow.indexOf("run-k3s-journey-activation.mjs") < workflow.indexOf("prune-host-backend-images.mjs"));
   assert.match(workflow, /platform-contracts-\$\{GITHUB_RUN_ID\}/);
   assert.doesNotMatch(workflow, /mkdir -p[^\n]*\$\{source_free_root\}/);
   assert.doesNotMatch(workflow, /run-fixed-host-journey-activation\.mjs/);
