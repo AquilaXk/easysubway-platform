@@ -381,21 +381,36 @@ function mockCandidateRenderPlan({
       kind: "NetworkPolicy",
       metadata: { name: "journey-backend-boundary", namespace: "easysubway-journey" },
       spec: {
-        ingress: [{
-          from: [
-            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
-            { ipBlock: { cidr: "10.0.0.17/32" } },
-            { ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } },
-          ],
-          ports: [{ protocol: "TCP", port: 8080 }],
-        }],
+        ingress: [
+          {
+            from: [
+              { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+              { ipBlock: { cidr: "10.0.0.17/32" } },
+            ],
+            ports: [{ protocol: "TCP", port: 8080 }],
+          },
+          {
+            from: [
+              { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+              { ipBlock: { cidr: "10.0.0.17/32" } },
+              { ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } },
+            ],
+            ports: [{ protocol: "TCP", port: 8081 }],
+          },
+        ],
       },
     }],
     activationPlan: {
       requiredCasField: "metadata.resourceVersion",
       applyDuringCandidatePreparation: false,
       activeServiceTemplate: {
-        spec: { clusterIP: OBSERVABILITY_CONTRACT.activeService.clusterIP, ports: [{ nodePort: 32080 }] },
+        spec: {
+          clusterIP: OBSERVABILITY_CONTRACT.activeService.clusterIP,
+          ports: [
+            { name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 },
+            { name: "management", port: 8081, protocol: "TCP", targetPort: 8081 },
+          ],
+        },
       },
       candidateDeploymentName,
       candidateServiceName,
@@ -572,7 +587,7 @@ test("success linearizes traffic with Service resourceVersion CAS before Nginx a
   );
   await missing(path.join(root, "operation", "k3s-activation-failure.json"));
 });
-test("Nginx cutover changes exactly three backend targets and preserves other routes", () => {
+test("Nginx cutover routes public health probes to management port and app traffic to 32080 while preserving other routes", () => {
   const current = Buffer.from([
     "location = /api/v2/routes/search { proxy_pass http://127.0.0.1:8081; }",
     "location = /actuator/health/readiness { proxy_pass http://127.0.0.1:8080; }",
@@ -581,9 +596,18 @@ test("Nginx cutover changes exactly three backend targets and preserves other ro
     "",
   ].join("\n"));
   const k3s = renderK3sNginxConfig(current);
-  assert.equal(k3s.toString("utf8").match(/127\.0\.0\.1:32080/g)?.length, 3);
+  assert.equal(k3s.toString("utf8").match(/127\.0\.0\.1:32080/g)?.length, 1);
+  assert.equal(k3s.toString("utf8").match(/10\.43\.11\.187:8081/g)?.length, 2);
   assert.match(k3s.toString("utf8"), /127\.0\.0\.1:8081/);
   assert.deepEqual(renderK3sNginxConfig(k3s), k3s);
+  const legacyK3s = Buffer.from([
+    "location = /api/v2/routes/search { proxy_pass http://127.0.0.1:8081; }",
+    "location = /actuator/health/readiness { proxy_pass http://127.0.0.1:32080; }",
+    "location = /actuator/health/liveness { proxy_pass http://127.0.0.1:32080; }",
+    "location / { proxy_pass http://127.0.0.1:32080; }",
+    "",
+  ].join("\n"));
+  assert.deepEqual(renderK3sNginxConfig(legacyK3s), k3s);
   assert.throws(() => renderK3sNginxConfig(Buffer.from(
     "proxy_pass http://127.0.0.1:8080;\n",
   )));
@@ -1187,11 +1211,17 @@ test("verifyRuntime fails closed when the live active Service ClusterIP drifts f
 test("applyCandidate rejects a render whose NetworkPolicy or active ClusterIP drifts from the contract before apply", async () => {
   for (const mutate of [
     (plan) => { plan.activationPlan.activeServiceTemplate.spec.clusterIP = "10.43.0.99"; },
-    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[2].ipBlock.cidr = "172.19.0.0/16"; },
-    (plan) => { plan.candidateObjects[0].spec.ingress[0].ports.push({ protocol: "TCP", port: 9090 }); },
+    (plan) => { plan.activationPlan.activeServiceTemplate.spec.ports = [{ name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 }]; },
+    // Issue #225: compose 서브넷이 메인 HTTP 포트(8080)에 열리거나 management 포트(8081)가 다른 서브넷·다른 /32를 열거나 노드 /32가 빠지면 거부한다.
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[1].from.push({ ipBlock: { cidr: "10.0.0.99/32" } }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[1].from = plan.candidateObjects[0].spec.ingress[1].from.filter((source) => source.ipBlock?.cidr !== "10.0.0.17/32"); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[1].from[2].ipBlock.cidr = "172.19.0.0/16"; },
+    (plan) => { plan.candidateObjects[0].spec.ingress[0].ports.push({ protocol: "TCP", port: 8081 }); },
+    (plan) => { plan.candidateObjects[0].spec.ingress[1].ports.push({ protocol: "TCP", port: 8080 }); },
     // F1: 넓어지는 변이(전체 허용 출처, except가 붙은 subnet, 다른 포트를 여는 별도 규칙, 다른 /32)를 거부한다.
     (plan) => { plan.candidateObjects[0].spec.ingress[0].from.push({ ipBlock: { cidr: "0.0.0.0/0" } }); },
-    (plan) => { plan.candidateObjects[0].spec.ingress[0].from[2].ipBlock.except = ["172.18.0.6/32"]; },
+    (plan) => { plan.candidateObjects[0].spec.ingress[1].from[2].ipBlock.except = ["172.18.0.6/32"]; },
     (plan) => {
       plan.candidateObjects[0].spec.ingress.push({
         from: [{ ipBlock: { cidr: OBSERVABILITY_CONTRACT.composeNetwork.subnet } }],

@@ -11,9 +11,9 @@ rule_files:
   - /etc/prometheus/alerts.yml
 
 scrape_configs:
-  # backend 수집 대상(Issue #221): K3s 활성화는 compose backend를 drain하고 트래픽을 journey-active Service로
-  # 옮긴다. 두 backend job은 그 활성 Service의 ClusterIP:8080을 대상으로 해 selector가 가리키는 현재 활성 pod를
-  # 따라간다. ClusterIP와 이 경로를 허용하는 NetworkPolicy ipBlock(compose 서브넷)의 기대값은
+  # backend 수집 대상(Issue #221, #225): K3s 활성화는 compose backend를 drain하고 트래픽을 journey-active Service로
+  # 옮긴다. 두 backend job은 그 활성 Service의 actuator 전용 포트(ClusterIP:8081)를 대상으로 해 selector가 가리키는 현재 활성 pod를
+  # 따라간다. ClusterIP·managementPort와 이 경로를 허용하는 NetworkPolicy ipBlock(compose 서브넷)의 기대값은
   # contracts/release/platform-k3s-observability-contract.json 한 곳에 있고, 계약 테스트가 이 파일과 대조한다.
   # 활성 Service가 응답하지 않으면 대체 대상 없이 down으로 드러나 경보가 발화한다.
   - job_name: "easysubway-backend"
@@ -22,7 +22,7 @@ scrape_configs:
       module: [http_2xx]
     static_configs:
       - targets:
-          - "http://10.43.11.187:8080/actuator/health/readiness"
+          - "http://10.43.11.187:8081/actuator/health/readiness"
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -32,13 +32,13 @@ scrape_configs:
         replacement: public-edge-probe:9115
 
   # backend actuator Prometheus 메트릭 직접 scrape(Hub Issue #2376). actuator는 공개 노출하지 않고(nginx 공개
-  # 경로에서 /actuator/* 차단, readiness/liveness probe만 예외), 이 job은 활성 K3s Service ClusterIP로
+  # 경로에서 /actuator/* 차단, readiness/liveness probe만 예외), 이 job은 활성 K3s Service ClusterIP:8081로
   # /actuator/prometheus 에 직접 접근해 easysubway_timetable_snapshot_remaining_seconds 등 앱 메트릭을 수집한다.
   - job_name: "backend_app_metrics"
     metrics_path: "/actuator/prometheus"
     static_configs:
       - targets:
-          - "10.43.11.187:8080"
+          - "10.43.11.187:8081"
 
   - job_name: "docker_runtime_probe"
     static_configs:

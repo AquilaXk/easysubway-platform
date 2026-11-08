@@ -82,7 +82,7 @@ tests:
   - interval: 1m
     name: backend app metrics scrape down fires dead-mans switch
     input_series:
-      - series: 'up{job="backend_app_metrics", instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics", instance="10.43.11.187:8081"}'
         values: '0x10'
     alert_rule_test:
       - eval_time: 6m
@@ -96,13 +96,13 @@ tests:
               description: Prometheus cannot scrape backend_app_metrics (K3s journey-active Service /actuator/prometheus) for 5m. The timetable snapshot freshness gauge disappears, so the T-24h/T-6h freshUntil alerts silently stop evaluating (dead-man's switch).
               title_ko: "백엔드 앱 메트릭 수집 실패"
               impact_ko: "운행표 snapshot 잔여시간 게이지가 사라져 만료 24/6시간 전 경보가 조용히 멈춥니다."
-              action_ko: "K3s journey-active Service의 활성 pod 상태와 /actuator/prometheus 응답, compose 네트워크에서 Service ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
+              action_ko: "K3s journey-active Service의 활성 pod 상태와 /actuator/prometheus 응답, compose 네트워크에서 Service ClusterIP:8081 접근(NetworkPolicy)을 확인하세요."
 
   # backend_app_metrics가 정상 scrape되면(up=1) dead-man's switch는 조용하다.
   - interval: 1m
     name: backend app metrics scrape up stays silent
     input_series:
-      - series: 'up{job="backend_app_metrics", instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics", instance="10.43.11.187:8081"}'
         values: '1x10'
     alert_rule_test:
       - eval_time: 6m
@@ -114,9 +114,9 @@ tests:
   - interval: 1m
     name: backend readiness probe failure fires
     input_series:
-      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8081/actuator/health/readiness"}'
         values: '0x10'
-      - series: 'up{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+      - series: 'up{job="easysubway-backend", instance="http://10.43.11.187:8081/actuator/health/readiness"}'
         values: '1x10'
     alert_rule_test:
       - eval_time: 6m
@@ -130,13 +130,13 @@ tests:
               description: The blackbox readiness probe to the active K3s journey-active Service has failed for 5m. The active backend is not ready or the compose-to-ClusterIP path (NetworkPolicy) is blocked.
               title_ko: "백엔드 readiness 점검 실패"
               impact_ko: "활성 K3s backend가 준비되지 않았거나 관측 경로가 막혀 backend 상태를 확인할 수 없습니다."
-              action_ko: "journey-active Service의 활성 pod 상태와 /actuator/health/readiness 응답, compose 네트워크에서 ClusterIP:8080 접근(NetworkPolicy)을 확인하세요."
+              action_ko: "journey-active Service의 활성 pod 상태와 /actuator/health/readiness 응답, compose 네트워크에서 ClusterIP:8081 접근(NetworkPolicy)을 확인하세요."
 
   # 짧은 실패(5분 미만)는 발화하지 않고, 정상 probe는 조용하다.
   - interval: 1m
     name: backend readiness probe success or short blip stays silent
     input_series:
-      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8080/actuator/health/readiness"}'
+      - series: 'probe_success{job="easysubway-backend", instance="http://10.43.11.187:8081/actuator/health/readiness"}'
         values: '1 1 0 0 0 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 10m
@@ -232,11 +232,11 @@ tests:
   - interval: 1m
     name: BackendJourneyLatencyBurnRateCritical fires when depart_at is slower than 25 ms on both windows
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0+42x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.25"}'
         values: '0+60x70'
     alert_rule_test:
       - eval_time: 65m
@@ -257,9 +257,9 @@ tests:
   - interval: 1m
     name: healthy latency stays silent on every tier
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0+59.4x70'
     alert_rule_test:
       - eval_time: 65m
@@ -276,9 +276,9 @@ tests:
   - interval: 1m
     name: short spike alone does not fire Critical (only the 5m window exceeds)
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0+60x60 3600+0x10'
     alert_rule_test:
       - eval_time: 65m
@@ -289,9 +289,9 @@ tests:
   - interval: 1m
     name: BackendJourneyLatencyBurnRateCritical stays silent under the traffic guard
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0+0.5x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0x70'
     alert_rule_test:
       - eval_time: 65m
@@ -302,39 +302,39 @@ tests:
   - interval: 1m
     name: no traffic (zero rate, count 0) never fires any latency alert
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route",le="0.025"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.25"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route",le="0.25"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok",le="0.25"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route",le="0.25"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.5"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route",le="0.5"}'
         values: '0x70'
-      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8081"}'
         values: '1x70'
     alert_rule_test:
       - eval_time: 65m
@@ -354,9 +354,9 @@ tests:
   - interval: 1m
     name: idle after historical traffic (counters flat, rate 0) stays silent
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok"}'
         values: '5000x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.25"}'
         values: '100x70'
     alert_rule_test:
       - eval_time: 65m
@@ -370,19 +370,19 @@ tests:
   - interval: 1m
     name: arrive_by uses the 0.25 boundary while depart_between uses 0.5
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.025"}'
         values: '0+10x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.25"}'
         values: '0+42x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.025"}'
         values: '0+20x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.25"}'
         values: '0+30x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.5"}'
         values: '0+59.5x70'
     alert_rule_test:
       - eval_time: 65m
@@ -403,17 +403,17 @@ tests:
   - interval: 1m
     name: error and fail_closed outcomes are excluded from the latency SLI
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0+59.4x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="error"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="error"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="error",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="error",le="0.025"}'
         values: '0x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="fail_closed"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="fail_closed"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="fail_closed",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="fail_closed",le="0.025"}'
         values: '0x70'
     alert_rule_test:
       - eval_time: 65m
@@ -424,13 +424,13 @@ tests:
   - interval: 1m
     name: slow no_route searches count against the latency SLI
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route"}'
         values: '0+60x70'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route",le="0.025"}'
         values: '0x70'
     alert_rule_test:
       - eval_time: 65m
@@ -451,9 +451,9 @@ tests:
   - interval: 5m
     name: BackendJourneyLatencyBurnRateWarning fires on the 6h and 30m windows
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok"}'
         values: '0+300x85'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok",le="0.25"}'
         values: '0+210x85'
     alert_rule_test:
       - eval_time: 7h
@@ -474,9 +474,9 @@ tests:
   - interval: 1h
     name: BackendJourneyLatencyBurnRateTicket fires on the 3d and 6h windows
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0+3600x80'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.5"}'
         values: '0+3000x80'
     alert_rule_test:
       - eval_time: 75h
@@ -497,9 +497,9 @@ tests:
   - interval: 1h
     name: BackendJourneyLatencyBurnRateTicket stays silent within the budget
     input_series:
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0+3600x80'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.5"}'
         values: '0+3582x80'
     alert_rule_test:
       - eval_time: 75h
@@ -510,7 +510,7 @@ tests:
   - interval: 1m
     name: missing SLI series with a healthy scrape fires the missing-series alert
     input_series:
-      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8081"}'
         values: '1x20'
     alert_rule_test:
       - eval_time: 15m
@@ -530,37 +530,37 @@ tests:
   - interval: 1m
     name: one missing SLO bucket boundary fires the missing-series alert
     input_series:
-      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8081"}'
         values: '1x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route",le="0.025"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route",le="0.5"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route"}'
         values: '0x20'
     alert_rule_test:
       - eval_time: 15m
@@ -580,37 +580,37 @@ tests:
   - interval: 1m
     name: a single missing outcome bucket fires even when every count series exists
     input_series:
-      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8081"}'
         values: '1x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route",le="0.025"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.5"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route",le="0.5"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route"}'
         values: '0x20'
     alert_rule_test:
       - eval_time: 15m
@@ -630,37 +630,37 @@ tests:
   - interval: 1m
     name: a missing count series fires even when every SLO bucket exists
     input_series:
-      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8081"}'
         values: '1x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="ok",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="ok",le="0.025"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route",le="0.025"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route",le="0.025"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_at",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_at",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="arrive_by",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="arrive_by",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route",le="0.25"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route",le="0.25"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="last_connection",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="last_connection",outcome="no_route"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok",le="0.5"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="ok"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="ok"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route",le="0.5"}'
+      - series: 'easysubway_journey_search_duration_seconds_bucket{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route",le="0.5"}'
         values: '0x20'
-      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8080",mode="depart_between",outcome="no_route"}'
+      - series: 'easysubway_journey_search_duration_seconds_count{job="backend_app_metrics",instance="10.43.11.187:8081",mode="depart_between",outcome="no_route"}'
         values: '0x20'
     alert_rule_test:
       - eval_time: 15m
@@ -680,7 +680,7 @@ tests:
   - interval: 1m
     name: scrape down does not double-fire the missing-series alert
     input_series:
-      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8080"}'
+      - series: 'up{job="backend_app_metrics",instance="10.43.11.187:8081"}'
         values: '0x20'
     alert_rule_test:
       - eval_time: 15m

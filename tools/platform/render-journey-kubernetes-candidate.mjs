@@ -165,7 +165,8 @@ function readObservabilityContract() {
     contract?.activeService?.name !== "journey-active" ||
     contract?.activeService?.namespace !== NAMESPACE ||
     !isIPv4(contract?.activeService?.clusterIP ?? "") ||
-    contract?.activeService?.port !== 8080) {
+    contract?.activeService?.port !== 8080 ||
+    contract?.activeService?.managementPort !== 8081) {
     fail("E_K3S_RENDER_CONTRACT", "observability contract is invalid");
   }
   return contract;
@@ -270,7 +271,7 @@ function externalEndpointSlice(name, address, port) {
 
 function probe(path, initialDelaySeconds, failureThreshold) {
   return {
-    httpGet: { path, port: 8080, scheme: "HTTP" },
+    httpGet: { path, port: 8081, scheme: "HTTP" },
     initialDelaySeconds,
     periodSeconds: 5,
     timeoutSeconds: 2,
@@ -312,7 +313,10 @@ function deployment(input, token, deploymentName, configName, secretName) {
             name: "backend",
             image: `ghcr.io/aquilaxk/easysubway-backend@${input.releaseTuple.backendImageDigest}`,
             imagePullPolicy: "IfNotPresent",
-            ports: [{ name: "http", containerPort: 8080, protocol: "TCP" }],
+            ports: [
+              { name: "http", containerPort: 8080, protocol: "TCP" },
+              { name: "management", containerPort: 8081, protocol: "TCP" },
+            ],
             envFrom: [{ configMapRef: { name: configName } }, { secretRef: { name: secretName } }],
             resources: {
               requests: { cpu: "250m", memory: "1Gi", "ephemeral-storage": "256Mi" },
@@ -357,7 +361,10 @@ function candidateService(token, name) {
     spec: {
       type: "ClusterIP",
       selector: labels(token),
-      ports: [{ name: "http", port: 8080, protocol: "TCP", targetPort: 8080 }],
+      ports: [
+        { name: "http", port: 8080, protocol: "TCP", targetPort: 8080 },
+        { name: "management", port: 8081, protocol: "TCP", targetPort: 8081 },
+      ],
     },
   };
 }
@@ -370,15 +377,24 @@ function networkPolicy(input, observability) {
     spec: {
       podSelector: { matchLabels: { "app.kubernetes.io/name": "easysubway-journey" } },
       policyTypes: ["Ingress", "Egress"],
-      ingress: [{
-        from: [
-          { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } } },
-          { ipBlock: { cidr: `${input.nodeInternalIp}/32` } },
-          // compose Prometheus·blackbox probe가 활성 Service ClusterIP로 actuator를 수집한다(Issue #221).
-          { ipBlock: { cidr: observability.composeNetwork.subnet } },
-        ],
-        ports: [{ protocol: "TCP", port: 8080 }],
-      }],
+      ingress: [
+        {
+          from: [
+            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } } },
+            { ipBlock: { cidr: `${input.nodeInternalIp}/32` } },
+          ],
+          ports: [{ protocol: "TCP", port: 8080 }],
+        },
+        {
+          from: [
+            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } } },
+            { ipBlock: { cidr: `${input.nodeInternalIp}/32` } },
+            // compose Prometheus·blackbox probe가 활성 Service ClusterIP로 actuator 포트만 수집한다(Issue #221, #225).
+            { ipBlock: { cidr: observability.composeNetwork.subnet } },
+          ],
+          ports: [{ protocol: "TCP", port: observability.activeService.managementPort }],
+        },
+      ],
       egress: [
         { to: [{ ipBlock: { cidr: `${input.nodeInternalIp}/32` } }], ports: [{ protocol: "TCP", port: 15432 }, { protocol: "TCP", port: 9000 }] },
         { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] },
@@ -406,7 +422,15 @@ function activeServiceTemplate(token, observability) {
       clusterIP: observability.activeService.clusterIP,
       externalTrafficPolicy: "Local",
       selector: labels(token),
-      ports: [{ name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 }],
+      ports: [
+        { name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 },
+        {
+          name: "management",
+          port: observability.activeService.managementPort,
+          protocol: "TCP",
+          targetPort: observability.activeService.managementPort,
+        },
+      ],
     },
   };
 }
@@ -455,6 +479,7 @@ function renderWithToken(input, observability, token) {
     },
     overrides: {
       SPRING_PROFILES_ACTIVE: "prod",
+      EASYSUBWAY_MANAGEMENT_PORT: "8081",
       EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false",
       EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_PATH: "/etc/easysubway/journey-profile-resource-policy.json",
       EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_SHA256: JOURNEY_PROFILE_RESOURCE_POLICY_SHA256,
