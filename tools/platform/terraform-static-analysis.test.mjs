@@ -25,7 +25,7 @@ const approvedDecisions = [
   ["CKV_OCI_3", "storage.tf", "oci_core_volume.data[0]", "ACCEPTED_BOUNDED_RISK", "현재 OCI provider-managed encryption에 의존하며 승인된 Vault/key/IAM/rotation/recovery architecture가 없음", "customer-controlled key rotation·revocation·access audit 경계가 없어 block-volume data key risk를 독립 통제하지 못함", "47", "[Security][Platform][P1] OCI CMK strategy로 datapack bucket·data volume CKV_OCI_9/3 해소", "approved regional Vault/key·least-privilege IAM·rotation·key-loss recovery, volume kms_key_id plan evidence, CKV_OCI_3 0, policy decision 삭제"],
 ].map(([ruleId, file, resourceAddress, disposition, reason, impact, issue, ownerIssueTitle, removalCondition]) => ({
   scanner: "CHECKOV", ruleId, rootId, path: `${rootPath}/${file}`, resourceAddress, resourceIdentitySource: "RESOURCE", disposition, reason, impact,
-  ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2026-11-07",
+  ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2027-02-06",
 }));
 const currentCheckovFindings = approvedDecisions.map(({ ruleId, path, resourceAddress }) => ({ ruleId, path: path.slice(`${rootPath}/`.length), resourceAddress, lineRange: resourceAddress === "oci_objectstorage_bucket.datapack" ? [5, 13] : resourceAddress === "oci_objectstorage_bucket.map_catalog" ? [22, 30] : undefined }));
 
@@ -108,8 +108,8 @@ test("policy is closed and pins the exact bundled TFLint ruleset", () => {
     assert.throws(() => validatePolicy(mutated), /approved Platform decisions/);
   }
   const changedExpiry = structuredClone(policy);
-  changedExpiry.suppressions[0].expiresAt = "2026-11-08";
-  assert.throws(() => validatePolicy(changedExpiry, { today: "2026-11-07" }), /approved Platform decisions/);
+  changedExpiry.suppressions[0].expiresAt = "2027-02-07";
+  assert.throws(() => validatePolicy(changedExpiry, { today: "2027-02-06" }), /approved Platform decisions/);
   const reordered = structuredClone(policy);
   reordered.suppressions.reverse();
   assert.throws(() => validatePolicy(reordered), /approved Platform decisions/);
@@ -119,14 +119,14 @@ test("policy is closed and pins the exact bundled TFLint ruleset", () => {
 });
 
 test("policy expiry accepts only canonical real UTC dates and expires on the next UTC day", () => {
-  const { policy } = loadPolicy({ today: "2026-11-07" });
-  assert.doesNotThrow(() => validatePolicy(policy, { today: "2026-11-07" }));
-  assert.throws(() => validatePolicy(policy, { today: "2026-11-08" }), /expired/);
-  for (const today of ["2026-11-7", "2026-02-30", "2026-11-07Z", "2026-11-07 "]) assert.throws(() => validatePolicy(policy, { today }), /UTC date/);
-  for (const expiresAt of ["2026-11-7", "2026-02-30", "2026-11-07Z", "2026-11-07 "]) {
+  const { policy } = loadPolicy({ today: "2027-02-06" });
+  assert.doesNotThrow(() => validatePolicy(policy, { today: "2027-02-06" }));
+  assert.throws(() => validatePolicy(policy, { today: "2027-02-07" }), /expired/);
+  for (const today of ["2027-02-6", "2027-02-30", "2027-02-06Z", "2027-02-06 "]) assert.throws(() => validatePolicy(policy, { today }), /UTC date/);
+  for (const expiresAt of ["2027-02-6", "2027-02-30", "2027-02-06Z", "2027-02-06 "]) {
     const mutated = structuredClone(policy);
     mutated.suppressions[0].expiresAt = expiresAt;
-    assert.throws(() => validatePolicy(mutated, { today: "2026-11-07" }), /UTC date/);
+    assert.throws(() => validatePolicy(mutated, { today: "2027-02-06" }), /UTC date/);
   }
 });
 

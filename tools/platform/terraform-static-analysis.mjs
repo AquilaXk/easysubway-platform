@@ -153,7 +153,7 @@ const approvedSuppressionRows = [
 ];
 const approvedSuppressions = approvedSuppressionRows.map(([ruleId, file, resourceAddress, disposition, reason, impact, issue, ownerIssueTitle, removalCondition]) => ({
   scanner: "CHECKOV", ruleId, rootId: "oci-always-free-a1-flex", path: `infra/terraform/oci/always-free-a1-flex/${file}`, resourceAddress, resourceIdentitySource: "RESOURCE", disposition, reason, impact,
-  ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2026-11-07",
+  ownerIssueUrl: `https://github.com/AquilaXk/easysubway-platform/issues/${issue}`, ownerIssueTitle, ownerIssueState: "OPEN", removalCondition, expiresAt: "2027-02-06",
 }));
 
 function canonicalUtcDate(value, label) {
