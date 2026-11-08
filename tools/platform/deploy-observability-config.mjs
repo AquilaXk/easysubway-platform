@@ -158,7 +158,7 @@ function ownedNetworkProperties(network) {
 }
 
 /**
- * compose에 넘길 release인지 확인한다: prometheus 이미지·command와 맞출 서비스가 정의되어 있고, 기본 네트워크를 compose가 소유하지 않는다.
+ * compose에 넘길 release인지 확인한다: prometheus 이미지·command와 맞출 서비스·이미지가 정의되어 있고, 기본 네트워크를 compose가 소유하지 않는다.
  * platform#250~#273 사이 main 커밋의 compose는 운영 네트워크를 external 없이 ipam으로 선언한다. compose는 그 정의를 운영 네트워크의 config-hash와
  * 달리 보고 연결된 컨테이너를 떼어 내며 네트워크를 다시 만들려 한다(2026-10-30 사고). 정의를 더한 어떤 속성이든 같은 재생성을 부르므로
  * 그런 release는 적용·복원 어느 쪽으로도 compose에 넘기지 않는다. 네트워크 블록이 없는 옛 compose는 암묵 기본값이라 통과한다.
@@ -166,19 +166,27 @@ function ownedNetworkProperties(network) {
 function assertReleaseCompose(config, services) {
   const defined = config?.services ?? {};
   const prometheus = defined[PROMETHEUS.service];
-  if (typeof prometheus?.image !== "string" || !Array.isArray(prometheus?.command)) fail("E_OBS_DEPLOY_SOURCE", "compose does not define the prometheus service image and command");
-  for (const name of services) if (!(name in defined)) fail("E_OBS_DEPLOY_SOURCE", `compose does not define the ${name} service`);
+  if (typeof prometheus?.image !== "string" || prometheus.image === "" || !Array.isArray(prometheus?.command)) {
+    fail("E_OBS_DEPLOY_SOURCE", "compose does not define the prometheus service image and command");
+  }
+  for (const name of services) {
+    if (!(name in defined)) fail("E_OBS_DEPLOY_SOURCE", `compose does not define the ${name} service`);
+    if (typeof defined[name]?.image !== "string" || defined[name].image === "") {
+      fail("E_OBS_DEPLOY_SOURCE", `compose does not define the ${name} service image`);
+    }
+  }
   const owned = ownedNetworkProperties(config?.networks?.default);
   if (owned.length > 0) fail("E_OBS_DEPLOY_SOURCE", `compose declares the default network ${config.networks.default.name} with ${owned.join(",")} but not external; compose would recreate the live network (platform#273)`);
 }
 
-/** release의 compose를 해석하고 확인한 뒤 prometheus 이미지와 command를 돌려준다. preflight와 복원이 같은 확인을 거친다. */
+/** release의 compose를 해석하고 확인한 뒤 prometheus 이미지·command와 적용 unit 이미지 목록(순서 보존 중복 제거)을 돌려준다. preflight와 복원이 같은 확인을 거친다. */
 async function readReleaseCompose(docker, projectDirectory, composeEnvFile, units) {
   const services = units.map((unit) => unit.service);
   const config = await docker.composeConfig(projectDirectory, composeEnvFile, services);
   assertReleaseCompose(config, services);
   const { image, command } = config.services[PROMETHEUS.service];
-  return { image, command };
+  const unitImages = [...new Set(services.map((name) => config.services[name].image))];
+  return { image, command, unitImages };
 }
 
 /** step()이 {done: true}를 돌려줄 때까지 attempts번 반복한다. 마지막 결과를 그대로 돌려준다. */
@@ -260,12 +268,15 @@ async function collectReference({ docker, cleanup, image, command, stagedPrometh
 /** promtool test rules에 넘길 규칙 시험 파일. release의 prometheus 디렉터리 바로 아래 *.test.yml 전부다(커밋마다 있는 파일이 다르다). */
 const ruleTestsOf = (files) => Object.keys(files).filter((file) => RULE_TEST_PATTERN.test(file)).map((file) => `/etc/${file}`);
 
-async function validateWithPromtool({ docker, image, stagedPrometheus, ruleTests }) {
+async function validateWithPromtool({ docker, image, unitImages, stagedPrometheus, ruleTests }) {
   const run = (...args) => docker.docker(["run", "--rm", "--network", "none", "--entrypoint", "promtool", "-v", `${stagedPrometheus}:/etc/prometheus:ro`, image, ...args]);
-  try {
-    await docker.docker(["pull", image], { timeoutMs: 300_000 });
-  } catch (error) {
-    fail("E_OBS_DEPLOY_VALIDATE", `image pull failed: ${message(error)}`);
+  // compose up은 --pull never로 돌므로 적용할 모든 unit 이미지를 검증 단계에서 차례대로 미리 받는다(platform#270).
+  for (const unitImage of unitImages) {
+    try {
+      await docker.docker(["pull", unitImage], { timeoutMs: 300_000 });
+    } catch (error) {
+      fail("E_OBS_DEPLOY_VALIDATE", `image pull failed (${unitImage}): ${message(error)}`);
+    }
   }
   try {
     await run("check", "config", "/etc/prometheus/prometheus.yml");
@@ -359,7 +370,11 @@ const containerIds = (projectContainers, units) => Object.fromEntries(units.map(
 async function convergeContainers({ docker, sleep, root, composeEnvFile, files, units, idsBefore }) {
   await docker.composeUp(join(root, "current"), composeEnvFile, units.map((unit) => unit.service));
   const idsAfter = containerIds(await readProjectContainers(docker), units);
-  const converged = await inOrder(units, (unit) => convergeUnit({ docker, sleep, files, unit, idBefore: idsBefore[unit.service], idAfter: idsAfter[unit.service] }));
+  // 컨테이너 조작은 순서가 의미를 가지므로(prometheus가 먼저 끝난 뒤에야 probe를 건드린다) 병렬로 하지 않고 차례대로 맞춘다.
+  const converged = [];
+  for (const unit of units) {
+    converged.push(await convergeUnit({ docker, sleep, files, unit, idBefore: idsBefore[unit.service], idAfter: idsAfter[unit.service] }));
+  }
   return Object.fromEntries(converged);
 }
 
@@ -379,9 +394,6 @@ async function convergeUnit({ docker, sleep, files, unit, idBefore, idAfter }) {
   return [unit.service, { container: unit.container, idBefore, idAfter, action }];
 }
 
-/** 앞 항목이 끝난 뒤 다음 항목을 시작한다. docker 조작은 컨테이너마다 순서가 의미를 가지므로 병렬로 하지 않는다. */
-const inOrder = (items, step) => items.reduce(async (previous, item) => [...(await previous), await step(item)], Promise.resolve([]));
-
 const durationMs = (text) => [...text.matchAll(/(?<!\d)(\d+)(ms|[smhdwy])/gu)].reduce((sum, [, value, unit]) => sum + Number(value) * DURATION_UNIT_MS[unit], 0);
 
 /** 라이브 검증 반복 횟수. 기대 설정(/api/v1/status/config는 job마다 주기를 채워 준다)의 가장 긴 scrape·평가 주기 두 배를 덮는다. */
@@ -398,22 +410,33 @@ const SAMPLE_LOOKBACK = "5m";
 /** 시계열 하나의 가장 최근 표본. `selector[5m]` 범위 질의 하나가 표본의 실제 scrape 시각과 값을 함께 돌려준다. */
 async function readSeries(docker, spec) {
   const query = `${spec.selector}[${SAMPLE_LOOKBACK}]`;
-  const { result } = await promData(docker, PROMETHEUS.container, `/api/v1/query?query=${encodeURIComponent(query)}`);
-  return { ...spec, ...newestSample(result) };
+  try {
+    const { result } = await promData(docker, PROMETHEUS.container, `/api/v1/query?query=${encodeURIComponent(query)}`);
+    return { ...spec, ...newestSample(result) };
+  } catch (error) {
+    throw new Error(`${spec.selector}: ${message(error)}`);
+  }
 }
 
-const readSeriesAll = (docker, series) => inOrder(series, (spec) => readSeries(docker, spec));
+// 라이브 컨테이너 하나에 docker exec로 질의하므로 병렬로 띄우지 않고 selector 순서대로 읽는다. 앞 selector가 실패하면 뒤 selector는 질의하지 않는다.
+async function readSeriesAll(docker, series) {
+  const readings = [];
+  for (const spec of series) readings.push(await readSeries(docker, spec));
+  return readings;
+}
 
 const unreadable = (error) => `live prometheus was not readable: ${message(error)}`;
 
 /**
  * 라이브 Prometheus를 검증 창 동안 다시 읽는 유일한 poll. 설정·규칙·target은 기대와 대조하고(configProblems), freshness의 시계열은
  * notBefore 뒤의 새 표본인지(staleSeries)와 기대한 값인지(unhealthySeries)를 가른다. 셋이 모두 비면 done이다.
- * freshness는 필수다: 시계열 검증이 없으면 null, 있으면 notBefore가 반드시 따라와야 한다(없으면 신선도 검사가 조용히 꺼진다).
+ * freshness는 필수다: series 배열(시계열이 없는 옛 release면 빈 배열)과 수렴 시각 notBefore가 반드시 함께 와야 신선도 검사가 조용히 꺼지지 않는다.
  */
 export async function pollLive({ docker, sleep, expected, flagKeys, freshness }) {
-  if (freshness !== null && !Number.isFinite(freshness?.notBefore)) fail("E_OBS_DEPLOY_USAGE", "freshness must be null or carry the numeric notBefore of the convergence");
-  const { series = [], notBefore = 0 } = freshness ?? {};
+  if (!Array.isArray(freshness?.series) || !Number.isFinite(freshness?.notBefore)) {
+    fail("E_OBS_DEPLOY_USAGE", "freshness must carry a series array and the numeric notBefore of the convergence");
+  }
+  const { series, notBefore } = freshness;
   return poll(sleep, verifyAttempts(expected.yaml), VERIFY_INTERVAL_MS, async () => {
     try {
       const live = await readSnapshot(docker, PROMETHEUS.container);
@@ -428,11 +451,19 @@ export async function pollLive({ docker, sleep, expected, flagKeys, freshness })
 
 const unsettledProblems = ({ configProblems, staleSeries, unhealthySeries }) => [...configProblems, ...staleSeries, ...unhealthySeries];
 
-/** 복원 뒤 외부 상태에 달린 시계열을 한 번 읽어 기록한다. 게이트가 아니다. 읽지 못해도 설정한 selector는 표본 없음으로 남긴다. */
-async function recordExternalSeries({ docker, series, notBefore }) {
+/**
+ * 복원 뒤 외부 상태에 달린 시계열을 한 번 읽어 기록한다. 게이트가 아니다. 읽지 못해도 설정한 selector는 표본 없음으로 남긴다.
+ * 복원 poll이 이미 읽은 scrapeProof 표본(knownReadings)은 다시 질의하지 않고 재사용한다.
+ */
+async function recordExternalSeries({ docker, series, knownReadings = [], notBefore }) {
   if (series.length === 0) return null;
+  const knownBySelector = new Map(knownReadings.map((reading) => [reading.selector, reading]));
   try {
-    const readings = await readSeriesAll(docker, series);
+    const readings = [];
+    for (const spec of series) {
+      const known = knownBySelector.get(spec.selector);
+      readings.push(known ? { ...known, expectedValue: spec.expectedValue } : await readSeries(docker, spec));
+    }
     return { ...externalVerdict(readings, notBefore), series: seriesReceipt(readings) };
   } catch (error) {
     return { ok: false, detail: unreadable(error), series: seriesReceipt(series.map((spec) => ({ ...spec, sampleTime: null, value: null }))) };
@@ -613,9 +644,9 @@ async function assertMayChange({ lock, children }) {
 async function preflight({ docker, cleanup, commit, sourceRoot, stagingDir, composeEnvFile, sleep, isProcessAlive }) {
   await reapStaleReferences({ docker, cleanup, isProcessAlive });
   const tree = stageRelease(sourceRoot, stagingDir);
-  const { image, command } = await readReleaseCompose(docker, stagingDir, composeEnvFile, tree.units);
+  const { image, command, unitImages } = await readReleaseCompose(docker, stagingDir, composeEnvFile, tree.units);
   const stagedPrometheus = join(stagingDir, "prometheus");
-  const validation = await validateWithPromtool({ docker, image, stagedPrometheus, ruleTests: ruleTestsOf(tree.files) });
+  const validation = await validateWithPromtool({ docker, image, unitImages, stagedPrometheus, ruleTests: ruleTestsOf(tree.files) });
   const expected = await collectReference({ docker, cleanup, image, command, stagedPrometheus, commit, sleep });
   if (REMOVED_JOBS.some((job) => expected.jobs.includes(job))) fail("E_OBS_DEPLOY_VALIDATE", `the commit still configures a removed job: ${REMOVED_JOBS.join(",")}`);
   const unscraped = tree.units.map((unit) => unit.job).filter((job) => job !== null && !expected.jobs.includes(job));
@@ -894,7 +925,7 @@ async function convergePrevious({ docker, scratchDocker, cleanupDocker, sleep, n
   const hostAfter = await readHostState(docker);
   assertScopeAndVolume(before, hostAfter, scopedUnits);
   assertRuntimeWiring(before, hostAfter);
-  const externalSeries = await recordExternalSeries({ docker, series, notBefore: convergedAt });
+  const externalSeries = await recordExternalSeries({ docker, series, knownReadings: settled.readings, notBefore: convergedAt });
   const unconfirmed = externalSeries?.ok === false ? `; the restored probe series are not confirmed: ${externalSeries.detail}` : "";
   return { restore: "RESTORED", restoreError: null, externalSeries, note: `restored previous release ${previousCommit}${unconfirmed}` };
 }

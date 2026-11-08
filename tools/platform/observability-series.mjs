@@ -1,16 +1,43 @@
 // platform#270: 관측 설정 배포가 라이브 Prometheus에서 읽은 시계열 표본의 신선도·값을 판정하는 순수 함수.
 // 읽기(질의)는 deploy-observability-config.mjs가 맡고, 이 모듈은 읽은 표본을 해석만 한다.
+import { fail } from "./observability-deploy-primitives.mjs";
 
 export const isoOfEpoch = (seconds) => new Date(seconds * 1000).toISOString();
 
-/** unit의 liveSeries 선언({metric, value?})을 selector를 가진 검증 대상으로 푼다. 값을 요구하지 않으면 expectedValue는 null이다. */
-export const liveSeriesOf = (units) => units.flatMap((unit) => unit.liveSeries.map(({ metric, value = null }) => ({
-  selector: `${metric}{job="${unit.job}"}`, expectedValue: value, scrapeProof: unit.scrapeProof === metric,
-})));
+function assertUnitSeriesSpec(unit) {
+  const series = Array.isArray(unit?.liveSeries) ? unit.liveSeries : null;
+  if (series === null || !series.every((entry) => typeof entry?.metric === "string" && entry.metric !== "")) {
+    fail("E_OBS_DEPLOY_USAGE", `unit ${unit?.service ?? "unknown"} has invalid liveSeries`);
+  }
+  const hasJob = typeof unit.job === "string" && unit.job !== "";
+  const hasProof = typeof unit.scrapeProof === "string" && unit.scrapeProof !== "";
+  if (series.length === 0) {
+    if (hasJob || hasProof) fail("E_OBS_DEPLOY_USAGE", `unit ${unit.service} declares job/scrapeProof without liveSeries`);
+    return;
+  }
+  if (!hasJob || !hasProof || !series.some(({ metric }) => metric === unit.scrapeProof)) {
+    fail("E_OBS_DEPLOY_USAGE", `unit ${unit.service} must declare job, scrapeProof, and a matching liveSeries metric together`);
+  }
+}
 
-/** 범위 질의 결과(시계열마다 [시각, 값] 쌍 목록)에서 가장 새 표본. 표본이 없으면 둘 다 null이다. */
+/** unit의 liveSeries 선언({metric, value?})을 selector를 가진 검증 대상으로 푼다. 값을 요구하지 않으면 expectedValue는 null이다. */
+export const liveSeriesOf = (units) => units.flatMap((unit) => {
+  assertUnitSeriesSpec(unit);
+  return unit.liveSeries.map(({ metric, value = null }) => ({
+    selector: `${metric}{job="${unit.job}"}`, expectedValue: value, scrapeProof: unit.scrapeProof === metric,
+  }));
+});
+
+/**
+ * 범위 질의 결과(시계열마다 [시각, 값] 쌍 목록)에서 가장 새 표본. 표본이 없으면 둘 다 null이다.
+ * 다중 시계열이면 시계열마다 마지막 표본을 뽑은 뒤 시각이 가장 큰 것을 고르고, 시각이 같으면 수치 값이 작은 쪽(0·이른 만료)을 고른다.
+ */
 export function newestSample(result) {
-  const newest = result.flatMap(({ values }) => (values.length === 0 ? [] : [values.at(-1)])).reduce((best, pair) => (best === null || pair[0] > best[0] ? pair : best), null);
+  const newest = result.flatMap(({ values }) => (values.length === 0 ? [] : [values.at(-1)])).reduce((best, pair) => {
+    if (best === null || pair[0] > best[0]) return pair;
+    if (pair[0] === best[0] && Number(pair[1]) < Number(best[1])) return pair;
+    return best;
+  }, null);
   return newest === null ? { sampleTime: null, value: null } : { sampleTime: Number(newest[0]), value: newest[1] };
 }
 

@@ -5,8 +5,9 @@ import { sha256 } from "./observability-deploy-primitives.mjs";
 
 // 이슈 #220이 레포에서 제거한 대상. 라이브에 남아 있으면 상시 경보를 내므로 reference 대조와 별개로 이름을 명시해 막는다.
 export const REMOVED_JOBS = Object.freeze(["back_worker"]);
+export const PROMETHEUS_ORIGIN = "http://127.0.0.1:9090";
 
-const promUrl = (path) => `http://127.0.0.1:9090${path}`;
+const promUrl = (path) => `${PROMETHEUS_ORIGIN}${path}`;
 
 async function promGet(docker, target, path) {
   const { stdout } = await docker.docker(["exec", target, "wget", "-qO-", promUrl(path)]);

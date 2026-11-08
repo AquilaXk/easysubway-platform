@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { deployObservabilityConfig } from "./deploy-observability-config.mjs";
+import { PROMETHEUS } from "./observability-release.mjs";
 import {
   COMMIT, COMPOSE_NETWORK_NAME, IMAGE, PREVIOUS, PROBE_COMMAND, PROBE_CONTAINER, PROBE_EXPIRY_SERIES, PROBE_IMAGE, PROBE_SERIES, PROBE_SERVICE, PROBE_SUCCESS_SERIES, RUN_URL,
   base, createHost, failureReceipt, receiptPath, repoRoot, sandbox, seedCurrentRelease, seedPreviousRelease, sha256, snapshot, verbs, walk,
@@ -23,8 +24,9 @@ test("PREVIEW는 호스트를 읽지도 쓰지도 않고 promtool 검증과 refe
     writeFileSync(join(box.sourceRoot, "infra", "prometheus", "nested", "decoy.test.yml"), "tests: []\n");
     const result = await deployObservabilityConfig(base(box, host, { mode: "PREVIEW", deployRoot: undefined }));
     const trail = verbs(host);
-    assert.deepEqual(trail.slice(0, 7), ["git", "ps:reference", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"], "지난 실행이 남긴 reference 컨테이너만 찾아본 뒤 검증한다");
-    assert.ok(trail.slice(7, -1).every((verb) => verb === "exec"), "reference는 exec로 읽기만 한다");
+    assert.deepEqual(trail.slice(0, 8), ["git", "ps:reference", "compose:config", "pull", "pull", "promtool:check", "promtool:test", "run:reference"], "지난 실행이 남긴 reference 컨테이너만 찾아본 뒤 모든 적용 unit 이미지를 받고 검증한다");
+    assert.deepEqual(host.state.pulledImages, [IMAGE, PROBE_IMAGE], "compose up --pull never가 쓰는 모든 적용 unit 이미지를 preflight에서 받는다");
+    assert.ok(trail.slice(8, -1).every((verb) => verb === "exec"), "reference는 exec로 읽기만 한다");
     for (const forbidden of ["inspect", "ps", "volume", "restart", "compose:up"]) assert.equal(verbs(host).includes(forbidden), false, forbidden);
     assert.equal(trail.at(-1), "rm");
     assert.equal(result.mode, "PREVIEW");
@@ -72,7 +74,8 @@ test("처음 배포: 검증 → release 설치 → current 전환 → prometheus
     const result = await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
     const trail = verbs(host);
     const up = trail.indexOf("compose:up");
-    assert.deepEqual(trail.slice(0, 7), ["git", "ps:reference", "compose:config", "pull", "promtool:check", "promtool:test", "run:reference"]);
+    assert.deepEqual(trail.slice(0, 8), ["git", "ps:reference", "compose:config", "pull", "pull", "promtool:check", "promtool:test", "run:reference"]);
+    assert.deepEqual(host.state.pulledImages, [IMAGE, PROBE_IMAGE]);
     assert.ok(trail.indexOf("promtool:test") < trail.indexOf("inspect") && trail.indexOf("inspect") < up, "검증과 읽기가 상태 변경보다 먼저");
     assert.equal(trail.filter((verb) => verb === "compose:up").length, 1);
     assert.equal(trail.includes("restart"), false, "컨테이너가 재생성되면 재시작하지 않는다");
@@ -506,25 +509,47 @@ test("두 컨테이너가 모두 옛 설정을 마운트하면 prometheus를 끝
     const host = createHost({ recreateOnUp: false, liveBefore: snapshot(), mountedBefore: "stale", probeMountedBefore: "stale" });
     await deployObservabilityConfig(base(box, host, { mode: "DEPLOY" }));
     const restarts = host.calls.filter((call) => call.args[0] === "restart").map((call) => call.args[1]);
-    assert.deepEqual(restarts, ["easysubway-prometheus", PROBE_CONTAINER]);
+    assert.deepEqual(restarts, [PROMETHEUS.container, PROBE_CONTAINER]);
     const up = host.calls.findIndex((call) => call.args[0] === "compose" && call.args.includes("up"));
-    const prometheusRestart = host.calls.findIndex((call) => call.args[0] === "restart" && call.args[1] === "easysubway-prometheus");
-    const firstProbe = host.calls.findIndex((call, index) => index > up && call.args.includes(PROBE_CONTAINER));
-    assert.ok(prometheusRestart < firstProbe, `probe was touched at call ${firstProbe} before prometheus finished at ${prometheusRestart}`);
+    const verifyStart = host.calls.findIndex((call, index) => index > up && call.args[0] === "exec" && String(call.args[2] ?? "").includes("wget"));
+    assert.equal(host.calls[up + 1]?.args[0], "ps", "compose up 직후에는 프로젝트 컨테이너 목록을 읽는다");
+    assert.equal(host.calls[up + 2]?.args[0], "inspect", "readProjectContainers의 일괄 inspect");
+    const reconcileCalls = host.calls.slice(up + 3, verifyStart);
+    const prometheusRefs = new Set([PROMETHEUS.container, "1".repeat(64), "9".repeat(64)]);
+    const probeRefs = new Set([PROBE_CONTAINER, "a".repeat(64), "b".repeat(64)]);
+    const lastPrometheus = reconcileCalls.findLastIndex((call) => call.args.some((arg) => prometheusRefs.has(arg)));
+    const firstProbe = reconcileCalls.findIndex((call) => call.args.some((arg) => probeRefs.has(arg)));
+    assert.equal(reconcileCalls[lastPrometheus]?.args[0], "exec", "마지막 prometheus 호출은 재시작 뒤 sha256sum 재확인이다");
+    assert.equal(reconcileCalls[lastPrometheus]?.args[2], "sha256sum");
+    assert.ok(lastPrometheus >= 0 && firstProbe >= 0 && lastPrometheus < firstProbe, `probe was touched at reconcile call ${firstProbe} before prometheus finished at ${lastPrometheus}`);
   } finally {
     box.cleanup();
   }
 });
 
-test("compose가 origin-certificate-probe 서비스를 정의하지 않으면 아무것도 바꾸기 전에 실패한다", async () => {
-  const box = sandbox();
+test("compose가 origin-certificate-probe 서비스나 image를 정의하지 않거나 unit 이미지 pull이 실패하면 아무것도 바꾸기 전에 실패한다", async () => {
+  for (const [label, hostOptions, expectedError] of [
+    ["서비스 미정의", { composeDefines: ["prometheus"] }, /E_OBS_DEPLOY_SOURCE.*origin-certificate-probe/su],
+    ["서비스 image 누락", { probeImage: "" }, /E_OBS_DEPLOY_SOURCE.*origin-certificate-probe service image/su],
+    ["probe 이미지 pull 실패", { pullFails: PROBE_IMAGE }, /E_OBS_DEPLOY_VALIDATE.*image pull failed \(prom\/blackbox-exporter:v0\.29\.1\)/su],
+  ]) {
+    const box = sandbox();
+    try {
+      const host = createHost(hostOptions);
+      await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), expectedError, label);
+      assert.equal(verbs(host).includes("compose:up"), false, label);
+      assert.equal(existsSync(join(box.observability, "current")), false, label);
+    } finally {
+      box.cleanup();
+    }
+  }
+  const dedupBox = sandbox();
   try {
-    const host = createHost({ composeDefines: ["prometheus"] });
-    await assert.rejects(deployObservabilityConfig(base(box, host, { mode: "DEPLOY" })), /E_OBS_DEPLOY_SOURCE.*origin-certificate-probe/su);
-    assert.equal(verbs(host).includes("compose:up"), false);
-    assert.equal(existsSync(join(box.observability, "current")), false);
+    const host = createHost({ probeImage: IMAGE });
+    await deployObservabilityConfig(base(dedupBox, host, { mode: "PREVIEW", deployRoot: undefined }));
+    assert.deepEqual(host.state.pulledImages, [IMAGE], "같은 이미지를 쓰는 unit이 여럿이어도 순서를 보존해 한 번만 pull한다");
   } finally {
-    box.cleanup();
+    dedupBox.cleanup();
   }
 });
 
@@ -558,6 +583,7 @@ test("blackbox 설정이 없는 옛 main 커밋도 PREVIEW·DEPLOY가 통과하�
       const host = createHost({ composeDefines: ["prometheus"] });
       const result = await deployObservabilityConfig(base(box, host, mode === "PREVIEW" ? { mode, deployRoot: undefined } : { mode }));
       assert.deepEqual(result.appliedServices, ["prometheus"], mode);
+      assert.deepEqual(host.state.pulledImages, [IMAGE], `${mode}: 적용 unit이 prometheus뿐이면 prometheus 이미지만 pull한다`);
       assert.equal("blackbox" in result.directoryDigests, false, mode);
       const composeServices = host.calls.filter((call) => call.args[0] === "compose").map((call) => call.args.slice(call.args.includes("up") ? call.args.indexOf("--wait-timeout") + 2 : call.args.indexOf("json") + 1));
       assert.ok(composeServices.length > 0 && composeServices.every((services) => JSON.stringify(services) === '["prometheus"]'), `${mode}: ${JSON.stringify(composeServices)}`);

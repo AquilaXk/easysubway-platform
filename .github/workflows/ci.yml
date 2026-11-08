@@ -140,6 +140,7 @@ jobs:
           bash -n tools/deploy/deploy-backend.sh
           bash -n tools/deploy/prepare-deployment-env.sh
           bash -n tools/platform/bootstrap-single-node-k3s.sh
+          bash -n tools/platform/judge-origin-certificate.sh
           bash -n tools/platform/nginx-rate-limit-smoke.sh
           bash -n tools/ops/data-source-raw-archive.sh
           bash -n tools/ops/facility-report-photo-backup.sh

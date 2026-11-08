@@ -3,7 +3,7 @@ name: Origin Certificate Renew
 # AquilaXk/easysubway-platform#270: 운영 호스트 nginx의 Let's Encrypt 인증서가 2026-10-26에 만료돼
 # Cloudflare가 526을 냈다.
 # check job(CHECK)은 nginx가 서비스하는 호스트마다 내보내는 인증서와 디스크 인증서의 만료를 판정하고,
-# 남은 유효 기간이 14일 미만이거나 이름이 맞지 않으면 실패한다.
+# 남은 유효 기간이 14일 미만이거나 이름이 맞지 않거나 내보내는 인증서 만료 시각이 디스크 인증서와 다르면(reload 누락) 실패한다.
 # renew job(RENEW)은 check에 기대지 않고 혼자 돌며, 갱신하고 nginx 설정을 검사해 다시 읽은 뒤 내보내는
 # 인증서가 호스트마다 30일 넘게 남고 이름이 맞는지, 공개 readiness가 200인지 확인한다.
 # 자동 갱신이 멈춘 원인(타이머·서비스·hook)은 호스트에서 비공개로 확인한다(#270). 이 레포는 공개라
@@ -89,34 +89,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          failed=0
           # certbot이 30일 남으면 스스로 갱신하므로 CHECK는 그보다 낮은 14일을 기준으로 삼아 정상 호스트를 빨갛게 보지 않는다.
-          # 대신 디스크는 갱신됐는데 nginx가 다시 읽지 않은 상태는 14일 전까지 드러나지 않는다(#270 후속).
-          for host in ${SERVED_HOSTS}; do
-            if served="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${host}" 2>/dev/null | openssl x509 2>/dev/null)"; then
-              echo "${host}: served $(echo "${served}" | openssl x509 -noout -enddate)"
-              if ! echo "${served}" | openssl x509 -noout -checkend $(( 14 * 86400 )) >/dev/null; then
-                echo "${host}: served certificate is expired or expires within 14 days (RENEW needed)"; failed=1
-              fi
-              if ! echo "${served}" | openssl x509 -noout -checkhost "${host}" | grep -q 'does match'; then
-                echo "${host}: served certificate does not name this host (check the nginx server block and lineage domains)"; failed=1
-              fi
-            else
-              echo "${host}: no certificate read from 127.0.0.1:443"; failed=1
-            fi
-          done
+          # 디스크는 갱신됐는데 nginx가 다시 읽지 않은 상태는 내보내는 인증서의 notAfter와 디스크 만료 시각을 대조해 바로 잡는다(#270).
+          min_days=14
+          failed=0
+          disk_not_after=""
           rc=0
           lineage="$(timeout 60 sudo --non-interactive certbot certificates --cert-name "${CERT_NAME}" 2>&1)" || rc=$?
           # certbot 메시지는 공개 로그에 원문으로 남기지 않는다. 만료 줄만 쓴다.
           if [[ "${rc}" != 0 ]]; then
             echo "on-disk lineage could not be read (exit ${rc})"; failed=1
-          elif ! expiry="$(echo "${lineage}" | grep -E '^\s*Expiry Date:' | sed 's/^[[:space:]]*//')"; then
+          elif ! expiry="$(echo "${lineage}" | grep -o 'Expiry Date:.*')"; then
             echo "on-disk lineage has no expiry line"; failed=1
           else
             echo "on-disk ${expiry}"
-            # 유효 표시가 있을 때만 통과한다. 문구가 바뀌면 실패로 본다.
-            if ! echo "${expiry}" | grep -q '(VALID: '; then echo "on-disk certificate is not marked valid (check the lineage on the host)"; failed=1; fi
+            # 유효 표시와 남은 일수가 기준 이상일 때만 통과한다. 문구가 바뀌면 실패로 본다.
+            if [[ ! "${expiry}" =~ ^Expiry\ Date:\ ([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\+[0-9]{2}:[0-9]{2})\ \(VALID:\ ([0-9]+)\ days\)$ ]]; then
+              echo "on-disk certificate is not marked valid (check the lineage on the host)"; failed=1
+            else
+              disk_not_after="${BASH_REMATCH[1]}"
+              disk_days=$((10#${BASH_REMATCH[2]}))
+              if (( disk_days < min_days )); then
+                echo "on-disk certificate expires within ${min_days} days (${disk_days} days left; RENEW needed)"; failed=1
+              fi
+            fi
           fi
+          judge_args=(--days "${min_days}")
+          if [[ -n "${disk_not_after}" ]]; then
+            judge_args+=(--disk-not-after "${disk_not_after}")
+          fi
+          bash tools/platform/judge-origin-certificate.sh "${judge_args[@]}" || failed=1
           exit "${failed}"
 
   renew:
@@ -194,27 +196,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for host in ${SERVED_HOSTS}; do
-            served=""
-            last_seen="no certificate served"
-            for _ in $(seq 1 10); do
-              candidate="$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -servername "${host}" 2>/dev/null | openssl x509 2>/dev/null || true)"
-              if [[ -n "${candidate}" ]]; then
-                last_seen="$(echo "${candidate}" | openssl x509 -noout -enddate)"
-                if echo "${candidate}" | openssl x509 -noout -checkend $(( 30 * 86400 )) >/dev/null \
-                  && echo "${candidate}" | openssl x509 -noout -checkhost "${host}" | grep -q 'does match'; then
-                  served="${candidate}"
-                  break
-                fi
-              fi
-              sleep 2
-            done
-            if [[ -z "${served}" ]]; then
-              echo "${host}: origin does not serve a matching certificate valid for more than 30 days; last seen: ${last_seen}" >&2
-              exit 1
-            fi
-            echo "${host}: $(echo "${served}" | openssl x509 -noout -enddate)"
-          done
+          min_days=30
+          bash tools/platform/judge-origin-certificate.sh --days "${min_days}" --attempts 10
           status=""
           for _ in $(seq 1 10); do
             status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${PUBLIC_HEALTH_URL}" || true)"

@@ -52,7 +52,7 @@ tests:
               service: aquila-origin-certificate
             exp_annotations:
               summary: Origin certificate expires within 21 days
-              description: The TLS certificate that host nginx serves on 443 expires in 7 to 21 days. Renewal normally replaces it at 30 days, so the renewal has stalled.
+              description: The TLS certificate that host nginx serves on 443 expires in 7 to 21 days (evaluated from the most recent probe sample within a 3d window; if the probe has produced no sample for more than 3d, this alert resolves and OriginCertificateProbeFailed remains firing). Renewal normally replaces it at 30 days, so the renewal has stalled.
               title_ko: "원 서버 인증서 만료 21일 이내"
               impact_ko: "원 서버 인증서가 만료되면 Cloudflare가 원 서버에 연결하지 못해 모든 API 요청이 실패합니다."
               action_ko: "Origin certificate renew workflow를 CHECK로 실행해 출력되는 서비스 인증서 notAfter 줄을 확인하세요. CHECK는 14일 미만일 때만 실패하므로 통과해도 이 경보가 남아 있으면 RENEW로 실행하세요."
@@ -91,7 +91,7 @@ tests:
               service: aquila-origin-certificate
             exp_annotations:
               summary: Origin certificate expires within 7 days or has expired
-              description: The TLS certificate that host nginx serves on 443 expires in less than 7 days or has already expired. Renewal has not replaced it in time.
+              description: The TLS certificate that host nginx serves on 443 expires in less than 7 days or has already expired (evaluated from the most recent probe sample within a 3d window; if the probe has produced no sample for more than 3d, this alert resolves and OriginCertificateProbeFailed remains firing). Renewal has not replaced it in time.
               title_ko: "원 서버 인증서 만료 7일 이내 또는 이미 만료"
               impact_ko: "원 서버 인증서 만료가 임박했거나 이미 만료되어 Cloudflare가 원 서버에 연결하지 못하면 모든 API 요청이 실패합니다."
               action_ko: "즉시 Origin certificate renew workflow를 RENEW로 실행하고 certbot 갱신이 멈춘 원인(HTTP-01 응답, 서비스 호스트 목록)을 확인하세요."
@@ -148,39 +148,52 @@ tests:
         exp_alerts: [*warning]
 
   - interval: 1m
-    name: a failed probe scrape does not restart the pending time of the critical
+    name: origin certificate with less than 7 days left fires critical on the first evaluation without a pending window
     input_series:
       - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
-        values: '432360x1 stale stale stale 432360x10'
+        values: '432360x1'
     alert_rule_test:
-      - eval_time: 4m
-        alertname: OriginCertificateExpiryCritical
-        exp_alerts: []
-      - eval_time: 6m
+      - eval_time: 0m
         alertname: OriginCertificateExpiryCritical
         exp_alerts: [*critical]
 
-  # 605400 = 7일 + 10분: 10m까지 warning 구간, 11m부터 critical 구간이다. critical은 11m부터 5분 pending 뒤 16m에 울린다.
-  # warning은 keep_firing_for로 15m까지 남아 그 사이 어느 평가에서도 둘 다 꺼져 있는 순간이 없다.
+  # 605400 = 7일 + 10분: 10m까지 warning 구간, 11m부터 critical 구간이다. critical은 for 대기가 없어 11m에 warning이 풀림과 동시에 바로 울린다.
   - interval: 1m
-    name: crossing 7 days keeps the warning firing until the critical fires
+    name: crossing 7 days switches from warning to critical on the same evaluation without a gap
     input_series:
       - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
-        values: '605400x30'
+        values: '605400x20'
     alert_rule_test:
       - eval_time: 10m
         alertname: OriginCertificateExpiringSoon
         exp_alerts: [*warning]
-      - eval_time: 15m
-        alertname: OriginCertificateExpiringSoon
-        exp_alerts: [*warning]
-      - eval_time: 15m
+      - eval_time: 10m
         alertname: OriginCertificateExpiryCritical
         exp_alerts: []
-      - eval_time: 16m
+      - eval_time: 11m
         alertname: OriginCertificateExpiryCritical
         exp_alerts: [*critical]
-      - eval_time: 16m
+      - eval_time: 11m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: []
+
+  # probe가 죽어 있는 동안 7일 경계를 지나도 last_over_time[3d]가 마지막 notAfter를 보존하고 time()은 흐르므로 11m에 critical로 전환된다.
+  - interval: 1m
+    name: crossing 7 days while the probe is dead still switches from warning to critical
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '605400x5 stale'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OriginCertificateExpiringSoon
+        exp_alerts: [*warning]
+      - eval_time: 10m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 11m
         alertname: OriginCertificateExpiringSoon
         exp_alerts: []
 
@@ -257,7 +270,7 @@ tests:
         alertname: OriginCertificateExpiryCritical
         exp_alerts: []
 
-  # 갱신되어 21일을 넘는 새 표본이 들어오면 긴급 경보는 그 평가에서 바로 풀린다. 긴 창은 마지막 표본을 쓰므로 복구를 늦추지 않는다.
+  # 갱신되어 21일을 넘는 새 표본이 들어오면 긴급·주의 경보 모두 그 평가에서 바로 풀린다. 긴 창은 마지막 표본을 쓰므로 복구를 늦추지 않는다.
   - interval: 1m
     name: a renewed certificate resolves the critical on the first evaluation after the new sample
     input_series:
@@ -290,9 +303,8 @@ tests:
         alertname: OriginCertificateProbeFailed
         exp_alerts: []
 
-  # 경고는 7일 교차를 메우려고 5분 더 유지되므로 갱신 뒤 복구도 그만큼 늦다. 마지막으로 참인 평가가 9m라 14m까지 남고 15m에 풀린다.
   - interval: 1m
-    name: a renewed certificate resolves the warning after its 5m hold
+    name: a renewed certificate resolves the warning on the first evaluation after the new sample
     input_series:
       - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
         values: '1728360x9 2592360x20'
@@ -300,10 +312,7 @@ tests:
       - eval_time: 9m
         alertname: OriginCertificateExpiringSoon
         exp_alerts: [*warning]
-      - eval_time: 14m
-        alertname: OriginCertificateExpiringSoon
-        exp_alerts: [*warning]
-      - eval_time: 15m
+      - eval_time: 10m
         alertname: OriginCertificateExpiringSoon
         exp_alerts: []
 
@@ -324,6 +333,8 @@ tests:
   - interval: 1m
     name: failing origin certificate probe without an expiry series raises critical after 15m
     input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '_x20'
       - series: 'probe_success{job="origin_certificate_probe"}'
         values: '0x20'
     alert_rule_test:
@@ -383,4 +394,41 @@ tests:
         exp_alerts: []
       - eval_time: 20m
         alertname: OriginCertificateProbeFailed
+        exp_alerts: []
+
+  # 3일(72h) 창 한계: 0h의 마지막 표본 뒤 probe가 3일 넘게 죽어 있으면 72h까지는 만료 경보와 probe 무음 경보가 함께 울리고,
+  # 3일을 넘긴 뒤(73h~)에는 last_over_time[3d] 창 밖으로 밀려나 만료 경보는 풀리고 OriginCertificateProbeFailed만 긴급으로 남는다.
+  - interval: 1h
+    name: after 3 days without a probe sample the expiry alert resolves at the 3d window limit while the probe alert stays firing
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe"}'
+        values: '432000x1 stale'
+    alert_rule_test:
+      - eval_time: 72h
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 72h
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+      - eval_time: 73h
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: []
+      - eval_time: 73h
+        alertname: OriginCertificateProbeFailed
+        exp_alerts: [*probe_failed]
+
+  # 다중 시계열: probe_ssl_earliest_cert_expiry 시계열이 여럿이면 recording rule의 min()이 가장 이른 만료 시각을 선택한다.
+  - interval: 1m
+    name: when multiple probe series exist min selects the earliest certificate expiry
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe",instance="a:443"}'
+        values: '2592360x10'
+      - series: 'probe_ssl_earliest_cert_expiry{job="origin_certificate_probe",instance="b:443"}'
+        values: '432360x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OriginCertificateExpiryCritical
+        exp_alerts: [*critical]
+      - eval_time: 6m
+        alertname: OriginCertificateExpiringSoon
         exp_alerts: []
