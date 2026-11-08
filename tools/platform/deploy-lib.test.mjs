@@ -95,6 +95,8 @@ async function waitUntilGone(pid, deadlineMs) {
   return !isAlive(pid);
 }
 
+import * as processModule from "./lib/process.mjs";
+
 test("시간 초과·중단은 pipe를 문 손자까지 끝내고 제한 안에 거부하며, 정상 종료는 출력을 끝까지 읽은 뒤 끝난다", async () => {
   const root = mkdtempSync(join(tmpdir(), "run-command-"));
   const pidFile = join(root, "grandchild.pid");
@@ -113,10 +115,10 @@ test("시간 초과·중단은 pipe를 문 손자까지 끝내고 제한 안에 
       assert.equal(await waitUntilGone(grandchild, 1000), true, `${label}: pipe를 문 손자도 끝났다`);
     }
     const startedAt = Date.now();
-    const escaped = runCommand(process.execPath, ["-e", PIPE_HOLDING_GRANDCHILD, pidFile, "escape"], { timeoutMs: 300, killGraceMs: 300 });
+    const escaped = runCommand(process.execPath, ["-e", PIPE_HOLDING_GRANDCHILD, pidFile, "escape"], { timeoutMs: 100, killGraceMs: 100 });
     await assert.rejects(escaped, /timed out/u);
     grandchild = Number(readFileSync(pidFile, "utf8"));
-    assert.ok(Date.now() - startedAt < 2000, "그룹 밖으로 나가 pipe를 문 손자가 있어도 SIGKILL 뒤 배수 시간이 지나면 끝낸다");
+    assert.ok(Date.now() - startedAt < 400, "그룹 밖으로 나가 pipe를 문 손자가 있어도 SIGKILL 직후 추가 배수 타이머 없이 바로 끝낸다");
     process.kill(grandchild, "SIGKILL");
     const { stdout } = await runCommand("sh", ["-c", "printf one; sleep 0.2; printf two"]);
     assert.equal(stdout, "onetwo");
@@ -126,7 +128,12 @@ test("시간 초과·중단은 pipe를 문 손자까지 끝내고 제한 안에 
   }
 });
 
-test("interruptibleRunner.stop은 중단 signal을 무시하는 runner도 정해진 시간 안에 돌아오고 모두 끝났는지를 알린다", async () => {
+test("interruptibleRunner.stop은 중단 signal을 무시하는 runner도 정해진 시간 안에 돌아오고 중단 시간 예산이 GitHub 취소 창 안에 든다", async () => {
+  assert.equal(processModule.KILL_GRACE_MS, 5000);
+  assert.equal(processModule.DEFAULT_STOP_DEADLINE_MS, 5500);
+  assert.equal(processModule.GITHUB_CANCEL_WINDOW_MS, 10_000);
+  assert.ok(processModule.KILL_GRACE_MS < processModule.DEFAULT_STOP_DEADLINE_MS, "stop 마감은 SIGKILL 유예보다 길다");
+  assert.ok(processModule.DEFAULT_STOP_DEADLINE_MS + 1500 + 250 < processModule.GITHUB_CANCEL_WINDOW_MS, "stop 마감 + reference 정리 한도(1500ms + 250ms)가 GitHub 취소 창(10s) 안에 든다");
   const stuck = interruptibleRunner(() => new Promise(() => {}));
   stuck.run("never", []);
   const startedAt = Date.now();
@@ -134,7 +141,7 @@ test("interruptibleRunner.stop은 중단 signal을 무시하는 runner도 정해
   assert.ok(Date.now() - startedAt < 1000);
   const settles = interruptibleRunner(runCommand);
   settles.run("sleep", ["5"]).catch(() => {});
-  assert.equal(await settles.stop({ deadlineMs: 6000 }), true);
+  assert.equal(await settles.stop(), true);
 });
 
 test("isSubset은 기대 필드가 모두 같으면 참이고 실제 객체의 추가 필드는 허용하지만 배열은 길이까지 같아야 한다", () => {

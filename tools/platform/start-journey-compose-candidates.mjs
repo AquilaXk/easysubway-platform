@@ -2,7 +2,7 @@
 
 import { createHash, createPublicKey } from "node:crypto";
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { chmod, lstat, mkdtemp, open, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -15,7 +15,12 @@ import {
 import {
   validateJourneyReleaseTupleBytes,
 } from "./bind-journey-release-candidate.mjs";
-import { ensureComposeNetwork } from "./ensure-compose-network.mjs";
+import {
+  ComposeNetworkMismatch,
+  DOCKER_OPERATIONAL_ENV_KEYS,
+  dockerOperationalEnvironment,
+  ensureComposeNetwork,
+} from "./ensure-compose-network.mjs";
 import { runCommand } from "./lib/process.mjs";
 import { acquireSharedDeployLock } from "./shared-deploy-lock.mjs";
 
@@ -30,11 +35,6 @@ const GIT_SHA = /^[a-f0-9]{40}$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9._:-]{1,255}$/;
 const SAFE_PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const SERVICES = Object.freeze(["backend-standby"]);
-const DOCKER_OPERATIONAL_ENV_KEYS = Object.freeze([
-  "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
-  "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY",
-  "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
-]);
 const BINDING_FIELDS = Object.freeze([
   "schemaVersion", "artifactKind", "orchestrator", "tupleSha256",
   "deploymentRevision", "environmentIdentity", "descriptorSha256",
@@ -54,6 +54,7 @@ const ERROR_MESSAGES = Object.freeze({
   CANDIDATE_START_COMPOSE: "candidate compose start failed",
   CANDIDATE_START_TIMEOUT: "candidate compose start timed out",
   CANDIDATE_START_NETWORK: "candidate compose network is unavailable",
+  CANDIDATE_START_NETWORK_MISMATCH: "candidate compose network subnet does not match contract",
   CANDIDATE_START_INPUT_UNSTABLE: "candidate start input changed during execution",
 });
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -696,14 +697,6 @@ function candidateEnvironment({
   };
 }
 
-function dockerOperationalEnvironment(ambientEnvironment) {
-  return Object.fromEntries(
-    DOCKER_OPERATIONAL_ENV_KEYS
-      .filter((key) => typeof ambientEnvironment[key] === "string")
-      .map((key) => [key, ambientEnvironment[key]]),
-  );
-}
-
 function ensureHostComposeNetwork({ projectName, env }) {
   return ensureComposeNetwork(
     (args) => runCommand("docker", args, { env, timeoutMs: COMPOSE_TIMEOUT_MS }),
@@ -714,7 +707,11 @@ function ensureHostComposeNetwork({ projectName, env }) {
 async function ensureCandidateNetwork(networkEnsurer, request) {
   try {
     await networkEnsurer(request);
-  } catch {
+  } catch (error) {
+    if (error instanceof CandidateStartError) throw error;
+    if (error instanceof ComposeNetworkMismatch) {
+      throw failure("CANDIDATE_START_NETWORK_MISMATCH", 2);
+    }
     throw failure("CANDIDATE_START_NETWORK");
   }
 }
@@ -955,6 +952,11 @@ if (isMainModule()) {
 }
 
 function isMainModule() {
-  return process.argv[1] !== undefined &&
-    pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+  if (process.argv[1] === undefined) return false;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href ===
+      pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+  } catch {
+    return pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+  }
 }

@@ -75,3 +75,37 @@ test("잠금 holder가 죽으면 closed가 끝나고 verify()가 잃었다고 �
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("잠금 holder는 부모 프로세스 그룹과 분리되어 부모 그룹에 보낸 SIGINT·SIGTERM에 함께 죽지 않는다", async () => {
+  const root = mkdtempSync(join(tmpdir(), "shared-deploy-lock-group-"));
+  const lockPath = join(root, "deploy.lock");
+  const script = `
+    import { acquireSharedDeployLock } from ${JSON.stringify(new URL("./shared-deploy-lock.mjs", import.meta.url).href)};
+    process.on("SIGINT", () => {});
+    process.on("SIGTERM", () => {});
+    const fakeFlock = process.execPath;
+    const lock = await acquireSharedDeployLock({
+      lockPath: ${JSON.stringify(lockPath)},
+      flockCommand: fakeFlock,
+      flockArgs: ["-e", "const { spawn } = require('node:child_process'); const c = spawn(process.argv[1], process.argv.slice(2), { stdio: 'inherit' }); c.on('exit', (code) => process.exit(code ?? 1));", "--"],
+    });
+    process.kill(-process.pid, "SIGINT");
+    process.kill(-process.pid, "SIGTERM");
+    await new Promise((r) => setTimeout(r, 150));
+    await lock.verify();
+    await lock.close();
+    process.stdout.write("SURVIVED\\n");
+  `;
+  try {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    const code = await new Promise((resolve) => { child.once("close", resolve); });
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout, "SURVIVED\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

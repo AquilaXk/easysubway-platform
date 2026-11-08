@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { COMPOSE_NETWORK, EXIT_CODES, ensureComposeNetwork } from "./ensure-compose-network.mjs";
+import { COMPOSE_NETWORK, DOCKER_OPERATIONAL_ENV_KEYS, EXIT_CODES, dockerOperationalEnvironment, ensureComposeNetwork } from "./ensure-compose-network.mjs";
 import { attachmentVerdict, reattachDetached } from "./observability-network.mjs";
 
 // platform#273: compose 기본 네트워크는 external이라 호스트 compose 경로가 모두 ensure-compose-network.mjs 하나로 그 네트워크를 보장한다.
 // 없으면 계약 서브넷으로 만들고, 같은 서브넷이면 손대지 않고, 다른 서브넷이면 바꾸지 않고 실패한다.
+const repoRoot = new URL("../..", import.meta.url).pathname;
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 const contract = JSON.parse(read("contracts/release/platform-k3s-observability-contract.json")).composeNetwork;
 const CLI = new URL("./ensure-compose-network.mjs", import.meta.url).pathname;
@@ -41,6 +42,13 @@ function fakeDocker({ exists, subnet = contract.subnet, connectFails = false, re
 
 test("네트워크 이름과 서브넷은 계약 파일에서 읽는다", () => {
   assert.deepEqual(COMPOSE_NETWORK, contract);
+});
+
+test("dockerOperationalEnvironment는 허용된 운영 docker 환경 변수만 남기고 비밀을 걸러낸다", () => {
+  assert.ok(DOCKER_OPERATIONAL_ENV_KEYS.includes("XDG_CONFIG_HOME") && DOCKER_OPERATIONAL_ENV_KEYS.includes("HTTPS_PROXY"));
+  assert.deepEqual(dockerOperationalEnvironment({ PATH: "/bin", XDG_CONFIG_HOME: "/xdg", HTTPS_PROXY: "http://p", SECRET_TOKEN: "no" }), {
+    PATH: "/bin", XDG_CONFIG_HOME: "/xdg", HTTPS_PROXY: "http://p",
+  });
 });
 
 test("ensureComposeNetwork: 없으면 계약 서브넷과 compose label로 만들고, 같으면 읽기만 하며, 다르면 만들지 않고 던진다", async () => {
@@ -76,11 +84,11 @@ exit 1
   return { calls: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []) };
 }
 
-function runCli(root, args) {
-  return spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env: { PATH: `${root}:${process.env.PATH}` } });
+function runCli(root, args, entry = CLI) {
+  return spawnSync(process.execPath, [entry, ...args], { encoding: "utf8", env: { PATH: `${root}:${process.env.PATH}` } });
 }
 
-test("CLI: 없으면 만들고 결과를 JSON으로 내며, 서브넷 불일치는 3, docker 오류는 1, 잘못된 인자는 2로 끝난다", () => {
+test("CLI: 없으면 만들고 결과를 JSON으로 내며, 서브넷 불일치는 3, docker 오류는 1, 잘못된 인자는 2로 끝난다(symlink 경로 포함)", () => {
   const cases = [
     ["없음", {}, EXIT_CODES.ensured, "created"],
     ["같은 서브넷", { subnet: contract.subnet }, EXIT_CODES.ensured, "present"],
@@ -91,7 +99,9 @@ test("CLI: 없으면 만들고 결과를 JSON으로 내며, 서브넷 불일치�
     const root = mkdtempSync(join(tmpdir(), "ensure-compose-network-"));
     try {
       const docker = fakeDockerBin(root, options);
-      const result = runCli(root, ["--project", "easysubway"]);
+      const linked = join(root, "ensure-link.mjs");
+      symlinkSync(CLI, linked);
+      const result = runCli(root, ["--project", "easysubway"], linked);
       assert.equal(result.status, status, `${label}: ${result.stderr}`);
       if (typeof outcome === "string") assert.deepEqual(JSON.parse(result.stdout), { ...contract, action: outcome }, label);
       else assert.match(result.stderr, outcome, label);
@@ -112,14 +122,32 @@ test("CLI: 없으면 만들고 결과를 JSON으로 내며, 서브넷 불일치�
   }
 });
 
-test("backend 배포는 첫 compose up보다 먼저 ensure CLI를 부르고 서브넷 불일치와 docker 오류를 다른 result로 남기며 자체 구현을 두지 않는다", () => {
+test("backend 배포는 첫 compose up보다 먼저 ensure CLI를 실제로 실행해 서브넷 불일치와 docker 오류를 다른 result로 남기며 자체 구현을 두지 않는다", () => {
   const script = read("tools/deploy/deploy-backend.sh");
   const call = script.indexOf('node tools/platform/ensure-compose-network.mjs --project "${DEPLOY_COMPOSE_PROJECT}" >/dev/null || network_status=$?');
   const firstUp = script.search(/^[^#\n]*docker compose [^\n]* up /mu);
   assert.ok(call > 0 && firstUp > call, "ensure CLI가 첫 compose up보다 앞에 있다");
-  assert.ok(script.includes(`\t${EXIT_CODES.subnetMismatch}) write_result "blocked" "compose_network_mismatch"; exit 1 ;;`));
-  assert.ok(script.includes('\t*) write_result "failed" "compose_network_unavailable"; exit 1 ;;'));
   for (const duplicate of ["ensure_compose_network", "COMPOSE_NETWORK_NAME", "COMPOSE_NETWORK_SUBNET", contract.subnet]) assert.equal(script.includes(duplicate), false, duplicate);
+
+  const snippet = script.match(/network_status=0\nnode tools\/platform\/ensure-compose-network\.mjs[\s\S]*?\nesac/u)?.[0];
+  assert.ok(snippet, "deploy-backend.sh의 네트워크 보장 블록");
+  const program = `set -euo pipefail\nwrite_result() { printf '%s %s\\n' "$1" "$2"; }\n${snippet}\nprintf 'continued\\n'`;
+  for (const [label, options, project, expectedCode, expectedOut] of [
+    ["보장됨", { subnet: contract.subnet }, "easysubway", 0, "continued\n"],
+    ["서브넷 불일치(3)", { subnet: "172.19.0.0/16" }, "easysubway", 1, "blocked compose_network_mismatch\n"],
+    ["docker 오류(1)", { failLs: true }, "easysubway", 1, "failed compose_network_unavailable\n"],
+    ["잘못된 인자(2)", {}, "../bad", 1, "failed compose_network_unavailable\n"],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "deploy-backend-net-"));
+    try {
+      fakeDockerBin(root, options);
+      const res = spawnSync("bash", ["-c", program], { cwd: repoRoot, encoding: "utf8", env: { PATH: `${root}:${process.env.PATH}`, DEPLOY_COMPOSE_PROJECT: project } });
+      assert.equal(res.status, expectedCode, `${label}: ${res.stderr}`);
+      assert.equal(res.stdout, expectedOut, label);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
 
 const detachedRecord = (overrides = {}) => ({ Name: "/easysubway-prometheus", Config: { Labels: { "com.docker.compose.service": "prometheus" } }, State: { Running: true }, NetworkSettings: { Networks: {} }, ...overrides });

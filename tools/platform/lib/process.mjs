@@ -3,12 +3,11 @@ import { spawn } from "node:child_process";
 
 const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024;
-// SIGTERM을 무시하는 자식은 이만큼 기다린 뒤 SIGKILL한다. GitHub Actions는 취소할 때 SIGINT 뒤 7.5초를 기다려 SIGTERM을 보내므로,
-// 중단 처리(자식 종료 대기 → 상태 되돌림 → receipt)가 그 안에 끝나게 한다.
-const KILL_GRACE_MS = 5000;
-// SIGKILL 뒤 남은 출력을 읽는 시간. 프로세스 그룹 밖으로 나간 자손이 pipe를 물고 있으면 close가 오지 않으므로 이 시간이 지나면 끝낸다.
-const STDIO_DRAIN_MS = 250;
-const DEFAULT_STOP_DEADLINE_MS = KILL_GRACE_MS + STDIO_DRAIN_MS + 500;
+// SIGTERM을 무시하는 자식은 이만큼 기다린 뒤 SIGKILL한다. GitHub Actions는 취소할 때 SIGINT 뒤 7.5초, 그 뒤 2.5초(총 10초) 안에 끝내지 않으면
+// 강제 종료하므로, 중단 처리(자식 종료 대기 → 상태 되돌림 · reference 정리 → receipt)가 그 안에 끝나게 한다.
+export const KILL_GRACE_MS = 5000;
+export const DEFAULT_STOP_DEADLINE_MS = KILL_GRACE_MS + 500;
+export const GITHUB_CANCEL_WINDOW_MS = 10_000;
 
 class HostCommandError extends Error {}
 
@@ -29,8 +28,8 @@ function signalGroup(child, signal) {
 
 /**
  * 명령을 실행하고 stdout·stderr를 모은다. 자식은 자기 프로세스 그룹을 이끌고(detached), 시간 초과·출력 한도·signal 중단이면 그룹 전체에
- * SIGTERM, killGraceMs 뒤 SIGKILL을 보낸다. 정상 종료는 출력을 끝까지 읽은 뒤(close) 끝난다. 멈춘 명령은 close나, SIGKILL 뒤 배수 시간이
- * 지나는 때 중 먼저 오는 때에 거부하므로 pipe를 물고 그룹 밖으로 나간 자손이 있어도 killGraceMs + 배수 시간 안에 끝난다.
+ * SIGTERM, killGraceMs 뒤 SIGKILL을 보낸다. 정상 종료는 출력을 끝까지 읽은 뒤(close) 끝난다. 멈춘 명령은 stop 시점부터 이미 출력을 버리고
+ * settle에서 SIGKILL과 stdio destroy를 함께 수행하므로, pipe를 물고 그룹 밖으로 나간 자손이 있어도 killGraceMs 직후 바로 끝난다.
  */
 export function runCommand(command, args, { input, env = {}, timeoutMs = 120_000, maxOutputBytes = DEFAULT_OUTPUT_LIMIT_BYTES, signal, killGraceMs = KILL_GRACE_MS } = {}) {
   return new Promise((resolve, reject) => {
@@ -57,12 +56,7 @@ export function runCommand(command, args, { input, env = {}, timeoutMs = 120_000
       }
       callback();
     };
-    // SIGKILL 뒤 stdio가 닫히지 않아도(pipe를 물려받은 자손) 짧게 기다린 뒤 끝낸다.
-    const rejectAfterDrain = () => settle(() => reject(stopReason));
-    const killAfterGrace = () => {
-      signalGroup(child, "SIGKILL");
-      timers.push(setTimeout(rejectAfterDrain, STDIO_DRAIN_MS));
-    };
+    const killAfterGrace = () => settle(() => reject(stopReason));
     const stop = (reason) => {
       if (stopReason !== null) return;
       stopReason = reason;
