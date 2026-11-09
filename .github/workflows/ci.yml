@@ -107,6 +107,7 @@ jobs:
           node --test tools/ci/origin-certificate-renew-workflow.test.mjs
           node --test tools/ci/production-deploy-actor-gates.test.mjs
           node --test tools/ops/postgres-restore-rehearsal.test.mjs
+          node --test tools/platform/verify-clean-room-host-bootstrap.test.mjs
 
       - name: Validate Compose configurations
         env:
