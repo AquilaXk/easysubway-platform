@@ -2,7 +2,7 @@
 #
 # 1. 현재 1인 저장소 운영 제약:
 #    - GitHub는 PR 작성자의 자기 PR 승인을 허용하지 않으므로, 쓰기/리뷰 권한 계정이 @AquilaXk 1명뿐인
-#      단계에서 main ruleset의 `require_code_owner_review: true`를 켜면 모든 PR과 automerge-queue가 막힌다.
+#      단계에서 main ruleset의 `require_code_owner_review: true`를 켜면 모든 PR 병합이 막힌다.
 #    - 따라서 1인 단계에서는 main ruleset에서 `require_code_owner_review: false`를 유지하고,
 #      이 파일과 `tools/ci/production-deploy-actor-gates.test.mjs` 계약 게이트로 소유자 규칙 삭제·약화를 차단한다.
 #
@@ -14,7 +14,6 @@
 #      1) `gh api repos/AquilaXk/easysubway-platform/collaborators`로 협업자 권한 구성을 확인한다.
 #      2) main ruleset의 `pull_request` 규칙에서 `require_code_owner_review: true` 및
 #         `required_approving_review_count: 1` 이상으로 갱신한다.
-#      3) `.github/workflows/automerge-queue.yml`이 code owner 승인 요건과 충돌하지 않는지 확인한다.
 
 .github/workflows/** @AquilaXk
 .github/CODEOWNERS @AquilaXk

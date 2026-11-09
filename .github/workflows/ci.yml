@@ -1,8 +1,6 @@
 name: Platform CI
 
 on:
-  # automerge-queue가 same-repository head의 required context 누락을 복구하려고
-  # gh workflow run ci.yml을 호출한다.
   workflow_dispatch:
   pull_request:
   push:
@@ -50,7 +48,6 @@ jobs:
 
       - name: Test platform contracts
         run: |
-          node --test tools/ci/automerge-queue.test.mjs
           node --test tools/ci/check-documentation-fragment-sync.test.mjs
           node --test tools/ci/public-sensitivity-owner-receipt-caller.test.mjs
           node --test tools/platform/no-mutable-contract-source.test.mjs
