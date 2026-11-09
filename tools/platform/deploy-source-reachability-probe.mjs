@@ -63,6 +63,7 @@ class ProbeDeployError extends Error {
 const fail = (code, detail) => { throw new ProbeDeployError(code, detail); };
 // NetworkPolicy 허용 규칙은 이 라벨을 가진 파드에만 적용된다. 라벨이 없는 파드는 default-deny에 막힌다.
 export const POD_SELECTOR_LABELS = Object.freeze({ "app.kubernetes.io/name": NAME });
+export const POD_PHASE_JSONPATH = String.raw`jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}`;
 const labels = () => ({ ...POD_SELECTOR_LABELS, "app.kubernetes.io/part-of": "easysubway" });
 const metadata = (name) => ({ name, namespace: NAMESPACE, labels: labels() });
 
@@ -159,6 +160,20 @@ const parseJson = (text, what) => {
   }
 };
 
+function parsePodLines(text) {
+  const pods = [];
+  for (const line of String(text).split("\n")) {
+    if (line === "") continue;
+    const tab = line.indexOf("\t");
+    if (tab <= 0 || line.indexOf("\t", tab + 1) !== -1) fail("E_PROBE_DEPLOY_READBACK", "pod list is not readable");
+    const name = line.slice(0, tab).trim();
+    const phase = line.slice(tab + 1).trim();
+    if (name === "" || /\s/u.test(name) || /\s/u.test(phase)) fail("E_PROBE_DEPLOY_READBACK", "pod list is not readable");
+    pods.push({ name, phase: phase || "Unknown" });
+  }
+  return pods;
+}
+
 function makeKubectl(commandRunner) {
   return async (args, input) => {
     try {
@@ -193,19 +208,20 @@ async function deploy({ kubectl, rendered }) {
 }
 
 /**
- * 보존된 Job 파드의 로그를 파드별로 읽어 검증하고 --output 파일에 이어 쓴다. 한 번에 읽는 양이 파드 하나 분량이라 보존 파드가 늘어도
- * 명령 출력 한도(lib/process.mjs, 1 MiB)에 걸리지 않는다. 형식이 다른 줄이 하나라도 있거나 읽기가 실패하면 이미 쓴 내용까지 지우고 실패한다.
+ * 보존된 Job 파드 목록은 이름·단계만 jsonpath로 받고, 로그는 파드별로 읽어 검증한 뒤 --output 파일에 이어 쓴다. 한 번에 읽는 양이 작아 보존 파드가
+ * 300개여도 명령 출력 한도(lib/process.mjs, 1 MiB)에 걸리지 않는다. 형식이 다른 줄이 하나라도 있거나 읽기가 실패하면 이미 쓴 내용까지 지우고 실패한다.
  */
 async function collect({ kubectl, output }) {
   if (typeof output !== "string" || output === "") fail("E_PROBE_DEPLOY_USAGE", "COLLECT needs --output <file.jsonl>");
-  const pods = parseJson((await kubectl(["get", "pods", "--namespace", NAMESPACE, "-l", `app.kubernetes.io/name=${NAME}`, "-o", "json"])).stdout, "pod list").items ?? [];
+  const pods = parsePodLines((await kubectl(["get", "pods", "--namespace", NAMESPACE, "-l", `app.kubernetes.io/name=${NAME}`, "-o", POD_PHASE_JSONPATH])).stdout);
   const phases = {};
-  for (const { status } of pods) {
-    const phase = status?.phase ?? "Unknown";
+  const finished = [];
+  for (const { name, phase } of pods) {
     phases[phase] = (phases[phase] ?? 0) + 1;
+    // 실행 중인 파드는 로그가 아직 끝나지 않았으므로 다음 수집으로 미룬다.
+    if (FINISHED_PHASES.includes(phase)) finished.push(name);
   }
-  // 실행 중인 파드는 로그가 아직 끝나지 않았으므로 다음 수집으로 미룬다.
-  const finished = pods.filter(({ status }) => FINISHED_PHASES.includes(status?.phase)).map(({ metadata }) => metadata.name).sort();
+  finished.sort();
   const collected = { pods: pods.length, podsRead: finished.length, podPhases: phases, records: 0, firstObservedAt: null, lastObservedAt: null };
   writeFileSync(output, "");
   try {

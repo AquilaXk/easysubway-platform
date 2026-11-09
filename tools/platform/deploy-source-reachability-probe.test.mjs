@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { PROBE_TARGETS } from "../ops/source-reachability-probe.mjs";
-import { DEPLOYER, NAMESPACE, OBJECT_NAMES, deploySourceReachabilityProbe, readProbeScript, renderSourceReachabilityProbe } from "./deploy-source-reachability-probe.mjs";
+import { DEPLOYER, NAMESPACE, OBJECT_NAMES, POD_PHASE_JSONPATH, deploySourceReachabilityProbe, readProbeScript, renderSourceReachabilityProbe } from "./deploy-source-reachability-probe.mjs";
 
 // hub easysubway#3036: PREVIEW는 렌더만, DEPLOY는 deployer 신원으로 고정 이름 객체를 apply·대조, COLLECT는 Job 파드 로그를 검증해 파일로, REMOVE는 측정 종료 정리.
 // 모든 kubectl은 deployer 신원(--as)으로만 가고 secret은 어디에도 없다.
@@ -26,10 +26,91 @@ const liveByName = {
 };
 
 const COMMAND_OUTPUT_LIMIT = 1024 * 1024; // lib/process.mjs의 runCommand 출력 한도와 같다
-const podOf = (name, phase = "Succeeded") => ({ metadata: { name }, status: { phase } });
+const POD_MANAGED_FIELDS = Object.freeze([
+  {
+    manager: "kube-controller-manager",
+    operation: "Update",
+    apiVersion: "v1",
+    time: "2026-10-21T08:00:00Z",
+    fieldsType: "FieldsV1",
+    fieldsV1: {
+      "f:metadata": { "f:generateName": {}, "f:labels": { ".": {}, "f:app.kubernetes.io/name": {}, "f:app.kubernetes.io/part-of": {}, "f:batch.kubernetes.io/controller-uid": {}, "f:batch.kubernetes.io/job-name": {}, "f:controller-uid": {}, "f:job-name": {} }, "f:ownerReferences": { ".": {}, 'k:{"uid":"00000000-0000-0000-0000-000000000001"}': {} } },
+      "f:spec": { "f:automountServiceAccountToken": {}, "f:containers": { 'k:{"name":"probe"}': { ".": {}, "f:command": {}, "f:image": {}, "f:imagePullPolicy": {}, "f:name": {}, "f:resources": { ".": {}, "f:limits": { ".": {}, "f:cpu": {}, "f:ephemeral-storage": {}, "f:memory": {} }, "f:requests": { ".": {}, "f:cpu": {}, "f:ephemeral-storage": {}, "f:memory": {} } }, "f:securityContext": { ".": {}, "f:allowPrivilegeEscalation": {}, "f:capabilities": { ".": {}, "f:drop": {} }, "f:readOnlyRootFilesystem": {} }, "f:terminationMessagePath": {}, "f:terminationMessagePolicy": {}, "f:volumeMounts": { ".": {}, 'k:{"mountPath":"/opt/probe"}': { ".": {}, "f:mountPath": {}, "f:name": {}, "f:readOnly": {} } } } }, "f:dnsConfig": { ".": {}, "f:options": {} }, "f:dnsPolicy": {}, "f:enableServiceLinks": {}, "f:nodeSelector": {}, "f:restartPolicy": {}, "f:schedulerName": {}, "f:securityContext": { ".": {}, "f:runAsGroup": {}, "f:runAsNonRoot": {}, "f:runAsUser": {}, "f:seccompProfile": { ".": {}, "f:type": {} } }, "f:serviceAccount": {}, "f:serviceAccountName": {}, "f:terminationGracePeriodSeconds": {}, "f:volumes": { ".": {}, 'k:{"name":"probe"}': { ".": {}, "f:configMap": { ".": {}, "f:defaultMode": {}, "f:name": {} }, "f:name": {} } } },
+    },
+  },
+  {
+    manager: "k3s",
+    operation: "Update",
+    apiVersion: "v1",
+    time: "2026-10-21T08:00:05Z",
+    fieldsType: "FieldsV1",
+    fieldsV1: {
+      "f:status": { "f:conditions": { 'k:{"type":"ContainersReady"}': { ".": {}, "f:lastProbeTime": {}, "f:lastTransitionTime": {}, "f:reason": {}, "f:status": {}, "f:type": {} }, 'k:{"type":"Initialized"}': { ".": {}, "f:lastProbeTime": {}, "f:lastTransitionTime": {}, "f:reason": {}, "f:status": {}, "f:type": {} }, 'k:{"type":"PodReadyToStartContainers"}': { ".": {}, "f:lastProbeTime": {}, "f:lastTransitionTime": {}, "f:status": {}, "f:type": {} }, 'k:{"type":"PodScheduled"}': { ".": {}, "f:lastProbeTime": {}, "f:lastTransitionTime": {}, "f:status": {}, "f:type": {} }, 'k:{"type":"Ready"}': { ".": {}, "f:lastProbeTime": {}, "f:lastTransitionTime": {}, "f:reason": {}, "f:status": {}, "f:type": {} } }, "f:containerStatuses": {}, "f:hostIP": {}, "f:hostIPs": {}, "f:phase": {}, "f:podIP": {}, "f:podIPs": { ".": {}, 'k:{"ip":"10.42.0.15"}': { ".": {}, "f:ip": {} } }, "f:startTime": {} },
+    },
+  },
+]);
+const POD_CONDITIONS = Object.freeze([
+  { type: "PodReadyToStartContainers", status: "False", lastProbeTime: null, lastTransitionTime: "2026-10-21T08:00:05Z" },
+  { type: "Initialized", status: "True", lastProbeTime: null, lastTransitionTime: "2026-10-21T08:00:00Z", reason: "PodCompleted" },
+  { type: "Ready", status: "False", lastProbeTime: null, lastTransitionTime: "2026-10-21T08:00:05Z", reason: "PodCompleted" },
+  { type: "ContainersReady", status: "False", lastProbeTime: null, lastTransitionTime: "2026-10-21T08:00:05Z", reason: "PodCompleted" },
+  { type: "PodScheduled", status: "True", lastProbeTime: null, lastTransitionTime: "2026-10-21T08:00:00Z" },
+]);
+const podOf = (name, phase = "Succeeded") => ({
+  apiVersion: "v1",
+  kind: "Pod",
+  metadata: {
+    name,
+    namespace: NAMESPACE,
+    uid: `00000000-0000-0000-0000-${name.slice(-12).padStart(12, "0")}`,
+    resourceVersion: "123456",
+    creationTimestamp: "2026-10-21T08:00:00Z",
+    labels: { ...expected.objects.cronJob.spec.jobTemplate.spec.template.metadata.labels, "batch.kubernetes.io/job-name": name, "job-name": name },
+    ownerReferences: [{ apiVersion: "batch/v1", blockOwnerDeletion: true, controller: true, kind: "Job", name, uid: "00000000-0000-0000-0000-000000000001" }],
+    managedFields: POD_MANAGED_FIELDS,
+  },
+  spec: {
+    ...expected.objects.cronJob.spec.jobTemplate.spec.template.spec,
+    nodeName: "oci-seoul-k3s-arm64",
+    preemptionPolicy: "PreemptLowerPriority",
+    priority: 0,
+    schedulerName: "default-scheduler",
+    serviceAccount: OBJECT_NAMES.serviceAccount,
+    terminationGracePeriodSeconds: 30,
+    tolerations: [
+      { effect: "NoExecute", key: "node.kubernetes.io/not-ready", operator: "Exists", tolerationSeconds: 300 },
+      { effect: "NoExecute", key: "node.kubernetes.io/unreachable", operator: "Exists", tolerationSeconds: 300 },
+    ],
+  },
+  status: {
+    phase,
+    conditions: POD_CONDITIONS,
+    hostIP: "10.0.0.10",
+    hostIPs: [{ ip: "10.0.0.10" }],
+    podIP: "10.42.0.15",
+    podIPs: [{ ip: "10.42.0.15" }],
+    startTime: "2026-10-21T08:00:00Z",
+    containerStatuses: [{
+      name: "probe",
+      image: expected.objects.cronJob.spec.jobTemplate.spec.template.spec.containers[0].image,
+      imageID: expected.objects.cronJob.spec.jobTemplate.spec.template.spec.containers[0].image,
+      containerID: "containerd://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      ready: false,
+      restartCount: 0,
+      started: false,
+      state: { terminated: { containerID: "containerd://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", exitCode: phase === "Failed" ? 1 : 0, finishedAt: "2026-10-21T08:00:05Z", reason: phase === "Failed" ? "Error" : "Completed", startedAt: "2026-10-21T08:00:01Z" } },
+    }],
+    qosClass: "Burstable",
+  },
+});
+
+const respond = (stdout) => {
+  if (Buffer.byteLength(stdout) > COMMAND_OUTPUT_LIMIT) throw new Error("host command output exceeded the limit");
+  return { stdout, stderr: "" };
+};
 
 /** podLogs는 파드 이름 → 그 파드의 로그다. 라벨 selector로 읽으면 kubectl처럼 모든 파드 로그를 이어 붙여 돌려준다. */
-function fakeCluster({ bootstrapped = true, live = {}, pods = [], podLogs = {}, failOn = null } = {}) {
+function fakeCluster({ bootstrapped = true, live = {}, pods = [], podLogs = {}, podListStdout = null, failOn = null } = {}) {
   const calls = [];
   const commandRunner = async (command, args, { input } = {}) => {
     calls.push({ command, args, input: input === undefined ? undefined : input.toString("utf8") });
@@ -37,16 +118,19 @@ function fakeCluster({ bootstrapped = true, live = {}, pods = [], podLogs = {}, 
     assert.deepEqual(args.slice(0, 4), ["--non-interactive", "k3s", "kubectl", `--as=${DEPLOYER}`], "모든 호출은 deployer 신원이다");
     const [verb, kind] = args.slice(4);
     if (failOn === verb || failOn === `${verb}:${verb === "logs" ? args[5] : args[6]}`) throw new Error(`host command failed (1): ${verb} refused`);
-    if (verb === "get" && kind === "cronjob" && args.includes("--ignore-not-found")) return { stdout: bootstrapped ? "cronjob.batch/source-reachability-probe\n" : "", stderr: "" };
-    if (verb === "get" && kind === "pods") return { stdout: JSON.stringify({ items: pods }), stderr: "" };
-    if (verb === "get") return { stdout: JSON.stringify(live[`${kind}/${args[6]}`] ?? withDefaults(liveByName[`${kind}/${args[6]}`])), stderr: "" };
+    if (verb === "get" && kind === "cronjob" && args.includes("--ignore-not-found")) return respond(bootstrapped ? "cronjob.batch/source-reachability-probe\n" : "");
+    if (verb === "get" && kind === "pods") {
+      if (podListStdout !== null) return respond(podListStdout);
+      const format = args[args.indexOf("-o") + 1];
+      if (format === POD_PHASE_JSONPATH) return respond(pods.map((pod) => `${pod.metadata?.name ?? ""}\t${pod.status?.phase ?? ""}\n`).join(""));
+      return respond(JSON.stringify({ apiVersion: "v1", kind: "List", items: pods }));
+    }
+    if (verb === "get") return respond(JSON.stringify(live[`${kind}/${args[6]}`] ?? withDefaults(liveByName[`${kind}/${args[6]}`])));
     if (verb === "logs") {
       const named = args[5].startsWith("-") ? null : args[5];
-      const stdout = named === null ? Object.values(podLogs).join("") : (podLogs[named] ?? "");
-      if (Buffer.byteLength(stdout) > COMMAND_OUTPUT_LIMIT) throw new Error("host command output exceeded the limit");
-      return { stdout, stderr: "" };
+      return respond(named === null ? Object.values(podLogs).join("") : (podLogs[named] ?? ""));
     }
-    if (verb === "apply" || verb === "delete") return { stdout: "", stderr: "" };
+    if (verb === "apply" || verb === "delete") return respond("");
     return assert.fail(`unexpected kubectl verb ${verb}`);
   };
   return { calls, commandRunner };
@@ -115,13 +199,14 @@ test("COLLECT는 Job 파드 로그의 JSONL을 검증해 다시 직렬화한 줄
     const output = path.join(directory, "seoul.jsonl");
     const shuffled = JSON.stringify(Object.fromEntries(Object.entries(recordObject("2026-10-21T08:10:00.000Z")).reverse()));
     const podLogs = { "pod-a": `${shuffled}\n`, "pod-b": `${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`, "pod-c": "" };
-    const pods = [podOf("pod-a"), podOf("pod-b"), podOf("pod-c", "Failed"), podOf("pod-d", "Running")];
+    const pods = [podOf("pod-a"), podOf("pod-b"), podOf("pod-c", "Failed"), podOf("pod-d", "Running"), podOf("pod-e", "")];
     const cluster = fakeCluster({ pods, podLogs });
     const result = await deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner });
     assert.equal(readFileSync(output, "utf8"), `${record("2026-10-21T08:10:00.000Z")}\n${record("2026-10-21T08:00:00.000Z", failedExtra)}\n`, "원문이 아니라 RECORD_KEYS 순서로 다시 만든 줄이다");
-    assert.deepEqual(result.collected, { pods: 4, podsRead: 3, podPhases: { Succeeded: 2, Failed: 1, Running: 1 }, records: 2, firstObservedAt: "2026-10-21T08:00:00.000Z", lastObservedAt: "2026-10-21T08:10:00.000Z" });
+    assert.deepEqual(result.collected, { pods: 5, podsRead: 3, podPhases: { Succeeded: 2, Failed: 1, Running: 1, Unknown: 1 }, records: 2, firstObservedAt: "2026-10-21T08:00:00.000Z", lastObservedAt: "2026-10-21T08:10:00.000Z" });
     assert.equal(result.kubernetesMutationCount, 0);
     assert.deepEqual(verbs(cluster), ["get:pods", "logs", "logs", "logs"], "끝난 파드(Succeeded·Failed)만 파드별로 읽고 실행 중인 파드는 다음 수집으로 미룬다");
+    assert.deepEqual(cluster.calls[0].args.slice(4), ["get", "pods", "--namespace", NAMESPACE, "-l", "app.kubernetes.io/name=source-reachability-probe", "-o", POD_PHASE_JSONPATH]);
     assert.deepEqual(cluster.calls.slice(1).map(({ args }) => args[5]), ["pod-a", "pod-b", "pod-c"]);
     assert.ok(cluster.calls.slice(1).every(({ args }) => args.includes("--tail=-1") && !args.includes("-l")), "파드마다 전체 로그를 읽고 selector로 한꺼번에 읽지 않는다");
   } finally {
@@ -129,10 +214,15 @@ test("COLLECT는 Job 파드 로그의 JSONL을 검증해 다시 직렬화한 줄
   }
 });
 
-test("COLLECT는 형식이 다른 줄(JSON 아님·키 추가·타입 오류·값 범위 오류·알 수 없는 대상)을 버리지 않고 실패하며 파일을 쓰지 않는다", async () => {
+test("COLLECT는 파드 목록 출력이나 파드 로그 줄 형식이 어긋나면 버리지 않고 실패하며 파일을 쓰지 않는다", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "probe-collect-"));
   try {
     const output = path.join(directory, "seoul.jsonl");
+    for (const podListStdout of ["not-tab-separated\n", "\tSucceeded\n", "   \tSucceeded\n", "pod-a\tSucceeded\textra\n", "pod a\tSucceeded\n", "pod-a\tSucceeded extra\n"]) {
+      const cluster = fakeCluster({ podListStdout });
+      await assert.rejects(deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner }), { code: "E_PROBE_DEPLOY_READBACK" }, podListStdout);
+      assert.equal(existsSync(output), false);
+    }
     const at = "2026-10-21T08:00:00.000Z";
     const bad = [
       "not json\n",
@@ -160,14 +250,16 @@ const realisticPodLog = (podIndex) => `${PROBE_TARGETS.map((target, index) => JS
   dnsMs: 12.345678901234 + index, connectMs: 31.2345678901234, tlsMs: 45.678901234567, firstByteMs: 123.456789012345, totalMs: 212.3456789012345,
 })).join("\n")}\n`;
 
-test("COLLECT는 파드 300개(약 50시간) 규모도 파드별로 읽어 출력 한도에 걸리지 않고 파일에 이어 쓴다", async () => {
+test("COLLECT는 파드 300개(약 50시간) 규모도 jsonpath 목록 조회와 파드별 로그 읽기로 출력 한도에 걸리지 않고 파일에 이어 쓴다", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "probe-collect-"));
   try {
     const output = path.join(directory, "seoul.jsonl");
     const names = Array.from({ length: 300 }, (_, index) => `source-reachability-probe-${index}`);
+    const pods = names.map((name) => podOf(name));
     const podLogs = Object.fromEntries(names.map((name, index) => [name, realisticPodLog(index)]));
+    assert.ok(Buffer.byteLength(JSON.stringify({ apiVersion: "v1", kind: "List", items: pods })) > COMMAND_OUTPUT_LIMIT, "전제: 파드 300개 전체 JSON 목록은 출력 한도를 넘는 규모다");
     assert.ok(Buffer.byteLength(Object.values(podLogs).join("")) > COMMAND_OUTPUT_LIMIT, "전제: 모든 로그를 한 번에 읽으면 출력 한도를 넘는 규모다");
-    const cluster = fakeCluster({ pods: names.map((name) => podOf(name)), podLogs });
+    const cluster = fakeCluster({ pods, podLogs });
     const result = await deploySourceReachabilityProbe({ mode: "COLLECT", output, commandRunner: cluster.commandRunner });
     assert.equal(result.collected.records, 3000);
     assert.equal(result.collected.podsRead, 300);
