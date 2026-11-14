@@ -12,14 +12,14 @@ EasySubway Platform manages single-tenant container orchestration, deployment wo
 
 ## What Platform does
 
-- **K3s deployment pipeline**: Deploys verified, immutable container image digests to our ARM64 host without using floating tags.
-- **Pre-switch verification**: Validates database connectivity, configuration secrets, and readiness tokens before directing traffic.
-- **Clean traffic cutover**: Switches host Nginx reverse proxy routes to active NodePort services and safely drains retired workloads.
-- **Fail-closed guarantees**: Any unexpected configuration or contract mismatch stops deployment immediately, preventing corrupt runtime state.
-- **Observability and backups**: Connects Prometheus metrics, Alertmanager notifications, and scheduled backups for host databases and object storage.
+- **K3s deployment pipeline**: Deploys immutable container image digests to the ARM64 host without relying on floating tags.
+- **Readiness checks**: Checks database connectivity, secret bindings, and service readiness before directing live traffic.
+- **Traffic cutover**: Switches host Nginx reverse proxy routes to active NodePort services and drains retired workloads cleanly.
+- **Deterministic halts**: Stops deployment immediately when required runtime configuration or target state is missing or invalid, preventing broken live traffic.
+- **Observability and backups**: Connects Prometheus metrics, Alertmanager notifications, and backups for host databases and object storage.
 
 ## Current scope
 
-Platform currently operates the production Journey V3 deployment pipeline running on K3s. Image builds, candidate data packs, and host service configurations are strictly verified before live traffic is connected.
+Platform runs the production Journey V3 deployment and runtime infrastructure on K3s, delivering pinned backend container images, data pack bundles, and host routing configurations.
 
 Contact: [aquila@aquilaxk.site](mailto:aquila@aquilaxk.site)

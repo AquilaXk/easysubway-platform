@@ -15,6 +15,8 @@ IDENTITY_FIELDS = (
     "serverRouteBundleDigest", "deploymentRevision", "environmentIdentity",
 )
 REQUIRED_FIELDS = ("schemaVersion", "artifactKind", *IDENTITY_FIELDS, "tupleSha256")
+MAX_CONTENT_BYTES = 4096
+MAX_REQUEST_BYTES = 8192
 DIGEST = re.compile(r"sha256:[a-f0-9]{64}\Z")
 REVISION = re.compile(r"[a-f0-9]{40}\Z")
 ENVIRONMENT = re.compile(r"[A-Za-z0-9._-]+\Z")
@@ -42,9 +44,11 @@ def require_capabilities():
 
 
 def parse_candidate(content):
+    if not 1 <= len(content) <= MAX_CONTENT_BYTES:
+        fail("E_JRT_STAGE_IO", 1)
     try:
         candidate = json.loads(content, object_pairs_hook=exact_candidate_object)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         fail("E_JRT_STAGE_IO", 1)
     if not isinstance(candidate, dict):
         fail("E_JRT_STAGE_IO", 1)
@@ -54,7 +58,11 @@ def parse_candidate(content):
         fail("E_JRT_STAGE_IO", 1)
     if not isinstance(candidate.get("deploymentRevision"), str) or not REVISION.fullmatch(candidate["deploymentRevision"]):
         fail("E_JRT_STAGE_IO", 1)
-    if not isinstance(candidate.get("environmentIdentity"), str) or not ENVIRONMENT.fullmatch(candidate["environmentIdentity"]):
+    if (
+        not isinstance(candidate.get("environmentIdentity"), str)
+        or len(candidate["environmentIdentity"]) > 255
+        or not ENVIRONMENT.fullmatch(candidate["environmentIdentity"])
+    ):
         fail("E_JRT_STAGE_IO", 1)
     expected = "sha256:" + hashlib.sha256(
         ("\n".join(candidate[name] for name in IDENTITY_FIELDS) + "\n").encode("utf-8")
@@ -65,15 +73,19 @@ def parse_candidate(content):
 
 
 def parse_request(payload):
+    if len(payload) > MAX_REQUEST_BYTES:
+        fail("E_JRT_STAGE_IO", 1)
     header, separator, content = payload.partition(b"\n")
     match = IDENTITY_HEADER.fullmatch(header)
-    if not separator or match is None or not content:
+    if not separator or match is None or not 1 <= len(content) <= MAX_CONTENT_BYTES:
         fail("E_JRT_STAGE_IO", 1)
     return tuple(int(value) for value in match.groups()), content
 
 
 def exact_candidate_object(pairs):
-    if tuple(name for name, _ in pairs) != REQUIRED_FIELDS:
+    if len(pairs) != len(REQUIRED_FIELDS) or any(
+        name != expected for (name, _), expected in zip(pairs, REQUIRED_FIELDS)
+    ):
         fail("E_JRT_STAGE_IO", 1)
     return dict(pairs)
 
@@ -125,12 +137,22 @@ def write_all(descriptor, content):
 
 def read_all(descriptor, expected_size):
     parts = []
-    while sum(map(len, parts)) < expected_size:
-        part = os.read(descriptor, expected_size)
+    total_read = 0
+    while total_read < expected_size:
+        part = os.read(descriptor, expected_size - total_read)
         if not part:
             break
         parts.append(part)
+        total_read += len(part)
     return b"".join(parts)
+
+
+def read_bounded_stdin(stream=None, max_bytes=MAX_REQUEST_BYTES):
+    target = sys.stdin.buffer if stream is None else stream
+    payload = target.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        fail("E_JRT_STAGE_IO", 1)
+    return payload
 
 
 def unlink_if_identity(directory_fd, name, expected):
@@ -230,15 +252,16 @@ def main():
     if len(sys.argv) != 1:
         fail("E_JRT_USAGE", 2)
     require_capabilities()
-    expected_identities, content = parse_request(sys.stdin.buffer.read())
+    expected_identities, content = parse_request(read_bounded_stdin())
     publish(expected_identities, content)
 
 
-try:
-    main()
-except PublishError as error:
-    print(error.code, file=sys.stderr)
-    sys.exit(error.exit_code)
-except OSError:
-    print("E_JRT_STAGE_IO", file=sys.stderr)
-    sys.exit(1)
+if __name__ == "__main__":
+    try:
+        main()
+    except PublishError as error:
+        print(error.code, file=sys.stderr)
+        sys.exit(error.exit_code)
+    except OSError:
+        print("E_JRT_STAGE_IO", file=sys.stderr)
+        sys.exit(1)

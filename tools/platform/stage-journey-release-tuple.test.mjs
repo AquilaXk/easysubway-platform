@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -195,6 +196,85 @@ test("helper rejects a directory identity not captured by the caller", () => {
   assert.match(result.stderr, /^E_JRT_OUTPUT_CONFINEMENT\b/);
   assertCandidateMissing();
   assert.deepEqual(readdirSync(candidatesRoot), []);
+});
+
+test("helper fails closed on oversized stdin payloads and enforces bounded candidate size equivalence", () => {
+  const oversizedTuple = {
+    ...validTuple(),
+    environmentIdentity: "p".repeat(10_000),
+  };
+  const sha = createHash("sha256")
+    .update(
+      `${[
+        oversizedTuple.backendImageDigest,
+        oversizedTuple.backendConfigDigest,
+        oversizedTuple.journeyContractDigest,
+        oversizedTuple.serverRouteBundleDigest,
+        oversizedTuple.deploymentRevision,
+        oversizedTuple.environmentIdentity,
+      ].join("\n")}\n`,
+      "utf8",
+    )
+    .digest("hex");
+  const oversizedBody = `${JSON.stringify({ ...oversizedTuple, tupleSha256: `sha256:${sha}` }, null, 2)}\n`;
+  const oversizedResult = runHelperRequest(publicationRequest(oversizedBody));
+  assert.equal(oversizedResult.status, 1);
+  assert.match(oversizedResult.stderr, /^E_JRT_STAGE_IO\b/);
+  assert.deepEqual(readdirSync(candidatesRoot), []);
+
+  const paddedBody = `${candidateBody()}${" ".repeat(4097)}`;
+  const paddedResult = runHelperRequest(publicationRequest(paddedBody));
+  assert.equal(paddedResult.status, 1);
+  assert.match(paddedResult.stderr, /^E_JRT_STAGE_IO\b/);
+  assertCandidateMissing();
+
+  const unitEquivalence = spawnSync(
+    "/usr/bin/python3",
+    [
+      "-B",
+      "-c",
+      [
+        "import importlib.util, os, sys",
+        "spec = importlib.util.spec_from_file_location('publisher', sys.argv[1])",
+        "mod = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(mod)",
+        "r_fd, w_fd = os.pipe()",
+        "payload = b'abcdef' * 500",
+        "os.write(w_fd, payload[:7])",
+        "os.write(w_fd, payload[7:211])",
+        "os.write(w_fd, payload[211:])",
+        "os.close(w_fd)",
+        "actual = mod.read_all(r_fd, len(payload))",
+        "os.close(r_fd)",
+        "assert actual == payload",
+        "assert mod.exact_candidate_object([(k, k) for k in mod.REQUIRED_FIELDS]) == {k: k for k in mod.REQUIRED_FIELDS}",
+      ].join("\n"),
+      helper,
+    ],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  assert.equal(unitEquivalence.status, 0, unitEquivalence.stderr);
+
+  const validInput = writeInput(validTuple());
+  const stageResult = run("--input", validInput);
+  assert.equal(stageResult.status, 0, stageResult.stderr);
+  const readerScript = join(repositoryRoot, "tools/platform/read-staged-journey-release-tuple.py");
+  copyFileSync(join(sourceRepositoryRoot, "tools/platform/read-staged-journey-release-tuple.py"), readerScript);
+  const readResult = spawnSync(
+    "/usr/bin/python3",
+    [
+      readerScript,
+      "--tuple-sha256",
+      expectedTupleSha256.slice("sha256:".length),
+      "--deployment-revision",
+      validTuple().deploymentRevision,
+      "--environment-identity",
+      validTuple().environmentIdentity,
+    ],
+    { encoding: "utf8", timeout: 5_000 },
+  );
+  assert.equal(readResult.status, 0, readResult.stderr);
+  assert.equal(readResult.stdout, candidateBody());
 });
 
 function validTuple() {

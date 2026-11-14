@@ -43,12 +43,12 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   );
   assert.match(
     headerArea,
-    /limit_req_zone\s+\$binary_remote_addr\s+zone=easysubway_upload:10m\s+rate=2r\/s;/,
+    /limit_req_zone\s+\$binary_remote_addr\s+zone=easysubway_upload:10m\s+rate=1r\/s;/,
     "easysubway_upload zone 정의가 있어야 한다"
   );
   assert.match(
     headerArea,
-    /limit_req_zone\s+\$binary_remote_addr\s+zone=easysubway_api:10m\s+rate=30r\/s;/,
+    /limit_req_zone\s+\$binary_remote_addr\s+zone=easysubway_api:10m\s+rate=20r\/s;/,
     "easysubway_api zone 정의가 있어야 한다"
   );
   assert.match(
@@ -83,12 +83,12 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   assert.ok(journeyLoc, "^~ /api/v3/journeys/ location이 있어야 한다");
   assert.match(
     journeyLoc,
-    /limit_req\s+zone=easysubway_journey\s+burst=20\s+nodelay;/,
+    /limit_req\s+zone=easysubway_journey\s+burst=10\s+nodelay;/,
     "journey location에 limit_req 설정이 있어야 한다"
   );
   assert.match(
     journeyLoc,
-    /limit_conn\s+easysubway_conn\s+50;/,
+    /limit_conn\s+easysubway_conn\s+25;/,
     "journey location에 limit_conn 설정이 있어야 한다"
   );
 
@@ -97,12 +97,17 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   assert.ok(uploadLoc, "^~ /api/v1/report-uploads location이 있어야 한다");
   assert.match(
     uploadLoc,
-    /limit_req\s+zone=easysubway_upload\s+burst=10\s+nodelay;/,
+    /client_max_body_size\s+10m;/,
+    "report-uploads location에 명시적 client_max_body_size 10m이 있어야 한다"
+  );
+  assert.match(
+    uploadLoc,
+    /limit_req\s+zone=easysubway_upload\s+burst=5\s+nodelay;/,
     "report-uploads location에 limit_req 설정이 있어야 한다"
   );
   assert.match(
     uploadLoc,
-    /limit_conn\s+easysubway_conn\s+50;/,
+    /limit_conn\s+easysubway_conn\s+10;/,
     "report-uploads location에 limit_conn 설정이 있어야 한다"
   );
 
@@ -111,12 +116,17 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   assert.ok(reportLoc, "^~ /api/v1/reports location이 있어야 한다");
   assert.match(
     reportLoc,
-    /limit_req\s+zone=easysubway_upload\s+burst=10\s+nodelay;/,
+    /client_max_body_size\s+10m;/,
+    "reports location에 명시적 client_max_body_size 10m이 있어야 한다"
+  );
+  assert.match(
+    reportLoc,
+    /limit_req\s+zone=easysubway_upload\s+burst=5\s+nodelay;/,
     "reports location에 limit_req 설정이 있어야 한다"
   );
   assert.match(
     reportLoc,
-    /limit_conn\s+easysubway_conn\s+50;/,
+    /limit_conn\s+easysubway_conn\s+10;/,
     "reports location에 limit_conn 설정이 있어야 한다"
   );
 
@@ -125,12 +135,12 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   assert.ok(rootLoc, "/ location이 있어야 한다");
   assert.match(
     rootLoc,
-    /limit_req\s+zone=easysubway_api\s+burst=60\s+nodelay;/,
+    /limit_req\s+zone=easysubway_api\s+burst=30\s+nodelay;/,
     "/ location에 limit_req 설정이 있어야 한다"
   );
   assert.match(
     rootLoc,
-    /limit_conn\s+easysubway_conn\s+50;/,
+    /limit_conn\s+easysubway_conn\s+25;/,
     "/ location에 limit_conn 설정이 있어야 한다"
   );
 
@@ -149,6 +159,26 @@ test("host nginx 요청·연결 제한 및 real IP 설정 정적 검증", () => 
   const rateLimitedLoc = locations.get("@easysubway_rate_limited");
   assert.ok(rateLimitedLoc, "@easysubway_rate_limited location이 있어야 한다");
   assert.match(rateLimitedLoc, /add_header\s+Retry-After\s+1\s+always;/, "Retry-After 헤더가 있어야 한다");
+  assert.match(
+    rateLimitedLoc,
+    /add_header\s+Strict-Transport-Security\s+"max-age=31536000;\s*includeSubDomains"\s+always;/,
+    "429 응답에도 Strict-Transport-Security 헤더가 유지되어야 한다",
+  );
+  assert.match(
+    rateLimitedLoc,
+    /add_header\s+X-Content-Type-Options\s+"nosniff"\s+always;/,
+    "429 응답에도 X-Content-Type-Options 헤더가 유지되어야 한다",
+  );
+  assert.match(
+    rateLimitedLoc,
+    /add_header\s+X-Frame-Options\s+"DENY"\s+always;/,
+    "429 응답에도 X-Frame-Options 헤더가 유지되어야 한다",
+  );
+  assert.match(
+    rateLimitedLoc,
+    /add_header\s+Referrer-Policy\s+"strict-origin-when-cross-origin"\s+always;/,
+    "429 응답에도 Referrer-Policy 헤더가 유지되어야 한다",
+  );
   assert.match(rateLimitedLoc, /default_type\s+application\/json;/, "application/json default_type이어야 한다");
   assert.match(rateLimitedLoc, /return\s+429\s+'\{"code":"RATE_LIMITED"\}';/, "429 반환 본문이 있어야 한다");
 
@@ -314,4 +344,35 @@ test("(5) real_ip_header CF-Connecting-IP가 유지된다", () => {
   const realIp = existsSync(realIpPath) ? readFileSync(realIpPath, "utf8") : "";
   assert.match(realIp, /real_ip_header\s+CF-Connecting-IP;/, "real_ip_header CF-Connecting-IP가 유지되어야 한다");
   assert.match(realIp, /real_ip_recursive\s+on;/, "real_ip_recursive on이 유지되어야 한다");
+});
+
+test("(6) TLS 프로토콜·보안 헤더·요청 크기 제한·Fail-Closed 프록시 타임아웃이 설정된다", () => {
+  const template = readFileSync(templatePath, "utf8");
+  const serverBlocks = extractServerBlocks(template);
+  assert.equal(serverBlocks.length, 3);
+
+  for (const block of serverBlocks) {
+    assert.match(block, /server_tokens\s+off;/);
+  }
+  for (const tlsBlock of serverBlocks.slice(1)) {
+    assert.match(tlsBlock, /ssl_protocols\s+TLSv1\.2\s+TLSv1\.3;/);
+    assert.match(tlsBlock, /ssl_ciphers\s+[^;]+;/);
+    assert.match(tlsBlock, /ssl_prefer_server_ciphers\s+on;/);
+    assert.match(tlsBlock, /ssl_session_tickets\s+off;/);
+  }
+
+  const mainServer = serverBlocks[2];
+  assert.match(mainServer, /client_max_body_size\s+1m;/);
+  assert.match(mainServer, /client_body_timeout\s+15s;/);
+  assert.match(mainServer, /client_header_timeout\s+10s;/);
+  assert.match(mainServer, /send_timeout\s+15s;/);
+  assert.match(mainServer, /keepalive_timeout\s+30s;/);
+  assert.match(mainServer, /proxy_connect_timeout\s+3s;/);
+  assert.match(mainServer, /proxy_send_timeout\s+15s;/);
+  assert.match(mainServer, /proxy_read_timeout\s+20s;/);
+  assert.match(mainServer, /proxy_next_upstream\s+off;/);
+  assert.match(mainServer, /add_header\s+Strict-Transport-Security\s+"max-age=31536000;\s*includeSubDomains"\s+always;/);
+  assert.match(mainServer, /add_header\s+X-Content-Type-Options\s+"nosniff"\s+always;/);
+  assert.match(mainServer, /add_header\s+X-Frame-Options\s+"DENY"\s+always;/);
+  assert.match(mainServer, /add_header\s+Referrer-Policy\s+"strict-origin-when-cross-origin"\s+always;/);
 });

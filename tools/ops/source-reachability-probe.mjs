@@ -298,28 +298,59 @@ function percentile(sortedValues, fraction) {
 
 const STATUS_CLASSES = Object.freeze(["2xx", "3xx", "4xx", "5xx"]);
 const isEvening = (observedAt) => new Date(Date.parse(observedAt) + KST_OFFSET_HOURS * 3_600_000).getUTCHours() >= EVENING_FIRST_KST_HOUR;
-const tally = (records) => ({ samples: records.length, failures: records.filter(({ ok }) => !ok).length });
 
 /** vantage·대상별 요약. 지연 분위수는 성공한 측정만으로 계산하고 실패는 실패 사유로 센다. */
 export function summarizeRecords(records) {
   const groups = new Map();
   for (const record of records) {
     const key = `${record.vantage}\u0000${record.target}`;
-    groups.set(key, [...(groups.get(key) ?? []), record]);
+    let bucket = groups.get(key);
+    if (!bucket) {
+      bucket = [];
+      groups.set(key, bucket);
+    }
+    bucket.push(record);
   }
   return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, group]) => {
-    const succeeded = group.filter(({ ok }) => ok);
+    const stageValues = Object.fromEntries(STAGE_KEYS.map((stage) => [stage, []]));
+    const failureReasons = {};
+    const statusClasses = Object.fromEntries(STATUS_CLASSES.map((statusClass) => [statusClass, 0]));
+    let failures = 0;
+    let eveningSamples = 0;
+    let eveningFailures = 0;
+    let otherSamples = 0;
+    let otherFailures = 0;
+
+    for (const record of group) {
+      if (record.ok) {
+        for (const stage of STAGE_KEYS) {
+          if (Number.isFinite(record[stage])) stageValues[stage].push(record[stage]);
+        }
+      } else {
+        failures += 1;
+        const reason = `${record.failedStage}/${record.errorCode}`;
+        failureReasons[reason] = (failureReasons[reason] ?? 0) + 1;
+      }
+      if (record.httpStatus !== null) {
+        const statusClass = `${Math.floor(record.httpStatus / 100)}xx`;
+        if (Object.hasOwn(statusClasses, statusClass)) {
+          statusClasses[statusClass] += 1;
+        }
+      }
+      if (isEvening(record.observedAt)) {
+        eveningSamples += 1;
+        if (!record.ok) eveningFailures += 1;
+      } else {
+        otherSamples += 1;
+        if (!record.ok) otherFailures += 1;
+      }
+    }
+
     const stages = Object.fromEntries(STAGE_KEYS.map((stage) => {
-      const values = succeeded.map((record) => record[stage]).filter(Number.isFinite).sort((a, b) => a - b);
+      const values = stageValues[stage].sort((a, b) => a - b);
       return [stage, { p50: percentile(values, 0.5), p95: percentile(values, 0.95) }];
     }));
-    const failureReasons = {};
-    for (const { failedStage, errorCode } of group.filter(({ ok }) => !ok)) {
-      const reason = `${failedStage}/${errorCode}`;
-      failureReasons[reason] = (failureReasons[reason] ?? 0) + 1;
-    }
-    const { samples, failures } = tally(group);
-    const statusClasses = Object.fromEntries(STATUS_CLASSES.map((statusClass) => [statusClass, group.filter(({ httpStatus }) => httpStatus !== null && `${Math.floor(httpStatus / 100)}xx` === statusClass).length]));
+    const samples = group.length;
     return {
       vantage: group[0].vantage,
       target: group[0].target,
@@ -330,8 +361,8 @@ export function summarizeRecords(records) {
       failureReasons,
       statusClasses,
       stages,
-      evening: tally(group.filter(({ observedAt }) => isEvening(observedAt))),
-      other: tally(group.filter(({ observedAt }) => !isEvening(observedAt))),
+      evening: { samples: eveningSamples, failures: eveningFailures },
+      other: { samples: otherSamples, failures: otherFailures },
     };
   });
 }

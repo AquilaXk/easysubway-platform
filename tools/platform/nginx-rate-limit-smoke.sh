@@ -90,6 +90,18 @@ for _ in $(seq 1 40); do
         rm -f "${resp_headers}" "${resp_body}"
         exit 1
       }
+      for expected_header in \
+        "Strict-Transport-Security: max-age=31536000; includeSubDomains" \
+        "X-Content-Type-Options: nosniff" \
+        "X-Frame-Options: DENY" \
+        "Referrer-Policy: strict-origin-when-cross-origin"; do
+        grep -iq "${expected_header}" "${resp_headers}" || {
+          echo "Error: 429 response missing '${expected_header}' header" >&2
+          cat "${resp_headers}" >&2
+          rm -f "${resp_headers}" "${resp_body}"
+          exit 1
+        }
+      done
       grep -q '"code":"RATE_LIMITED"' "${resp_body}" || {
         echo "Error: 429 response body did not match RATE_LIMITED" >&2
         cat "${resp_body}" >&2

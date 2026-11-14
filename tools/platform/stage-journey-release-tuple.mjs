@@ -17,6 +17,12 @@ const requiredFields = ["schemaVersion", "artifactKind", ...identityFields];
 const digestPattern = /^sha256:[a-f0-9]{64}(?![\s\S])/;
 const revisionPattern = /^[a-f0-9]{40}(?![\s\S])/;
 const environmentPattern = /^[A-Za-z0-9._-]+(?![\s\S])/;
+const MAX_INPUT_BYTES = 4096;
+const KNOWN_HELPER_ERROR_CODES = new Set([
+  "E_JRT_OUTPUT_CONFINEMENT",
+  "E_JRT_OUTPUT_EXISTS",
+  "E_JRT_STAGE_IO",
+]);
 
 class JourneyReleaseTupleError extends Error {
   constructor(code, exitCode, message) {
@@ -45,7 +51,10 @@ function readTuple(inputPath) {
     fail("E_JRT_INPUT_NOT_REGULAR", 2, "input must be a regular file");
   }
   try {
-    if (!fstatSync(descriptor).isFile()) fail("E_JRT_INPUT_NOT_REGULAR", 2, "input must be a regular file");
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.size > MAX_INPUT_BYTES) {
+      fail("E_JRT_INPUT_NOT_REGULAR", 2, "input must be a regular file within size limit");
+    }
     const parsed = JSON.parse(readFileSync(descriptor, "utf8"));
     validateTuple(parsed);
     return parsed;
@@ -141,7 +150,7 @@ function stage(tuple, tupleSha256) {
   if (result.error || result.status === null) fail("E_JRT_STAGE_IO", 1, "secure publisher could not run");
   if (result.status === 0) return;
   const code = result.stderr.trim().split(/\s+/, 1)[0];
-  if (["E_JRT_OUTPUT_CONFINEMENT", "E_JRT_OUTPUT_EXISTS", "E_JRT_STAGE_IO"].includes(code)) {
+  if (KNOWN_HELPER_ERROR_CODES.has(code)) {
     fail(code, code === "E_JRT_STAGE_IO" ? 1 : 2, "secure publisher rejected staging");
   }
   fail("E_JRT_STAGE_IO", 1, "secure publisher failed");

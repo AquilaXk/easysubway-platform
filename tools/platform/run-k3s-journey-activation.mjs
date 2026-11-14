@@ -8,6 +8,7 @@ import {
   mkdir,
   open,
 } from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -273,6 +274,7 @@ export function createK3sJourneyActivationEffects({
   commandRunner = runCommand,
   serviceToken = process.env.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN,
   fetchImpl = fetch,
+  env = process.env,
 } = {}) {
   validateRequest(request);
   if (typeof commandRunner !== "function" || typeof fetchImpl !== "function" ||
@@ -745,10 +747,15 @@ export function createK3sJourneyActivationEffects({
       });
     },
     async switchNginx() {
+      const managementTarget = await resolveK3sManagementTarget({
+        env,
+        kubectl,
+        readObservabilityContract,
+      });
       const current = Buffer.from((await commandRunner("sudo", [
         "--non-interactive", "cat", request.nginxConfigPath,
       ])).stdout, "utf8");
-      const bytes = renderK3sNginxConfig(current);
+      const bytes = renderK3sNginxConfig(current, { managementTarget });
       const stagedPath = path.join(request.operationDirectory, "nginx-k3s-candidate.conf");
       await writeBytesCreateOnly(stagedPath, bytes, 0o600);
       await commandRunner("sudo", [
@@ -759,8 +766,9 @@ export function createK3sJourneyActivationEffects({
       await commandRunner("sudo", ["--non-interactive", "nginx", "-s", "reload"]);
       return {
         targetPort: 32080,
+        managementTarget,
         nginxConfigSha256: digest(bytes),
-        evidenceDigest: evidence([digest(bytes), "32080"]),
+        evidenceDigest: evidence([digest(bytes), "32080", managementTarget]),
       };
     },
     async drainOldWorkloads({ candidate, preparedActiveService }) {
@@ -1500,15 +1508,97 @@ function containsObject(actual, expected) {
     .every(([key, value]) => actual[key] === value);
 }
 
-export function renderK3sNginxConfig(current) {
+export function validateK3sManagementTarget(rawTarget) {
+  if (typeof rawTarget !== "string" || rawTarget.length === 0) {
+    throw new Error("K3s management target is required");
+  }
+  if (rawTarget.length > 255 || /[\s;{}#\\/?@]/.test(rawTarget) || rawTarget.includes("://")) {
+    throw new Error("K3s management target is invalid");
+  }
+  const colonIndex = rawTarget.indexOf(":");
+  if (colonIndex <= 0 || colonIndex === rawTarget.length - 1 || rawTarget.indexOf(":", colonIndex + 1) !== -1) {
+    throw new Error("K3s management target must be host:port");
+  }
+  const host = rawTarget.slice(0, colonIndex);
+  const portText = rawTarget.slice(colonIndex + 1);
+  if (!/^[1-9][0-9]{0,4}$/.test(portText)) {
+    throw new Error("K3s management target port is invalid");
+  }
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("K3s management target port is out of range");
+  }
+  const ipVersion = isIP(host);
+  if (ipVersion === 4) {
+    if (host === "0.0.0.0") throw new Error("K3s management target host is invalid");
+    return `${host}:${port}`;
+  }
+  const hostLabels = host.split(".");
+  const validHostname =
+    ipVersion === 0 &&
+    host.toLowerCase() !== "none" &&
+    /[a-z]/i.test(host) &&
+    !/^[0-9]+$/.test(hostLabels[hostLabels.length - 1]) &&
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(host);
+  if (!validHostname) {
+    throw new Error("K3s management target host is invalid");
+  }
+  return `${host}:${port}`;
+}
+
+export async function resolveK3sManagementTarget({
+  env = process.env,
+  kubectl,
+  readObservabilityContract: readContract = readObservabilityContract,
+} = {}) {
+  const override = env?.EASYSUBWAY_K3S_MANAGEMENT_TARGET;
+  if (typeof override === "string" && override !== "") {
+    return validateK3sManagementTarget(override);
+  }
+  if (typeof kubectl !== "function") {
+    throw new Error("K3s management target is required");
+  }
+  const observability = await readContract();
+  const serviceName = observability?.activeService?.name;
+  const namespace = observability?.activeService?.namespace || NAMESPACE;
+  const contractPort = observability?.activeService?.managementPort;
+  if (typeof serviceName !== "string" || serviceName === "") {
+    throw new Error("K3s active service name is missing from observability contract");
+  }
+  const serviceResult = await kubectl([
+    "get", "service", serviceName, "--namespace", namespace, "-o", "json",
+  ]);
+  const service = parseJson(Buffer.from(serviceResult.stdout));
+  const clusterIp = service?.spec?.clusterIP;
+  const ports = Array.isArray(service?.spec?.ports) ? service.spec.ports : [];
+  const managementPort = ports.find((entry) => entry?.name === "management")?.port ?? contractPort;
+  if (typeof clusterIp !== "string" || clusterIp === "" || clusterIp.toLowerCase() === "none" ||
+    !Number.isInteger(managementPort)) {
+    throw new Error("K3s management target could not be resolved from active service");
+  }
+  return validateK3sManagementTarget(`${clusterIp}:${managementPort}`);
+}
+
+export function renderK3sNginxConfig(current, options = {}) {
   if (!Buffer.isBuffer(current)) throw new Error("installed Nginx config is invalid");
+  const rawTarget = options.managementTarget ??
+    (options.env ?? process.env)?.EASYSUBWAY_K3S_MANAGEMENT_TARGET;
+  const managementTarget = validateK3sManagementTarget(rawTarget);
+  const managementPort = managementTarget.slice(managementTarget.lastIndexOf(":") + 1);
   const source = new TextDecoder("utf-8", { fatal: true }).decode(current);
   const composeTarget = "proxy_pass http://127.0.0.1:8080;";
   const k3sTarget = "proxy_pass http://127.0.0.1:32080;";
-  const k3sManagementTarget = "proxy_pass http://10.43.11.187:8081;";
-  const healthLocationPattern = /(location\s*=\s*\/actuator\/health\/(?:readiness|liveness)\s*\{[^}]*?)proxy_pass http:\/\/(?:127\.0\.0\.1:(?:8080|32080)|10\.43\.11\.187:8081);([^}]*\})/g;
+  const k3sManagementTarget = `proxy_pass http://${managementTarget};`;
+  const healthLocationPattern = /(location\s*=\s*\/actuator\/health\/(?:readiness|liveness)\s*\{[^}]*?)proxy_pass http:\/\/([A-Za-z0-9.-]+:[0-9]{1,5});([^}]*\})/g;
   let healthMatchCount = 0;
-  const withManagementProbes = source.replace(healthLocationPattern, (_match, prefix, suffix) => {
+  const withManagementProbes = source.replace(healthLocationPattern, (_match, prefix, existingTarget, suffix) => {
+    const allowedExisting =
+      existingTarget === "127.0.0.1:8080" ||
+      existingTarget === "127.0.0.1:32080" ||
+      (existingTarget.endsWith(`:${managementPort}`) && validateK3sManagementTarget(existingTarget) !== "");
+    if (!allowedExisting) {
+      throw new Error("installed Nginx backend target does not match the cutover contract");
+    }
     healthMatchCount += 1;
     return `${prefix}${k3sManagementTarget}${suffix}`;
   });

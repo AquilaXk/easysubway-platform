@@ -1,9 +1,6 @@
 name: PostgreSQL Restore Rehearsal (Disaster Recovery)
 
 on:
-  schedule:
-    # Every Sunday at 03:30 KST (Saturday 18:30 UTC)
-    - cron: "30 18 * * 6"
   workflow_dispatch:
     inputs:
       backup_file:

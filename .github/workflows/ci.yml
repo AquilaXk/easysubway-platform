@@ -21,6 +21,31 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Guard tracked agent and AI hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          if forbidden_paths="$(git ls-files | grep -E '(^|/)(AGENTS|CLAUDE|CLAUDE\.local|GEMINI|CURSOR|COPILOT|TODO)\.md$|(^|/)\.(agents|claude|codex|cursor|gemini|aider|windsurf|ai|playwright-mcp)(/|$)|(^|/)\.coderabbit\.ya?ml$|(^|/)\.github/dependabot\.ya?ml$')"; then
+            printf 'forbidden agent/repo-hygiene files are tracked:\n%s\n' "${forbidden_paths}" >&2
+            exit 1
+          else
+            ls_rc=$?
+            if [[ "${ls_rc}" -ne 1 ]]; then
+              printf 'git ls-files hygiene check failed with status %s\n' "${ls_rc}" >&2
+              exit "${ls_rc}"
+            fi
+          fi
+          if ai_matches="$(git grep -inE '(claude|codex|coderabbit|copilot|anthropic|co-authored-by|chatgpt|gemini)' -- ':!.gitignore' ':!.github/workflows/ci.yml')"; then
+            printf 'forbidden AI trace found in tracked files:\n%s\n' "${ai_matches}" >&2
+            exit 1
+          else
+            grep_rc=$?
+            if [[ "${grep_rc}" -ne 1 ]]; then
+              printf 'git grep hygiene check failed with status %s\n' "${grep_rc}" >&2
+              exit "${grep_rc}"
+            fi
+          fi
+
       - name: Lint workflows
         shell: bash
         run: |
@@ -106,7 +131,14 @@ jobs:
           node --test tools/ci/observability-config-deploy-workflow.test.mjs
           node --test tools/ci/origin-certificate-renew-workflow.test.mjs
           node --test tools/ci/production-deploy-actor-gates.test.mjs
+          node --test tools/ci/guard-anti-cheat.test.mjs
+          node --test tools/ops/data-source-raw-archive.test.mjs
+          node --test tools/ops/facility-report-photo-backup.test.mjs
+          node --test tools/ops/postgres-backup.test.mjs
           node --test tools/ops/postgres-restore-rehearsal.test.mjs
+          node --test tools/platform/acquire-platform-contract-bundle.test.mjs
+          node --test tools/platform/finops-quota-retention-budget.test.mjs
+          node --test tools/platform/service-slo-error-budget.test.mjs
           node --test tools/platform/verify-clean-room-host-bootstrap.test.mjs
 
       - name: Validate Compose configurations
@@ -140,10 +172,16 @@ jobs:
           bash -n tools/platform/bootstrap-single-node-k3s.sh
           bash -n tools/platform/judge-origin-certificate.sh
           bash -n tools/platform/nginx-rate-limit-smoke.sh
+          bash -n tools/ops/backup-path-guard.sh
           bash -n tools/ops/data-source-raw-archive.sh
           bash -n tools/ops/facility-report-photo-backup.sh
           bash -n tools/ops/postgres-backup.sh
           bash -n tools/ops/postgres-restore-rehearsal.sh
+          bash -n tools/repo/pre-commit-check.sh
+
+      - name: Check Python syntax
+        run: |
+          PYTHONPYCACHEPREFIX="${RUNNER_TEMP:-/tmp}/pycache" python3 -m py_compile tools/platform/read-staged-journey-release-tuple.py tools/platform/secure-publish-journey-release-tuple.py
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e

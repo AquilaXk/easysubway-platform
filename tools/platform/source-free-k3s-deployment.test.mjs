@@ -587,7 +587,7 @@ test("success linearizes traffic with Service resourceVersion CAS before Nginx a
   );
   await missing(path.join(root, "operation", "k3s-activation-failure.json"));
 });
-test("Nginx cutover routes public health probes to management port and app traffic to 32080 while preserving other routes", () => {
+test("Nginx cutover routes public health probes to resolved management target and app traffic to 32080 while failing closed on missing or invalid targets", async () => {
   const current = Buffer.from([
     "location = /api/v2/routes/search { proxy_pass http://127.0.0.1:8081; }",
     "location = /actuator/health/readiness { proxy_pass http://127.0.0.1:8080; }",
@@ -595,11 +595,15 @@ test("Nginx cutover routes public health probes to management port and app traff
     "location / { proxy_pass http://127.0.0.1:8080; }",
     "",
   ].join("\n"));
-  const k3s = renderK3sNginxConfig(current);
+  const targetA = "10.43.22.99:8081";
+  const k3s = renderK3sNginxConfig(current, { managementTarget: targetA });
   assert.equal(k3s.toString("utf8").match(/127\.0\.0\.1:32080/g)?.length, 1);
-  assert.equal(k3s.toString("utf8").match(/10\.43\.11\.187:8081/g)?.length, 2);
+  assert.equal(k3s.toString("utf8").match(/10\.43\.22\.99:8081/g)?.length, 2);
   assert.match(k3s.toString("utf8"), /127\.0\.0\.1:8081/);
-  assert.deepEqual(renderK3sNginxConfig(k3s), k3s);
+  assert.deepEqual(renderK3sNginxConfig(k3s, { managementTarget: targetA }), k3s);
+  const rotatedTarget = "10.43.88.14:8081";
+  const rotated = renderK3sNginxConfig(k3s, { env: { EASYSUBWAY_K3S_MANAGEMENT_TARGET: rotatedTarget } });
+  assert.equal(rotated.toString("utf8").match(/10\.43\.88\.14:8081/g)?.length, 2);
   const legacyK3s = Buffer.from([
     "location = /api/v2/routes/search { proxy_pass http://127.0.0.1:8081; }",
     "location = /actuator/health/readiness { proxy_pass http://127.0.0.1:32080; }",
@@ -607,10 +611,82 @@ test("Nginx cutover routes public health probes to management port and app traff
     "location / { proxy_pass http://127.0.0.1:32080; }",
     "",
   ].join("\n"));
-  assert.deepEqual(renderK3sNginxConfig(legacyK3s), k3s);
+  assert.deepEqual(renderK3sNginxConfig(legacyK3s, { managementTarget: targetA }), k3s);
+  assert.throws(() => renderK3sNginxConfig(current, { env: {} }), /management target is required/);
+  for (const invalidTarget of [
+    "",
+    "http://10.43.22.99:8081",
+    "10.43.22.99:70000",
+    "10.43.22.99:8081; return 200 ok",
+    "None:8081",
+    "999.999.999.999:8081",
+    "10.43.22.256:8081",
+    "12345:8081",
+    "0x7f.0.0.1:8081",
+  ]) {
+    assert.throws(() => renderK3sNginxConfig(current, { managementTarget: invalidTarget }), /management target/);
+  }
+  const dnsRendered = renderK3sNginxConfig(current, {
+    managementTarget: "journey-active.easysubway-journey.svc.cluster.local:8081",
+  });
+  assert.match(dnsRendered.toString("utf8"), /proxy_pass http:\/\/journey-active\.easysubway-journey\.svc\.cluster\.local:8081;/);
   assert.throws(() => renderK3sNginxConfig(Buffer.from(
     "proxy_pass http://127.0.0.1:8080;\n",
-  )));
+  ), { managementTarget: targetA }));
+
+  const root = await mkdtemp(path.join(tmpdir(), "k3s-switch-nginx-kubectl-"));
+  const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
+  await mkdir(activationRequest.operationDirectory, { recursive: true });
+  let installedConfig = "";
+  const nginxEffects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    serviceToken: "token".repeat(7),
+    env: {},
+    fetchImpl: async () => { throw new Error("not invoked"); },
+    commandRunner: async (command, args) => {
+      if (command === "sudo" && args.includes("get") && args.includes("service")) {
+        return {
+          stdout: JSON.stringify({
+            spec: {
+              clusterIP: "10.43.44.55",
+              ports: [{ name: "http", port: 8080 }, { name: "management", port: 8081 }],
+            },
+          }),
+          stderr: "",
+        };
+      }
+      if (command === "sudo" && args.includes("cat")) {
+        return { stdout: current.toString("utf8"), stderr: "" };
+      }
+      if (command === "sudo" && args.includes("install")) {
+        installedConfig = await readFile(args[args.length - 2], "utf8");
+        return { stdout: "", stderr: "" };
+      }
+      if (command === "sudo" && args.includes("nginx")) {
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    },
+  });
+  const switchResult = await nginxEffects.switchNginx();
+  assert.equal(switchResult.targetPort, 32080);
+  assert.equal(switchResult.managementTarget, "10.43.44.55:8081");
+  assert.equal(installedConfig.match(/10\.43\.44\.55:8081/g)?.length, 2);
+
+  const missingEndpointEffects = createK3sJourneyActivationEffects({
+    request: activationRequest,
+    serviceToken: "token".repeat(7),
+    env: {},
+    fetchImpl: async () => { throw new Error("not invoked"); },
+    commandRunner: async (command, args) => {
+      if (command === "sudo" && args.includes("cat")) return { stdout: current.toString("utf8"), stderr: "" };
+      if (command === "sudo" && args.includes("get") && args.includes("service")) {
+        return { stdout: JSON.stringify({ spec: { clusterIP: "None", ports: [{ name: "management", port: 8081 }] } }), stderr: "" };
+      }
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    },
+  });
+  await assert.rejects(() => missingEndpointEffects.switchNginx(), /management target/);
 });
 test("post-CAS helpers wait for reconciliation, recover ambiguous commit and count running Compose services", async () => {
   let reads = 0;

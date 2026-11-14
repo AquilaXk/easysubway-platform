@@ -2,15 +2,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_FILE="${EASYSUBWAY_ENV_FILE:-${ROOT_DIR}/.env.example}"
+source "${ROOT_DIR}/tools/ops/backup-path-guard.sh"
+
+ENV_FILE="${EASYSUBWAY_ENV_FILE:-${ROOT_DIR}/.env}"
 COMPOSE_FILE="${EASYSUBWAY_COMPOSE_FILE:-${ROOT_DIR}/infra/docker-compose.yml}"
 BACKUP_DIR="${1:-${EASYSUBWAY_DATA_SOURCE_ARCHIVE_DIR:-${ROOT_DIR}/.evidence/backups/data-sources}}"
+STORAGE_DIR="${EASYSUBWAY_DATA_SOURCE_STORAGE_DIR:-}"
+
+ENV_FILE="$(easysubway_resolve_safe_file "${ENV_FILE}" "required environment file")"
+COMPOSE_FILE="$(easysubway_resolve_safe_file "${COMPOSE_FILE}" "compose file")"
+STORAGE_DIR="$(easysubway_resolve_safe_dir "${STORAGE_DIR}" "data source storage directory")"
+export EASYSUBWAY_DATA_SOURCE_STORAGE_DIR="${STORAGE_DIR}"
 
 umask 077
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
-mkdir -p "${BACKUP_DIR}"
-chmod 700 "${BACKUP_DIR}"
+BACKUP_DIR="$(easysubway_prepare_safe_dir "${BACKUP_DIR}" "backup directory")"
 
 run_dir="$(mktemp -d "${BACKUP_DIR}/easysubway-data-sources-${timestamp}.XXXXXX")"
 collection_runs_file="${run_dir}/collection-runs.csv"

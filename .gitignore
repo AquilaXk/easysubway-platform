@@ -31,10 +31,15 @@ CLAUDE.md
 GEMINI.md
 CURSOR.md
 COPILOT.md
+TODO.md
+.coderabbit.yaml
 docs/
 .evidence/
+.agents/
 .claude/
+.codex/
 .cursor/
+.gemini/
 .aider/
 .aider*
 .windsurf/

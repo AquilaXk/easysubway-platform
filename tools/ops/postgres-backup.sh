@@ -2,19 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_FILE="${EASYSUBWAY_ENV_FILE:-${ROOT_DIR}/.env.example}"
+source "${ROOT_DIR}/tools/ops/backup-path-guard.sh"
+
+ENV_FILE="${EASYSUBWAY_ENV_FILE:-${ROOT_DIR}/.env}"
 COMPOSE_FILE="${EASYSUBWAY_COMPOSE_FILE:-${ROOT_DIR}/infra/docker-compose.yml}"
 COMPOSE_PROJECT="${EASYSUBWAY_COMPOSE_PROJECT:-}"
 BACKUP_DIR="${1:-${EASYSUBWAY_BACKUP_DIR:-${ROOT_DIR}/.evidence/backups}}"
 
+ENV_FILE="$(easysubway_resolve_safe_file "${ENV_FILE}" "required environment file")"
+COMPOSE_FILE="$(easysubway_resolve_safe_file "${COMPOSE_FILE}" "compose file")"
+
 umask 077
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
-mkdir -p "${BACKUP_DIR}"
-chmod 700 "${BACKUP_DIR}"
+BACKUP_DIR="$(easysubway_prepare_safe_dir "${BACKUP_DIR}" "backup directory")"
 
 temp_file="$(mktemp "${BACKUP_DIR}/easysubway-postgres-${timestamp}.XXXXXX")"
 backup_file="${temp_file}.dump"
+if [[ -L "${temp_file}" || -L "${backup_file}" || -e "${backup_file}" ]]; then
+	printf 'unsafe backup target path: %s\n' "${backup_file}" >&2
+	exit 1
+fi
 
 cleanup() {
 	rm -f "${temp_file}"
