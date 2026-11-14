@@ -68,5 +68,6 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
+  - install -d -m 0755 /var/cache/nginx
   - systemctl daemon-reload
   - systemctl enable --now easysubway-data-volume-setup.service

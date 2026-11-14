@@ -14,7 +14,7 @@ discovery.relabel "linux" {
 
   rule {
     target_label = "env"
-    replacement  = "local"
+    replacement  = coalesce(sys.env("EASYSUBWAY_OBSERVABILITY_ENV"), "prod")
   }
 
   // Keep only low-cardinality labels + docker discovery meta used by loki.source.docker.
@@ -34,16 +34,33 @@ local.file_match "edge_nginx" {
   path_targets = [{
     __path__ = "/var/log/nginx/easysubway-edge.log",
     job      = "edge-nginx",
+    env      = coalesce(sys.env("EASYSUBWAY_OBSERVABILITY_ENV"), "prod"),
   }]
   sync_period = "5s"
 }
 
 loki.source.file "edge_nginx" {
   targets    = local.file_match.edge_nginx.targets
+  forward_to = [loki.process.edge_nginx.receiver]
+}
+
+loki.process "edge_nginx" {
+  // 과거 엣지 로그 줄에 남은 remote_addr 값을 수집 시점에 마스킹한다.
+  stage.replace {
+    expression = "\"remote_addr\"\\s*:\\s*\"([^\"]*)\""
+    replace    = "redacted"
+  }
+
   forward_to = [loki.write.default.receiver]
 }
 
 loki.process "logs" {
+  // 수집 로그 본문에 remote_addr 값이 포함되면 저장 전 마스킹한다.
+  stage.replace {
+    expression = "\"remote_addr\"\\s*:\\s*\"([^\"]*)\""
+    replace    = "redacted"
+  }
+
   // Parse JSON fields for filtering; only `level` becomes a stream label.
   // correlationId is intentionally NOT labeled (body/structured search only).
   stage.json {

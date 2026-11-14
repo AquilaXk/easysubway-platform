@@ -36,6 +36,8 @@ server {
     listen 18080;
     location / {
         default_type application/json;
+        add_header Cache-Control "no-cache, no-store, max-age=0, must-revalidate" always;
+        add_header Expires "0" always;
         return 200 '{"status":"UP"}';
     }
 }

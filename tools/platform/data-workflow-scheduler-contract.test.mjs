@@ -253,6 +253,11 @@ test("배포 RBAC는 이 namespace의 별도 신원이고 전역 권한·와일�
   assert.deepEqual(networkPolicy, objects.networkPolicy);
   assert.equal(cronJob.metadata.name, objects.cronJob.metadata.name);
   assert.equal(cronJob.spec.suspend, true);
+  assert.equal(cronJob.spec.jobTemplate.spec.template.spec.securityContext.runAsNonRoot, true);
+  assert.equal(cronJob.spec.jobTemplate.spec.template.spec.securityContext.seccompProfile.type, "RuntimeDefault");
+  assert.equal(cronJob.spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem, true);
+  assert.equal(cronJob.spec.jobTemplate.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation, false);
+  assert.deepEqual(cronJob.spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop, ["ALL"]);
   assert.equal(cronJob.spec.jobTemplate.spec.template.spec.containers[0].image, contract.runtime.image);
   assert.deepEqual(cronJob.spec.jobTemplate.spec.template.spec.containers[0].command, ["node", "--version"]);
   // hub 번들에 핀된 journey-deployer 계약과 RBAC는 건드리지 않는다.

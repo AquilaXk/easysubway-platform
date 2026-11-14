@@ -291,7 +291,7 @@ test("(3) 로그 형식에 $args·$request_uri·$http_ 변수가 없다", () => 
   assert.doesNotMatch(formatStr, /\$request_uri\b/, "쿼리를 포함하는 $request_uri는 제외되어야 한다");
   assert.doesNotMatch(formatStr, /\$http_/, "헤더 정보를 담는 $http_*는 제외되어야 한다");
 
-  assert.match(formatStr, /\$remote_addr\b/, "$remote_addr가 포함되어야 한다");
+  assert.doesNotMatch(formatStr, /\$(?:remote_addr|binary_remote_addr|realip_remote_addr)\b/, "로그 포맷에 실제 IP 변수가 포함되면 안 된다");
   assert.match(formatStr, /\$status\b/, "$status가 포함되어야 한다");
   assert.match(formatStr, /\$request_method\b/, "$request_method가 포함되어야 한다");
   assert.match(formatStr, /\$uri\b/, "$uri(쿼리 제외 경로)가 포함되어야 한다");
@@ -375,4 +375,59 @@ test("(6) TLS 프로토콜·보안 헤더·요청 크기 제한·Fail-Closed 프
   assert.match(mainServer, /add_header\s+X-Content-Type-Options\s+"nosniff"\s+always;/);
   assert.match(mainServer, /add_header\s+X-Frame-Options\s+"DENY"\s+always;/);
   assert.match(mainServer, /add_header\s+Referrer-Policy\s+"strict-origin-when-cross-origin"\s+always;/);
+});
+
+test("(7) 업스트림 keepalive, HTTP/2 및 헬스체크 캐시 방어가 설정된다", () => {
+  const template = readFileSync(templatePath, "utf8");
+  const defaultProxy = readFileSync(defaultProxyPath, "utf8");
+  const firstServerIndex = template.indexOf("server {");
+  assert.ok(firstServerIndex !== -1, "server 블록이 있어야 한다");
+  const headerArea = template.substring(0, firstServerIndex);
+
+  assert.match(
+    headerArea,
+    /proxy_cache_path\s+\/var\/cache\/nginx\/easysubway_health\s+levels=1:2\s+keys_zone=easysubway_health_cache:1m\s+max_size=8m\s+inactive=10s\s+use_temp_path=off;/,
+    "헬스체크 전용 proxy_cache_path가 정의되어야 한다"
+  );
+  assert.match(
+    headerArea,
+    /upstream\s+easysubway_backend\s*\{[^}]*server\s+127\.0\.0\.1:__BACKEND_PORT__;[^}]*keepalive\s+32;[^}]*\}/s,
+    "easysubway_backend upstream과 keepalive 32가 정의되어야 한다"
+  );
+
+  const serverBlocks = extractServerBlocks(template);
+  assert.equal(serverBlocks.length, 3);
+  for (const tlsBlock of serverBlocks.slice(1)) {
+    assert.match(tlsBlock, /http2\s+on;/, "443 TLS 서버 블록에 http2 on;이 설정되어야 한다");
+  }
+
+  const locations = extractLocations(serverBlocks[2]);
+  for (const probePath of ["= /actuator/health/readiness", "= /actuator/health/liveness"]) {
+    const loc = locations.get(probePath);
+    assert.ok(loc, `${probePath} location이 있어야 한다`);
+    assert.match(loc, /proxy_pass\s+http:\/\/127\.0\.0\.1:__BACKEND_PORT__;/);
+    assert.match(loc, /proxy_cache\s+easysubway_health_cache;/);
+    assert.match(loc, /proxy_cache_key\s+"\$scheme\$proxy_host\$uri";/);
+    assert.match(loc, /proxy_cache_valid\s+200\s+503\s+1s;/);
+    assert.match(loc, /proxy_cache_lock\s+on;/);
+    assert.match(loc, /proxy_cache_use_stale\s+off;/);
+    assert.match(loc, /proxy_ignore_headers\s+Cache-Control\s+Expires\s+Set-Cookie;/);
+    assert.match(loc, /proxy_hide_header\s+Set-Cookie;/);
+  }
+
+  for (const apiPath of ["^~ /api/v3/journeys/", "^~ /api/v1/report-uploads", "^~ /api/v1/reports", "/"]) {
+    const loc = locations.get(apiPath);
+    assert.ok(loc, `${apiPath} location이 있어야 한다`);
+    assert.match(
+      loc,
+      /proxy_pass\s+http:\/\/easysubway_backend;/,
+      `${apiPath}는 keepalive upstream(easysubway_backend)을 사용해야 한다`
+    );
+  }
+
+  assert.match(
+    defaultProxy,
+    /proxy_http_version\s+1\.1;\s*proxy_set_header\s+Connection\s+"";/s,
+    "host-default-proxy.conf에 keepalive용 Connection 헤더 초기화가 있어야 한다"
+  );
 });

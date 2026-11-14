@@ -157,3 +157,34 @@ test("compose-server-env.allowlist and .env.example track postgres and object-st
   assert.match(env, /^EASYSUBWAY_POSTGRES_BIND=127\.0\.0\.1$/m);
   assert.match(env, /^EASYSUBWAY_OBJECT_STORAGE_BIND=127\.0\.0\.1$/m);
 });
+
+test("docker-runtime-probe 최소 권한 및 Alloy 개인정보 마스킹이 적용된다", () => {
+  const compose = readFileSync(composeYml, "utf8");
+  const probeMatch = compose.match(/^ {2}docker-runtime-probe:\n([\s\S]*?)(?=^ {2}[a-zA-Z0-9_-]+:|\nvolumes:)/m);
+  assert.ok(probeMatch, "docker-runtime-probe 서비스가 있어야 한다");
+  const probeBlock = probeMatch[1];
+
+  assert.doesNotMatch(probeBlock, /\bprivileged:\s*true\b/, "docker-runtime-probe는 privileged 모드를 쓰면 안 된다");
+  assert.doesNotMatch(probeBlock, /\/dev\/kmsg\b/, "docker-runtime-probe는 /dev/kmsg 디바이스를 마운트하면 안 된다");
+  assert.match(probeBlock, /no-new-privileges:true/, "no-new-privileges:true가 설정되어야 한다");
+  assert.match(probeBlock, /cap_drop:\s*\n\s*-\s*ALL/, "모든 capability가 드롭되어야 한다");
+  assert.match(probeBlock, /\bread_only:\s*true\b/, "read_only: true가 설정되어야 한다");
+
+  const alloyConfig = readFileSync(new URL("infra/alloy/config.alloy", root), "utf8");
+  assert.doesNotMatch(alloyConfig, /replacement\s*=\s*"local"/, "Alloy env 레이블은 local로 하드코딩되면 안 된다");
+  assert.match(
+    alloyConfig,
+    /coalesce\(sys\.env\("EASYSUBWAY_OBSERVABILITY_ENV"\),\s*"prod"\)/,
+    "Alloy env 레이블은 환경 변수 기반이어야 한다",
+  );
+  assert.match(
+    alloyConfig,
+    /loki\.source\.file\s+"edge_nginx"[^}]*forward_to\s*=\s*\[loki\.process\.edge_nginx\.receiver\]/s,
+    "edge_nginx 로그는 마스킹 파이프라인을 거쳐야 한다",
+  );
+  assert.match(
+    alloyConfig,
+    /stage\.replace\s*\{[^}]*remote_addr[^}]*replace\s*=\s*"redacted"/s,
+    "Alloy 파이프라인은 과거 remote_addr 필드를 마스킹해야 한다",
+  );
+});

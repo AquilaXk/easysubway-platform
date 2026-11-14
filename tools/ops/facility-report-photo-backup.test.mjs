@@ -240,3 +240,153 @@ test("facility-report-photo-backup.sh copies valid regular photos and passes fac
   const check = spawnSync(process.execPath, [RESTORE_CHECK_SCRIPT, runDir], { encoding: "utf8" });
   assert.equal(check.status, 0, check.stderr);
 });
+
+test("facility-report-photo-backup.sh supports EASYSUBWAY_REPORTS_PHOTOS_BUCKET via object-storage and fails closed on invalid bucket or missing object", () => {
+  const sandbox = createSandbox();
+  const photoBytes = Buffer.from("minio-jpeg-bytes-300");
+  const thumbBytes = Buffer.from("minio-thumb-bytes-300");
+  const photoKey = "reports/300/photo.jpg";
+  const thumbKey = "reports/300/thumb.jpg";
+  const secondPhotoBytes = Buffer.from("minio-jpeg-bytes-301");
+  const secondThumbBytes = Buffer.from("minio-thumb-bytes-301");
+  const secondPhotoKey = "reports/301/photo.jpg";
+  const secondThumbKey = "reports/301/thumb.jpg";
+
+  writeFileSync(
+    sandbox.rowsFixture,
+    [
+      tsvRow({
+        reportId: "300",
+        fileName: "lift-minio.jpg",
+        contentType: "image/jpeg",
+        objectKey: photoKey,
+        thumbnailKey: thumbKey,
+        payload: photoBytes,
+      }),
+      tsvRow({
+        reportId: "301",
+        fileName: "lift-minio-2.jpg",
+        contentType: "image/jpeg",
+        objectKey: secondPhotoKey,
+        thumbnailKey: secondThumbKey,
+        payload: secondPhotoBytes,
+      }),
+    ].join("\n") + "\n",
+  );
+
+  // object-storage(mc)와 postgres(psql) 호출을 모두 모사하는 docker 스텁
+  const bucketObjectsDir = path.join(sandbox.root, "minio-bucket-objects");
+  mkdirSync(path.join(bucketObjectsDir, "easysubway-report-uploads/reports/300"), { recursive: true });
+  mkdirSync(path.join(bucketObjectsDir, "easysubway-report-uploads/reports/301"), { recursive: true });
+  writeFileSync(path.join(bucketObjectsDir, "easysubway-report-uploads", photoKey), photoBytes);
+  writeFileSync(path.join(bucketObjectsDir, "easysubway-report-uploads", thumbKey), thumbBytes);
+  writeFileSync(path.join(bucketObjectsDir, "easysubway-report-uploads", secondPhotoKey), secondPhotoBytes);
+  writeFileSync(path.join(bucketObjectsDir, "easysubway-report-uploads", secondThumbKey), secondThumbBytes);
+
+  writeFileSync(
+    path.join(sandbox.binDir, "docker"),
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'printf "%s\\n" "$*" >> "${DOCKER_LOG_FILE}"',
+      'case " $* " in',
+      '  *" postgres "*)',
+      "    cat >/dev/null",
+      '    cat "${ROWS_FIXTURE}"',
+      "    ;;",
+      '  *" object-storage "*)',
+      // docker exec -T가 stdin을 소비하는 상황에서도 루프 FD가 소진되지 않음을 검증한다.
+      "    cat >/dev/null",
+      '    bucket="${@: -2:1}"',
+      '    object_key="${@: -1:1}"',
+      '    obj_path="${BUCKET_OBJECTS_DIR}/${bucket}/${object_key}"',
+      '    if [[ ! -f "${obj_path}" ]]; then',
+      '      echo "object missing in mock MinIO: ${obj_path}" >&2',
+      "      exit 1",
+      "    fi",
+      '    cat "${obj_path}"',
+      "    ;;",
+      "  *)",
+      '    echo "unexpected docker invocation: $*" >&2',
+      "    exit 1",
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(path.join(sandbox.binDir, "docker"), 0o755);
+
+  for (const badBucket of ["../escape", "UPPERCASE", "bad..bucket", "a"]) {
+    const badRes = runPhotoBackup(sandbox, {
+      EASYSUBWAY_REPORTS_PHOTOS_STORAGE_DIR: undefined,
+      EASYSUBWAY_REPORTS_PHOTOS_BUCKET: badBucket,
+      BUCKET_OBJECTS_DIR: bucketObjectsDir,
+    });
+    assert.notEqual(badRes.status, 0, `잘못된 버킷 이름은 거부되어야 한다: ${badBucket}`);
+  }
+  assert.equal(existsSync(sandbox.dockerLog), false);
+
+  const result = runPhotoBackup(sandbox, {
+    EASYSUBWAY_REPORTS_PHOTOS_STORAGE_DIR: undefined,
+    EASYSUBWAY_REPORTS_PHOTOS_BUCKET: "easysubway-report-uploads",
+    BUCKET_OBJECTS_DIR: bucketObjectsDir,
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const match = result.stdout.match(/facility report photo backup written:\s*(.+)/);
+  assert.ok(match, `unexpected stdout: ${result.stdout}`);
+  const runDir = match[1].trim();
+  assert.equal(statSync(runDir).mode & 0o777, 0o700);
+  assert.deepEqual(readFileSync(path.join(runDir, "objects", photoKey)), photoBytes);
+  assert.deepEqual(readFileSync(path.join(runDir, "objects", thumbKey)), thumbBytes);
+  assert.deepEqual(readFileSync(path.join(runDir, "objects", secondPhotoKey)), secondPhotoBytes);
+  assert.deepEqual(readFileSync(path.join(runDir, "objects", secondThumbKey)), secondThumbBytes);
+  const manifestLines = readFileSync(path.join(runDir, "manifest.tsv"), "utf8").trim().split("\n");
+  assert.equal(manifestLines.length, 3);
+
+  const check = spawnSync(process.execPath, [RESTORE_CHECK_SCRIPT, runDir], { encoding: "utf8" });
+  assert.equal(check.status, 0, check.stderr);
+
+  // MinIO 버킷에 객체가 누락되면 실패해야 한다
+  rmSync(path.join(bucketObjectsDir, "easysubway-report-uploads", secondThumbKey));
+  const missingObjRes = runPhotoBackup(sandbox, {
+    EASYSUBWAY_REPORTS_PHOTOS_STORAGE_DIR: undefined,
+    EASYSUBWAY_REPORTS_PHOTOS_BUCKET: "easysubway-report-uploads",
+    BUCKET_OBJECTS_DIR: bucketObjectsDir,
+  });
+  assert.notEqual(missingObjRes.status, 0);
+});
+
+test("facility-report-photo-backup.sh prunes expired backups via prune-sensitive-backups.mjs on completion", () => {
+  const sandbox = createSandbox();
+  const photoBytes = Buffer.from("prune-check-bytes");
+  const photoKey = "reports/400/photo.jpg";
+
+  mkdirSync(path.join(sandbox.storageDir, "reports/400"), { recursive: true });
+  writeFileSync(path.join(sandbox.storageDir, photoKey), photoBytes);
+  writeFileSync(
+    sandbox.rowsFixture,
+    `${tsvRow({
+      reportId: "400",
+      fileName: "prune.jpg",
+      contentType: "image/jpeg",
+      objectKey: photoKey,
+      thumbnailKey: "",
+      payload: photoBytes,
+    })}\n`,
+  );
+
+  const expiredDir = path.join(sandbox.backupDir, "easysubway-report-photos-20200101T000000Z.old001");
+  mkdirSync(path.join(expiredDir, "objects"), { recursive: true });
+  writeFileSync(path.join(expiredDir, "manifest.tsv"), "old\n");
+  const expiredArchive = path.join(sandbox.backupDir, "easysubway-report-photos-20200101T000000Z.tar.gz");
+  writeFileSync(expiredArchive, "old-tar");
+  const futureDir = path.join(sandbox.backupDir, "easysubway-report-photos-20990101T000000Z.new001");
+  mkdirSync(path.join(futureDir, "objects"), { recursive: true });
+
+  const result = runPhotoBackup(sandbox);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(expiredDir), false, "만료된 사진 백업 디렉터리는 삭제되어야 한다");
+  assert.equal(existsSync(expiredArchive), false, "만료된 사진 백업 아카이브는 삭제되어야 한다");
+  assert.equal(existsSync(futureDir), true, "유효 기간 내 백업 디렉터리는 유지되어야 한다");
+});

@@ -20,12 +20,18 @@ map $uri $easysubway_edge_location {
 
 log_format easysubway_edge_json escape=json
     '{"time":"$time_iso8601",'
-    '"remote_addr":"$remote_addr",'
     '"status":"$status",'
     '"method":"$request_method",'
     '"path":"$uri",'
     '"location":"$easysubway_edge_location",'
     '"request_time":"$request_time"}';
+
+proxy_cache_path /var/cache/nginx/easysubway_health levels=1:2 keys_zone=easysubway_health_cache:1m max_size=8m inactive=10s use_temp_path=off;
+
+upstream easysubway_backend {
+    server 127.0.0.1:__BACKEND_PORT__;
+    keepalive 32;
+}
 
 server {
     listen 80 default_server;
@@ -47,6 +53,7 @@ server {
 server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
+    http2 on;
     server_name _;
     server_tokens off;
     access_log /var/log/nginx/easysubway-edge.log easysubway_edge_json if=$easysubway_edge_loggable;
@@ -64,6 +71,7 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
+    http2 on;
     server_name easysubway-api.aquilaxk.site;
     server_tokens off;
     access_log /var/log/nginx/easysubway-edge.log easysubway_edge_json if=$easysubway_edge_loggable;
@@ -110,11 +118,25 @@ server {
     # Prometheus는 compose 네트워크에서 활성 K3s journey-active Service ClusterIP로 /actuator/prometheus 를 직접 scrape한다.
     location = /actuator/health/readiness {
         proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_cache easysubway_health_cache;
+        proxy_cache_key "$scheme$proxy_host$uri";
+        proxy_cache_valid 200 503 1s;
+        proxy_cache_lock on;
+        proxy_cache_use_stale off;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_hide_header Set-Cookie;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
 
     location = /actuator/health/liveness {
         proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_cache easysubway_health_cache;
+        proxy_cache_key "$scheme$proxy_host$uri";
+        proxy_cache_valid 200 503 1s;
+        proxy_cache_lock on;
+        proxy_cache_use_stale off;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_hide_header Set-Cookie;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
 
@@ -129,7 +151,7 @@ server {
     location ^~ /api/v3/journeys/ {
         limit_req zone=easysubway_journey burst=10 nodelay;
         limit_conn easysubway_conn 25;
-        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_pass http://easysubway_backend;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
 
@@ -137,7 +159,7 @@ server {
         client_max_body_size 10m;
         limit_req zone=easysubway_upload burst=5 nodelay;
         limit_conn easysubway_conn 10;
-        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_pass http://easysubway_backend;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
 
@@ -145,14 +167,14 @@ server {
         client_max_body_size 10m;
         limit_req zone=easysubway_upload burst=5 nodelay;
         limit_conn easysubway_conn 10;
-        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_pass http://easysubway_backend;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
 
     location / {
         limit_req zone=easysubway_api burst=30 nodelay;
         limit_conn easysubway_conn 25;
-        proxy_pass http://127.0.0.1:__BACKEND_PORT__;
+        proxy_pass http://easysubway_backend;
         include /etc/nginx/snippets/easysubway-default-proxy.conf;
     }
 }

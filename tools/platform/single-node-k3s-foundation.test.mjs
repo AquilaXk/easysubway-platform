@@ -208,6 +208,11 @@ test("renderer produces deterministic source-free candidate objects and an inact
     "NetworkPolicy/journey-backend-boundary",
   ]);
 
+  const renderedNamespace = objects.find(({ kind }) => kind === "Namespace");
+  assert.equal(renderedNamespace.metadata.labels["pod-security.kubernetes.io/enforce"], "restricted");
+  assert.equal(renderedNamespace.metadata.labels["pod-security.kubernetes.io/warn"], "restricted");
+  assert.equal(renderedNamespace.metadata.labels["pod-security.kubernetes.io/audit"], "restricted");
+
   const deployment = objects.find(({ kind }) => kind === "Deployment");
   const pod = deployment.spec.template.spec;
   const container = pod.containers[0];

@@ -136,6 +136,7 @@ jobs:
           node --test tools/ops/facility-report-photo-backup.test.mjs
           node --test tools/ops/postgres-backup.test.mjs
           node --test tools/ops/postgres-restore-rehearsal.test.mjs
+          node --test tools/ops/prune-sensitive-backups.test.mjs
           node --test tools/platform/acquire-platform-contract-bundle.test.mjs
           node --test tools/platform/finops-quota-retention-budget.test.mjs
           node --test tools/platform/service-slo-error-budget.test.mjs

@@ -917,6 +917,9 @@ install_route_v2_host_ingress() {
 	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -m 0644 "${candidate}" "${site_target}"; then
 		install_failed=1
 	fi
+	if [[ "${install_failed}" -eq 0 ]] && ! sudo install -d -m 0755 /var/cache/nginx; then
+		install_failed=1
+	fi
 	if [[ "${install_failed}" -eq 0 ]] && ! sudo nginx -t >/dev/null 2>&1; then
 		install_failed=1
 	fi

@@ -634,6 +634,16 @@ test("Nginx cutover routes public health probes to resolved management target an
     "proxy_pass http://127.0.0.1:8080;\n",
   ), { managementTarget: targetA }));
 
+  const hostTemplate = readFileSync(new URL(
+    "../../infra/nginx/host-easysubway.conf.template", import.meta.url,
+  ), "utf8").replaceAll("__BACKEND_PORT__", "8080");
+  const renderedHostK3s = renderK3sNginxConfig(Buffer.from(hostTemplate, "utf8"), { managementTarget: targetA });
+  const renderedHostK3sText = renderedHostK3s.toString("utf8");
+  assert.match(renderedHostK3sText, /upstream\s+easysubway_backend\s*\{[^}]*server\s+127\.0\.0\.1:32080;[^}]*keepalive\s+32;/s);
+  assert.equal(renderedHostK3sText.match(/proxy_pass http:\/\/easysubway_backend;/g)?.length, 4);
+  assert.equal(renderedHostK3sText.match(/proxy_pass http:\/\/10\.43\.22\.99:8081;/g)?.length, 2);
+  assert.deepEqual(renderK3sNginxConfig(renderedHostK3s, { managementTarget: targetA }), renderedHostK3s);
+
   const root = await mkdtemp(path.join(tmpdir(), "k3s-switch-nginx-kubectl-"));
   const activationRequest = await prepareStagedCandidateEnvironment({ root, backendEnvironment: "SAFE_FLAG=true\n" });
   await mkdir(activationRequest.operationDirectory, { recursive: true });
@@ -659,6 +669,10 @@ test("Nginx cutover routes public health probes to resolved management target an
         return { stdout: current.toString("utf8"), stderr: "" };
       }
       if (command === "sudo" && args.includes("install")) {
+        if (args.includes("--directory")) {
+          assert.equal(args[args.length - 1], "/var/cache/nginx");
+          return { stdout: "", stderr: "" };
+        }
         installedConfig = await readFile(args[args.length - 2], "utf8");
         return { stdout: "", stderr: "" };
       }

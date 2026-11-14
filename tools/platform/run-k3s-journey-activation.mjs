@@ -759,6 +759,10 @@ export function createK3sJourneyActivationEffects({
       const stagedPath = path.join(request.operationDirectory, "nginx-k3s-candidate.conf");
       await writeBytesCreateOnly(stagedPath, bytes, 0o600);
       await commandRunner("sudo", [
+        "--non-interactive", "install", "--directory", "--mode=0755",
+        "/var/cache/nginx",
+      ]);
+      await commandRunner("sudo", [
         "--non-interactive", "install", "--mode=0644", stagedPath,
         request.nginxConfigPath,
       ]);
@@ -1607,15 +1611,27 @@ export function renderK3sNginxConfig(current, options = {}) {
   }
   const composeTargetCount = withManagementProbes.split(composeTarget).length - 1;
   const k3sTargetCount = withManagementProbes.split(k3sTarget).length - 1;
-  if (!((composeTargetCount === 1 && k3sTargetCount === 0) ||
+  const upstreamBackendProxyCount = withManagementProbes.split("proxy_pass http://easysubway_backend;").length - 1;
+  const upstreamPattern = /(upstream\s+easysubway_backend\s*\{[^}]*\bserver\s+127\.0\.0\.1:)(8080|32080)(;[^}]*\})/g;
+  const upstreamMatches = [...withManagementProbes.matchAll(upstreamPattern)];
+  let rendered = withManagementProbes;
+  if (upstreamMatches.length === 1 && upstreamBackendProxyCount === 4 &&
+    composeTargetCount === 0 && k3sTargetCount === 0) {
+    rendered = upstreamMatches[0][2] === "8080"
+      ? withManagementProbes.replace(upstreamPattern, (_match, prefix, _port, suffix) => `${prefix}32080${suffix}`)
+      : withManagementProbes;
+  } else if (upstreamMatches.length === 0 && upstreamBackendProxyCount === 0 && (
+    (composeTargetCount === 1 && k3sTargetCount === 0) ||
     (composeTargetCount === 0 && k3sTargetCount === 1) ||
     (composeTargetCount === 4 && k3sTargetCount === 0) ||
-    (composeTargetCount === 0 && k3sTargetCount === 4))) {
+    (composeTargetCount === 0 && k3sTargetCount === 4)
+  )) {
+    rendered = composeTargetCount > 0
+      ? withManagementProbes.replaceAll(composeTarget, k3sTarget)
+      : withManagementProbes;
+  } else {
     throw new Error("installed Nginx backend target does not match the cutover contract");
   }
-  const rendered = composeTargetCount > 0
-    ? withManagementProbes.replaceAll(composeTarget, k3sTarget)
-    : withManagementProbes;
   return rendered === source ? Buffer.from(current) : Buffer.from(rendered, "utf8");
 }
 

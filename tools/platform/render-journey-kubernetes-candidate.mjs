@@ -512,7 +512,16 @@ function renderWithToken(input, observability, token) {
       {
         apiVersion: "v1",
         kind: "Namespace",
-        metadata: { name: NAMESPACE, labels: { "kubernetes.io/metadata.name": NAMESPACE, "app.kubernetes.io/part-of": "easysubway" } },
+        metadata: {
+          name: NAMESPACE,
+          labels: {
+            "kubernetes.io/metadata.name": NAMESPACE,
+            "app.kubernetes.io/part-of": "easysubway",
+            "pod-security.kubernetes.io/enforce": "restricted",
+            "pod-security.kubernetes.io/warn": "restricted",
+            "pod-security.kubernetes.io/audit": "restricted",
+          },
+        },
       },
       {
         apiVersion: "v1",
