@@ -1,0 +1,6 @@
+# actionlint는 self-hosted runner label을 알 수 없어 미지 label로 판정한다. 이 저장소는
+# production 배포·백업 작업을 자체 runner에서 돌리므로 그 label을 여기에 선언한다.
+# 선언하지 않으면 CI에 배선한 actionlint가 기존 워크플로에서 곧바로 red가 된다.
+self-hosted-runner:
+  labels:
+    - easysubway-production

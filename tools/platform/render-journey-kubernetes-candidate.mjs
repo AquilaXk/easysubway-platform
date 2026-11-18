@@ -1,0 +1,567 @@
+import { createHash } from "node:crypto";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { isIPv4 } from "node:net";
+
+const INPUT_FIELDS = Object.freeze([
+  "schemaVersion",
+  "artifactKind",
+  "releaseTuple",
+  "tupleSha256",
+  "candidateGeneration",
+  "trafficGeneration",
+  "nodeInternalIp",
+  "postgresPort",
+  "objectStoragePort",
+  "secretIdentity",
+]);
+const TUPLE_FIELDS = Object.freeze([
+  "schemaVersion",
+  "artifactKind",
+  "backendImageDigest",
+  "backendConfigDigest",
+  "journeyContractDigest",
+  "serverRouteBundleDigest",
+  "deploymentRevision",
+  "environmentIdentity",
+]);
+const TUPLE_IDENTITY_FIELDS = Object.freeze(TUPLE_FIELDS.slice(2));
+const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const REVISION = /^[a-f0-9]{40}$/;
+const ENVIRONMENT = /^[A-Za-z0-9._-]{1,255}$/;
+const NAMESPACE = "easysubway-journey";
+const PUBLIC_EGRESS_EXCEPT_CIDRS = Object.freeze([
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+]);
+const JOURNEY_PROFILE_RESOURCE_POLICY = Object.freeze({
+  schemaVersion: 1,
+  artifactKind: "journey-profile-resource-policy",
+  resourcePolicyId: "RAPTOR_RESOURCE_POLICY_V1",
+  semanticVersion: "1.1.0",
+  maxTemporalWindowSeconds: 3600,
+  maxServiceDayCount: 2,
+  maxEstimatedWork: 10000000,
+  maxLabelsPerState: 2048,
+  maxDestinationProfileLabels: 128,
+  maxProfileBreakpoints: 128,
+  realtimeApplicableFutureHorizonSeconds: 3600,
+  pointSearchDeadlineSeconds: 2,
+  profileSearchDeadlineSeconds: 5,
+  lastConnectionDeadlineSeconds: 8,
+  pointSearchCostUnits: 1,
+  shortDepartureProfileCostUnits: 2,
+  arriveByProfileCostUnits: 3,
+  lastConnectionCostUnits: 4,
+  maxCostUnitsPerSession: 10,
+});
+// 정책 1.1.0의 한도(작업량 1,000만 등)는 backend 프로필 알고리즘 식별자 EASYSUBWAY_RAPTOR_SUITE_V2 2.0.0
+// (AquilaXk/easysubway-backend#464)을 전제로 실측에서 역산했다. 이전 엔진(1.0.0)과 짝지으면 질의는 여전히 거절되면서
+// 거절 전까지 최대 1,000만 작업 단위를 쓴다. 이 렌더러는 release tuple의 불투명한 이미지 digest만 받고 외부 조회 없이
+// 결정적으로 렌더해야 하므로(레지스트리·Kubernetes API 호출 없음) 이미지 안의 알고리즘 식별자를 읽어 검사할 수 없다.
+// 그래서 짝 맞춤은 배포 순서(backend#464 이미지 먼저, 이 정책 다음)로 지키며, 배포 담당 세션이 수동으로 확인한다.
+const JOURNEY_PROFILE_RESOURCE_POLICY_JSON = JSON.stringify(JOURNEY_PROFILE_RESOURCE_POLICY);
+const JOURNEY_PROFILE_RESOURCE_POLICY_SHA256 = createHash("sha256")
+  .update(JOURNEY_PROFILE_RESOURCE_POLICY_JSON, "utf8")
+  .digest("hex");
+
+// Issue #221: compose Prometheus가 활성 backend를 수집하는 경로의 기대값은 관측 계약 한 곳에만 둔다.
+// 렌더러는 이 저장소 안의 고정 파일만 읽고 외부 조회는 하지 않는다.
+const OBSERVABILITY_CONTRACT_URL = new URL("../../contracts/release/platform-k3s-observability-contract.json", import.meta.url);
+
+class K3sRenderError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function fail(code, message) {
+  throw new K3sRenderError(code, message);
+}
+
+function exactKeys(value, fields) {
+  return value !== null
+    && !Array.isArray(value)
+    && typeof value === "object"
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+}
+
+function parseArguments(args) {
+  if (args.length !== 2 || args[0] !== "--input" || !args[1] || args[1].startsWith("--")) {
+    fail("E_K3S_RENDER_INPUT", "expected exactly --input <regular-file>");
+  }
+  return args[1];
+}
+
+function readInput(path) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    fail("E_K3S_RENDER_INPUT", "input must be a regular file");
+  }
+  try {
+    if (!fstatSync(descriptor).isFile()) fail("E_K3S_RENDER_INPUT", "input must be a regular file");
+    return JSON.parse(readFileSync(descriptor, "utf8"));
+  } catch (error) {
+    if (error instanceof K3sRenderError) throw error;
+    fail("E_K3S_RENDER_INPUT", "input must contain valid JSON");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function tupleSha256(tuple) {
+  const bytes = `${TUPLE_IDENTITY_FIELDS.map((field) => tuple[field]).join("\n")}\n`;
+  return `sha256:${createHash("sha256").update(bytes, "utf8").digest("hex")}`;
+}
+
+function validateTuple(tuple) {
+  if (!exactKeys(tuple, TUPLE_FIELDS)) fail("E_K3S_RENDER_INPUT", "releaseTuple must be closed");
+  if (tuple.schemaVersion !== "JOURNEY_RELEASE_TUPLE_V1" || tuple.artifactKind !== "journey-release-tuple") {
+    fail("E_K3S_RENDER_IDENTITY", "releaseTuple constants are invalid");
+  }
+  for (const field of TUPLE_IDENTITY_FIELDS.slice(0, 4)) {
+    if (typeof tuple[field] !== "string" || !DIGEST.test(tuple[field])) {
+      fail("E_K3S_RENDER_IDENTITY", `${field} must be an immutable digest`);
+    }
+  }
+  if (typeof tuple.deploymentRevision !== "string" || !REVISION.test(tuple.deploymentRevision)) {
+    fail("E_K3S_RENDER_IDENTITY", "deploymentRevision must be a Git SHA");
+  }
+  if (typeof tuple.environmentIdentity !== "string" || !ENVIRONMENT.test(tuple.environmentIdentity)) {
+    fail("E_K3S_RENDER_IDENTITY", "environmentIdentity is invalid");
+  }
+}
+
+function privateIpv4(value) {
+  if (typeof value !== "string" || !isIPv4(value)) return false;
+  const octets = value.split(".").map(Number);
+  return octets[0] === 10
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+    || (octets[0] === 192 && octets[1] === 168);
+}
+
+function ipv4Cidr(value) {
+  if (typeof value !== "string") return false;
+  const [address, bits, ...rest] = value.split("/");
+  return rest.length === 0 && isIPv4(address) && /^(?:[1-9]|[12]\d|3[0-2])$/.test(bits ?? "");
+}
+
+function readObservabilityContract() {
+  let contract;
+  try {
+    contract = JSON.parse(readFileSync(OBSERVABILITY_CONTRACT_URL, "utf8"));
+  } catch {
+    fail("E_K3S_RENDER_CONTRACT", "observability contract must contain valid JSON");
+  }
+  if (contract?.schemaVersion !== "PLATFORM_K3S_OBSERVABILITY_CONTRACT_V1" ||
+    contract?.artifactKind !== "platform-k3s-observability-contract" ||
+    !ipv4Cidr(contract?.composeNetwork?.subnet) ||
+    contract?.activeService?.name !== "journey-active" ||
+    contract?.activeService?.namespace !== NAMESPACE ||
+    !isIPv4(contract?.activeService?.clusterIP ?? "") ||
+    contract?.activeService?.port !== 8080 ||
+    contract?.activeService?.managementPort !== 8081) {
+    fail("E_K3S_RENDER_CONTRACT", "observability contract is invalid");
+  }
+  return contract;
+}
+
+function validateInput(input) {
+  if (!exactKeys(input, INPUT_FIELDS)) fail("E_K3S_RENDER_INPUT", "input must contain the exact candidate fields");
+  if (input.schemaVersion !== "PLATFORM_K3S_CANDIDATE_INPUT_V1" || input.artifactKind !== "platform-k3s-candidate-input") {
+    fail("E_K3S_RENDER_INPUT", "input constants are invalid");
+  }
+  validateTuple(input.releaseTuple);
+  if (typeof input.tupleSha256 !== "string" || input.tupleSha256 !== tupleSha256(input.releaseTuple)) {
+    fail("E_K3S_RENDER_IDENTITY", "tupleSha256 does not bind releaseTuple");
+  }
+  if (!Number.isSafeInteger(input.candidateGeneration) || input.candidateGeneration < 1) {
+    fail("E_K3S_RENDER_IDENTITY", "candidateGeneration must be positive");
+  }
+  if (!Number.isSafeInteger(input.trafficGeneration) || input.trafficGeneration < 1) {
+    fail("E_K3S_RENDER_IDENTITY", "trafficGeneration must be positive");
+  }
+  if (!privateIpv4(input.nodeInternalIp)) fail("E_K3S_RENDER_NETWORK", "nodeInternalIp must be a private IPv4 address");
+  if (input.postgresPort !== 15432 || input.objectStoragePort !== 9000) {
+    fail("E_K3S_RENDER_NETWORK", "external service ports must match the fixed-host contract");
+  }
+  if (typeof input.secretIdentity !== "string" || !DIGEST.test(input.secretIdentity)) {
+    fail("E_K3S_RENDER_IDENTITY", "secretIdentity must be an immutable digest");
+  }
+}
+
+function digestHex(value) {
+  return value.slice("sha256:".length);
+}
+
+// Issue #228: candidate가 소유하는 객체(ConfigMap·Secret·Deployment·candidate Service) 이름은 이 token에서
+// 나온다. token은 tuple·candidateGeneration과 함께 렌더된 candidate 내용의 digest를 묶어, 내용이 달라지면
+// (trafficGeneration, secretIdentity, 렌더러 변경 등) 반드시 새 이름이 되도록 한다. 같은 이름에 다른 내용을
+// apply하면 immutable ConfigMap이 거부되거나 기존 Deployment가 바뀌기 때문이다.
+const CONTENT_DIGEST_PLACEHOLDER_TOKEN = "0".repeat(20);
+
+function candidateContentDigest(rendered) {
+  const owned = rendered.candidateObjects.filter(({ kind, metadata }) =>
+    kind === "Deployment" || (kind === "Service" && metadata.name.startsWith("journey-candidate-")));
+  return createHash("sha256")
+    .update(JSON.stringify({ configPlan: rendered.configPlan, secretPlan: rendered.secretPlan, owned }), "utf8")
+    .digest("hex");
+}
+
+function candidateToken(input, contentDigest) {
+  return createHash("sha256")
+    .update(`${input.tupleSha256}\n${input.candidateGeneration}\n${contentDigest}\n`, "utf8")
+    .digest("hex")
+    .slice(0, 20);
+}
+
+function labels(token) {
+  return {
+    "app.kubernetes.io/name": "easysubway-journey",
+    "app.kubernetes.io/component": "backend",
+    "app.kubernetes.io/part-of": "easysubway",
+    "easysubway.io/role": "candidate",
+    "easysubway.io/candidate-token": token,
+  };
+}
+
+function annotations(input) {
+  return {
+    "easysubway.io/tuple-sha256": input.tupleSha256,
+    "easysubway.io/backend-image-digest": input.releaseTuple.backendImageDigest,
+    "easysubway.io/backend-config-digest": input.releaseTuple.backendConfigDigest,
+    "easysubway.io/journey-contract-digest": input.releaseTuple.journeyContractDigest,
+    "easysubway.io/server-route-bundle-digest": input.releaseTuple.serverRouteBundleDigest,
+    "easysubway.io/deployment-revision": input.releaseTuple.deploymentRevision,
+    "easysubway.io/environment-identity": input.releaseTuple.environmentIdentity,
+    "easysubway.io/candidate-generation": String(input.candidateGeneration),
+    "easysubway.io/traffic-generation": String(input.trafficGeneration),
+  };
+}
+
+function externalService(name, servicePort, targetPort) {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: { name, namespace: NAMESPACE, labels: { "app.kubernetes.io/part-of": "easysubway" } },
+    spec: { ports: [{ name, port: servicePort, protocol: "TCP", targetPort }] },
+  };
+}
+
+function externalEndpointSlice(name, address, port) {
+  return {
+    apiVersion: "discovery.k8s.io/v1",
+    kind: "EndpointSlice",
+    metadata: {
+      name: `${name}-v1`,
+      namespace: NAMESPACE,
+      labels: { "kubernetes.io/service-name": name, "app.kubernetes.io/part-of": "easysubway" },
+    },
+    addressType: "IPv4",
+    endpoints: [{ addresses: [address] }],
+    ports: [{ name, protocol: "TCP", port }],
+  };
+}
+
+function probe(path, initialDelaySeconds, failureThreshold) {
+  return {
+    httpGet: { path, port: 8081, scheme: "HTTP" },
+    initialDelaySeconds,
+    periodSeconds: 5,
+    timeoutSeconds: 2,
+    failureThreshold,
+    successThreshold: 1,
+  };
+}
+
+function deployment(input, token, deploymentName, configName, secretName) {
+  const objectLabels = labels(token);
+  return {
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: { name: deploymentName, namespace: NAMESPACE, labels: objectLabels, annotations: annotations(input) },
+    spec: {
+      replicas: 1,
+      revisionHistoryLimit: 1,
+      progressDeadlineSeconds: 360,
+      strategy: { type: "Recreate" },
+      selector: { matchLabels: objectLabels },
+      template: {
+        metadata: { labels: objectLabels, annotations: annotations(input) },
+        spec: {
+          serviceAccountName: "journey-backend",
+          automountServiceAccountToken: false,
+          enableServiceLinks: false,
+          terminationGracePeriodSeconds: 30,
+          nodeSelector: {
+            "kubernetes.io/arch": "arm64",
+          },
+          securityContext: {
+            runAsNonRoot: true,
+            runAsUser: 10001,
+            runAsGroup: 10001,
+            fsGroup: 10001,
+            seccompProfile: { type: "RuntimeDefault" },
+          },
+          containers: [{
+            name: "backend",
+            image: `ghcr.io/aquilaxk/easysubway-backend@${input.releaseTuple.backendImageDigest}`,
+            imagePullPolicy: "IfNotPresent",
+            ports: [
+              { name: "http", containerPort: 8080, protocol: "TCP" },
+              { name: "management", containerPort: 8081, protocol: "TCP" },
+            ],
+            envFrom: [{ configMapRef: { name: configName } }, { secretRef: { name: secretName } }],
+            resources: {
+              requests: { cpu: "250m", memory: "1Gi", "ephemeral-storage": "256Mi" },
+              limits: { cpu: "1500m", memory: "4Gi", "ephemeral-storage": "1Gi" },
+            },
+            securityContext: {
+              readOnlyRootFilesystem: true,
+              allowPrivilegeEscalation: false,
+              capabilities: { drop: ["ALL"] },
+            },
+            startupProbe: probe("/actuator/health/readiness", 2, 60),
+            readinessProbe: probe("/actuator/health/readiness", 0, 3),
+            livenessProbe: probe("/actuator/health/liveness", 10, 3),
+            volumeMounts: [
+              { name: "tmp", mountPath: "/tmp" },
+              { name: "logs", mountPath: "/opt/easysubway/logs" },
+              { name: "policy", mountPath: "/etc/easysubway" },
+            ],
+          }],
+          volumes: [
+            { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: "256Mi" } },
+            { name: "logs", emptyDir: { sizeLimit: "256Mi" } },
+            {
+              name: "policy",
+              configMap: {
+                name: configName,
+                items: [{ key: "journey-profile-resource-policy.json", path: "journey-profile-resource-policy.json" }],
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+function candidateService(token, name) {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: { name, namespace: NAMESPACE, labels: labels(token) },
+    spec: {
+      type: "ClusterIP",
+      selector: labels(token),
+      ports: [
+        { name: "http", port: 8080, protocol: "TCP", targetPort: 8080 },
+        { name: "management", port: 8081, protocol: "TCP", targetPort: 8081 },
+      ],
+    },
+  };
+}
+
+function networkPolicy(input, observability) {
+  return {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: { name: "journey-backend-boundary", namespace: NAMESPACE },
+    spec: {
+      podSelector: { matchLabels: { "app.kubernetes.io/name": "easysubway-journey" } },
+      policyTypes: ["Ingress", "Egress"],
+      ingress: [
+        {
+          from: [
+            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } } },
+            { ipBlock: { cidr: `${input.nodeInternalIp}/32` } },
+          ],
+          ports: [{ protocol: "TCP", port: 8080 }],
+        },
+        {
+          from: [
+            { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": NAMESPACE } } },
+            { ipBlock: { cidr: `${input.nodeInternalIp}/32` } },
+            // compose Prometheus·blackbox probe가 활성 Service ClusterIP로 actuator 포트만 수집한다(Issue #221, #225).
+            { ipBlock: { cidr: observability.composeNetwork.subnet } },
+          ],
+          ports: [{ protocol: "TCP", port: observability.activeService.managementPort }],
+        },
+      ],
+      egress: [
+        { to: [{ ipBlock: { cidr: `${input.nodeInternalIp}/32` } }], ports: [{ protocol: "TCP", port: 15432 }, { protocol: "TCP", port: 9000 }] },
+        { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] },
+        {
+          to: [{
+            ipBlock: {
+              cidr: "0.0.0.0/0",
+              except: [...PUBLIC_EGRESS_EXCEPT_CIDRS],
+            },
+          }],
+          ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 80 }],
+        },
+      ],
+    },
+  };
+}
+
+function activeServiceTemplate(token, observability) {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: { name: "journey-active", namespace: NAMESPACE, labels: { "app.kubernetes.io/part-of": "easysubway" } },
+    spec: {
+      type: "NodePort",
+      clusterIP: observability.activeService.clusterIP,
+      externalTrafficPolicy: "Local",
+      selector: labels(token),
+      ports: [
+        { name: "http", port: 8080, protocol: "TCP", targetPort: 8080, nodePort: 32080 },
+        {
+          name: "management",
+          port: observability.activeService.managementPort,
+          protocol: "TCP",
+          targetPort: observability.activeService.managementPort,
+        },
+      ],
+    },
+  };
+}
+
+function render(input) {
+  validateInput(input);
+  const observability = readObservabilityContract();
+  const placeholder = renderWithToken(input, observability, CONTENT_DIGEST_PLACEHOLDER_TOKEN);
+  return renderWithToken(input, observability, candidateToken(input, candidateContentDigest(placeholder)));
+}
+
+function renderWithToken(input, observability, token) {
+  const deploymentName = `journey-candidate-${token}`;
+  const serviceName = `journey-candidate-${token}`;
+  const configName = `journey-config-${token}`;
+  const secretName = `journey-secret-${token}`;
+  const releaseIdentity = {
+    tupleSha256: input.tupleSha256,
+    backendImageDigest: input.releaseTuple.backendImageDigest,
+    backendConfigDigest: input.releaseTuple.backendConfigDigest,
+    journeyContractDigest: input.releaseTuple.journeyContractDigest,
+    serverRouteBundleDigest: input.releaseTuple.serverRouteBundleDigest,
+    deploymentRevision: input.releaseTuple.deploymentRevision,
+    environmentIdentity: input.releaseTuple.environmentIdentity,
+    candidateGeneration: input.candidateGeneration,
+    trafficGeneration: input.trafficGeneration,
+    candidateToken: token,
+  };
+  const configPlan = {
+    name: configName,
+    namespace: NAMESPACE,
+    digest: input.releaseTuple.backendConfigDigest,
+    immutable: true,
+    requiredProjection: "EXACT_VALIDATED_NON_SECRET_BACKEND_ENV",
+    internalEndpoints: {
+      postgres: {
+        protocol: "TCP",
+        host: "journey-postgres.easysubway-journey.svc",
+        port: 5432,
+      },
+      objectStorage: {
+        scheme: "HTTP",
+        host: "journey-object-storage.easysubway-journey.svc",
+        port: 9000,
+      },
+    },
+    overrides: {
+      SPRING_PROFILES_ACTIVE: "prod",
+      EASYSUBWAY_MANAGEMENT_PORT: "8081",
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false",
+      EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_PATH: "/etc/easysubway/journey-profile-resource-policy.json",
+      EASYSUBWAY_JOURNEY_PROFILE_RESOURCE_POLICY_SHA256: JOURNEY_PROFILE_RESOURCE_POLICY_SHA256,
+      EASYSUBWAY_JOURNEY_PROFILE_MAX_REQUEST_BYTES: "65536",
+      "journey-profile-resource-policy.json": JOURNEY_PROFILE_RESOURCE_POLICY_JSON,
+      EASYSUBWAY_JOURNEY_V3_READINESS_RELEASE_TUPLE_SHA256: digestHex(input.tupleSha256),
+      EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_IMAGE_DIGEST: input.releaseTuple.backendImageDigest,
+      EASYSUBWAY_JOURNEY_V3_READINESS_BACKEND_CONFIG_SHA256: digestHex(input.releaseTuple.backendConfigDigest),
+      EASYSUBWAY_JOURNEY_V3_READINESS_JOURNEY_CONTRACT_SHA256: digestHex(input.releaseTuple.journeyContractDigest),
+      EASYSUBWAY_JOURNEY_V3_READINESS_DEPLOYMENT_REVISION: input.releaseTuple.deploymentRevision,
+      EASYSUBWAY_JOURNEY_V3_READINESS_TRAFFIC_GENERATION: String(input.trafficGeneration),
+      EASYSUBWAY_JOURNEY_V3_READINESS_INSTANCE_ID: deploymentName,
+    },
+  };
+  const secretPlan = {
+    name: secretName,
+    namespace: NAMESPACE,
+    identity: input.secretIdentity,
+    immutable: true,
+    requiredKeyProjection: "EXACT_VALIDATED_BACKEND_ENV_ALLOWLIST",
+    serializedValueCount: 0,
+  };
+  return {
+    schemaVersion: "PLATFORM_K3S_CANDIDATE_RENDER_V1",
+    artifactKind: "platform-k3s-candidate-render",
+    releaseIdentity,
+    configPlan,
+    secretPlan,
+    candidateObjects: [
+      {
+        apiVersion: "v1",
+        kind: "Namespace",
+        metadata: {
+          name: NAMESPACE,
+          labels: {
+            "kubernetes.io/metadata.name": NAMESPACE,
+            "app.kubernetes.io/part-of": "easysubway",
+            "pod-security.kubernetes.io/enforce": "restricted",
+            "pod-security.kubernetes.io/warn": "restricted",
+            "pod-security.kubernetes.io/audit": "restricted",
+          },
+        },
+      },
+      {
+        apiVersion: "v1",
+        kind: "ServiceAccount",
+        metadata: { name: "journey-backend", namespace: NAMESPACE },
+        automountServiceAccountToken: false,
+      },
+      externalService("journey-postgres", 5432, input.postgresPort),
+      externalEndpointSlice("journey-postgres", input.nodeInternalIp, input.postgresPort),
+      externalService("journey-object-storage", 9000, input.objectStoragePort),
+      externalEndpointSlice("journey-object-storage", input.nodeInternalIp, input.objectStoragePort),
+      deployment(input, token, deploymentName, configName, secretName),
+      candidateService(token, serviceName),
+      networkPolicy(input, observability),
+    ],
+    activationPlan: {
+      candidateDeploymentName: deploymentName,
+      candidateServiceName: serviceName,
+      candidateProbeBoundary: "TASK_OWNED_LOOPBACK_KUBECTL_PORT_FORWARD",
+      activeServiceName: "journey-active",
+      activeServiceTemplate: activeServiceTemplate(token, observability),
+      selectorPatch: labels(token),
+      requiredCasField: "metadata.resourceVersion",
+      trafficGeneration: input.trafficGeneration,
+      nodePortAddresses: ["127.0.0.0/8"],
+      applyDuringCandidatePreparation: false,
+    },
+  };
+}
+
+try {
+  const inputPath = parseArguments(process.argv.slice(2));
+  const output = render(readInput(inputPath));
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+} catch (error) {
+  if (error instanceof K3sRenderError) {
+    process.stderr.write(`${error.code} ${error.message}\n`);
+    process.exitCode = 2;
+  } else {
+    process.stderr.write("E_K3S_RENDER_INPUT unexpected render failure\n");
+    process.exitCode = 2;
+  }
+}

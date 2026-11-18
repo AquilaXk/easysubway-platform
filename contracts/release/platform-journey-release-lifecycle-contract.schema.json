@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Platform Journey release lifecycle contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "issueRef",
+    "consumedContracts",
+    "sourceFreeInput",
+    "orchestratorBinding",
+    "candidate",
+    "activeState",
+    "activation",
+    "recoveryDeployment",
+    "failure",
+    "receipts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "PLATFORM_JOURNEY_RELEASE_LIFECYCLE_CONTRACT_V2"
+    },
+    "artifactKind": {
+      "type": "string",
+      "const": "platform-journey-release-lifecycle-contract"
+    },
+    "issueRef": {
+      "type": "object",
+      "const": {
+        "repository": "AquilaXk/easysubway-platform",
+        "issueNumber": 97,
+        "parentIssueNumber": 77,
+        "risk": "A_R2"
+      }
+    },
+    "consumedContracts": {
+      "type": "object",
+      "const": {
+        "journeyReleaseTuple": {
+          "path": "contracts/release/journey-release-tuple.schema.json",
+          "schemaVersion": "JOURNEY_RELEASE_TUPLE_V1"
+        },
+        "serverRouteBundlePublicationDescriptor": {
+          "repository": "AquilaXk/easysubway-data",
+          "path": "contracts/datapack/server-route-bundle-publication-descriptor.schema.json",
+          "schemaVersion": 2,
+          "artifactKind": "server-route-bundle-publication-descriptor"
+        },
+        "activationReceiptFoundation": {
+          "path": "contracts/release/platform-activation-receipt.schema.json",
+          "schemaVersion": "PLATFORM_ACTIVATION_RECEIPT_V2",
+          "disposition": "FIXED_HOST_RUNTIME_BINDING_REQUIRED_BY_77"
+        },
+        "semanticOwnership": "BACKEND_AND_PLAN_JOURNEY"
+      }
+    },
+    "sourceFreeInput": {
+      "type": "object",
+      "const": {
+        "allowedInputs": [
+          "IMMUTABLE_DEPLOYMENT_INPUT_ENVELOPE",
+          "IMMUTABLE_DATA_PUBLICATION_DESCRIPTOR",
+          "IMMUTABLE_RELEASE_TUPLE",
+          "IMMUTABLE_CANDIDATE_BINDING",
+          "IMMUTABLE_DESCRIPTOR_BINDING",
+          "IMMUTABLE_CANDIDATE_ADMISSION",
+          "IMMUTABLE_EVIDENCE_REFERENCES"
+        ],
+        "sourceTreeReadCount": 0,
+        "hubCheckoutReadCount": 0,
+        "rawMainReadCount": 0,
+        "siblingCheckoutReadCount": 0,
+        "mutableLocatorCount": 0,
+        "localDurableTruthCount": 0
+      }
+    },
+    "orchestratorBinding": {
+      "type": "object",
+      "const": {
+        "configured": "COMPOSE",
+        "configuredCount": 1,
+        "alternateSelectionCount": 0,
+        "mutableDuringOperation": false,
+        "failureSelectsAlternate": false,
+        "sharedDeployLock": "${DEPLOY_ROOT}/deploy.lock",
+        "lockCoverage": "STANDBY_START_THROUGH_FINAL_CLEANUP_AND_RECEIPT"
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "const": {
+        "ownership": "OPERATION_OWNED_IMMUTABLE",
+        "hostCount": 1,
+        "realFailureDomainCount": 1,
+        "minimumInstanceCount": 1,
+        "maximumInstanceCount": 1,
+        "productionTrafficBeforeCommit": 0,
+        "roles": {
+          "canonical": {
+            "service": "backend",
+            "host": "127.0.0.1",
+            "port": 8080,
+            "transient": false
+          },
+          "standby": {
+            "service": "backend-standby",
+            "host": "127.0.0.1",
+            "port": 8082,
+            "transient": true
+          }
+        },
+        "exactIdentityFields": [
+          "tupleSha256",
+          "backendImageDigest",
+          "backendConfigDigest",
+          "journeyContractDigest",
+          "serverRouteBundleDigest",
+          "deploymentRevision",
+          "environmentIdentity",
+          "candidateGeneration"
+        ],
+        "requiredPreCommitEvidence": [
+          "CANDIDATE_READINESS",
+          "CANDIDATE_CANARY",
+          "CANDIDATE_ADMISSION",
+          "STANDBY_ACTIVATION",
+          "STANDBY_ACTIVE_READINESS"
+        ],
+        "stateMachine": {
+          "states": [
+            "ABSENT",
+            "INPUTS_VALIDATED",
+            "STANDBY_STARTED",
+            "STANDBY_READY",
+            "CANARY_PASSED",
+            "READY_TO_ACTIVATE",
+            "STANDBY_ACTIVE",
+            "TRAFFIC_ON_STANDBY",
+            "CANONICAL_DRAINING",
+            "CANONICAL_RECREATED",
+            "CANONICAL_ACTIVE",
+            "TRAFFIC_ON_CANONICAL",
+            "STANDBY_REMOVED",
+            "ACTIVE_SERVING",
+            "FAILED_PRECOMMIT",
+            "FAILED_POSTSWITCH"
+          ],
+          "successTransitions": [
+            ["ABSENT", "INPUTS_VALIDATED"],
+            ["INPUTS_VALIDATED", "STANDBY_STARTED"],
+            ["STANDBY_STARTED", "STANDBY_READY"],
+            ["STANDBY_READY", "CANARY_PASSED"],
+            ["CANARY_PASSED", "READY_TO_ACTIVATE"],
+            ["READY_TO_ACTIVATE", "STANDBY_ACTIVE"],
+            ["STANDBY_ACTIVE", "TRAFFIC_ON_STANDBY"],
+            ["TRAFFIC_ON_STANDBY", "CANONICAL_DRAINING"],
+            ["CANONICAL_DRAINING", "CANONICAL_RECREATED"],
+            ["CANONICAL_RECREATED", "CANONICAL_ACTIVE"],
+            ["CANONICAL_ACTIVE", "TRAFFIC_ON_CANONICAL"],
+            ["TRAFFIC_ON_CANONICAL", "STANDBY_REMOVED"],
+            ["STANDBY_REMOVED", "ACTIVE_SERVING"]
+          ],
+          "preCommitStates": [
+            "ABSENT",
+            "INPUTS_VALIDATED",
+            "STANDBY_STARTED",
+            "STANDBY_READY",
+            "CANARY_PASSED",
+            "READY_TO_ACTIVATE",
+            "STANDBY_ACTIVE"
+          ],
+          "commitTransition": ["STANDBY_ACTIVE", "TRAFFIC_ON_STANDBY"],
+          "preCommitFailureTarget": "FAILED_PRECOMMIT",
+          "postCommitFailureTarget": "FAILED_POSTSWITCH"
+        }
+      }
+    },
+    "activeState": {
+      "type": "object",
+      "const": {
+        "classification": "HOST_NGINX_TARGET",
+        "persistentSlotRegistryCount": 0,
+        "commit": "ATOMIC_NGINX_SWITCH_TO_127_0_0_1_8082",
+        "commitLinearizationPointCount": 1,
+        "commitPrecondition": "STANDBY_ACTIVE",
+        "trafficGeneration": "STRICTLY_INCREASING_INTEGER",
+        "postCommitState": "TRAFFIC_ON_STANDBY",
+        "steadyState": "ACTIVE_SERVING",
+        "steadyStateTarget": "127.0.0.1:8080",
+        "mixedUnknownOrUnreadyTrafficCount": 0,
+        "localDurableTruthCount": 0
+      }
+    },
+    "activation": {
+      "type": "object",
+      "const": {
+        "standby": {
+          "activationAttemptCount": 1,
+          "endpoint": "/internal/v1/journey/activation",
+          "activeReadinessRequired": true,
+          "beforeFirstTrafficSwitch": true
+        },
+        "nginxSwitches": [
+          {
+            "fromPort": 8080,
+            "toPort": 8082,
+            "nginxTestRequired": true,
+            "reloadRequired": true
+          },
+          {
+            "fromPort": 8082,
+            "toPort": 8080,
+            "nginxTestRequired": true,
+            "reloadRequired": true
+          }
+        ],
+        "canonical": {
+          "signal": "SIGTERM",
+          "stopGracePeriodSeconds": 30,
+          "newRequestAdmissionAfterSignal": 0,
+          "inFlightSnapshot": "PINNED_TO_REQUEST_START_RELEASE_TUPLE",
+          "inFlightCompletionRequired": true,
+          "recreateWithAdmittedBytes": true,
+          "activationAttemptCount": 1,
+          "activeReadinessConvergenceRequired": true
+        },
+        "successRequires": [
+          "CANONICAL_ACTIVE_READINESS_EQUALITY",
+          "NGINX_SWITCHBACK_TO_8080",
+          "STANDBY_REMOVED",
+          "SUCCESS_RECEIPT_STORED"
+        ],
+        "genericRollingMixedExposureCount": 0,
+        "implicitReversalCount": 0
+      }
+    },
+    "recoveryDeployment": {
+      "type": "object",
+      "const": {
+        "ownerIssueNumber": 17,
+        "includedInCurrentRuntime": false,
+        "automaticStartCount": 0,
+        "implicitPreviousSelectionCount": 0,
+        "olderTargetTrialCount": 0,
+        "requiredTarget": "OPERATOR_SELECTED_CURRENT_VALID_IMMUTABLE_RELEASE_TUPLE",
+        "repeatsFixedHostLifecycle": true
+      }
+    },
+    "failure": {
+      "type": "object",
+      "const": {
+        "result": "TYPED_NONZERO",
+        "codes": [
+          "OPERATION_INPUT_INVALID",
+          "SOURCE_FREE_INPUT_POLICY_VIOLATION",
+          "DEPLOY_LOCK_UNAVAILABLE",
+          "STANDBY_START_OR_READINESS_FAILED",
+          "CANARY_OR_ADMISSION_FAILED",
+          "STANDBY_ACTIVATION_FAILED",
+          "NGINX_STANDBY_SWITCH_FAILED",
+          "CANONICAL_DRAIN_FAILED",
+          "CANONICAL_RECREATE_OR_ACTIVATION_FAILED",
+          "NGINX_CANONICAL_SWITCHBACK_FAILED",
+          "STANDBY_CLEANUP_FAILED",
+          "EVIDENCE_INVALID"
+        ],
+        "preCommitVisibleStateMutation": {
+          "canonical": 0,
+          "nginx": 0,
+          "trafficTarget": 0,
+          "trafficGeneration": 0,
+          "candidateCleanupRequired": true
+        },
+        "postSwitchFailure": {
+          "exactAdmittedStandbyMayRemainServing": true,
+          "successClaim": 0,
+          "goContribution": 0,
+          "successReceipt": 0,
+          "degradedSuccessCount": 0,
+          "automaticPreviousSelectionCount": 0,
+          "automaticAlternateActivationCount": 0
+        },
+        "forbiddenSuccessSources": [
+          "SOURCE_TREE",
+          "HUB_OR_RAW_MAIN",
+          "MUTABLE_LOCATOR",
+          "PREVIOUS_ARTIFACT_CONFIG_OR_IMAGE",
+          "ROUTE_V2_OR_LEGACY",
+          "ALTERNATE_ORCHESTRATOR",
+          "CACHED_OR_LOCAL_ARTIFACT"
+        ]
+      }
+    },
+    "receipts": {
+      "type": "object",
+      "const": {
+        "immutableNoOverwrite": true,
+        "requiredKinds": [
+          "CANDIDATE",
+          "ACTIVATION",
+          "FAILED_OPERATION"
+        ],
+        "activationIdentityFields": [
+          "operationId",
+          "dataDescriptorSha256",
+          "tupleSha256",
+          "candidateBindingSha256",
+          "descriptorBindingSha256",
+          "candidateAdmissionSha256",
+          "candidateGeneration",
+          "trafficGeneration",
+          "standbyActiveReadinessEvidenceDigest",
+          "standbyNginxSwitchEvidenceDigest",
+          "canonicalDrainEvidenceDigest",
+          "canonicalActiveReadinessEvidenceDigest",
+          "canonicalNginxSwitchEvidenceDigest",
+          "standbyRemovalEvidenceDigest",
+          "outcome"
+        ],
+        "successReceiptAfter": "ACTIVE_SERVING_AND_STANDBY_REMOVED",
+        "failedOperationReceiptRequired": true,
+        "sanitizedEvidenceDigestsOnly": true
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Repository-qualified release issue reference",
+  "type": "string",
+  "pattern": "^AquilaXk/(easysubway|easysubway-data|easysubway-platform|easysubway-backend|easysubway-mobile)#[1-9][0-9]*$"
+}

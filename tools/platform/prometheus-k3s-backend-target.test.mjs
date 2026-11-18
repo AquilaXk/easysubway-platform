@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+
+import { k3sCandidateInputFixture } from "./k3s-candidate-input-fixture.mjs";
+import { PRODUCTION_DB_COMPOSE_BACKEND_SERVICES } from "./run-k3s-journey-activation.mjs";
+import { scrapeTargetsByJob } from "./prometheus-scrape-config.mjs";
+
+// Issue #221: K3s 활성화는 compose backend를 drain하고 트래픽을 journey-active Service로 옮긴다.
+// Prometheus backend 수집 대상은 그 활성 Service를 따라가야 하며, drain되는 compose DNS를 가리키면 안 된다.
+const root = new URL("../..", import.meta.url);
+const renderer = new URL("tools/platform/render-journey-kubernetes-candidate.mjs", root);
+const digest = (character) => `sha256:${character.repeat(64)}`;
+
+function readText(path) {
+  return readFileSync(new URL(path, root), "utf8");
+}
+
+function readJson(path) {
+  return JSON.parse(readText(path));
+}
+
+function observabilityContract() {
+  return readJson("contracts/release/platform-k3s-observability-contract.json");
+}
+
+function targetHost(target) {
+  const withoutScheme = target.replace(/^[a-z]+:\/\//, "");
+  return withoutScheme.split("/")[0].split(":")[0];
+}
+
+function validInput() {
+  return k3sCandidateInputFixture();
+}
+
+function render() {
+  const temporary = mkdtempSync(join(tmpdir(), "platform-k3s-observability-"));
+  const input = join(temporary, "input.json");
+  try {
+    writeFileSync(input, `${JSON.stringify(validInput())}\n`, { mode: 0o600 });
+    const result = spawnSync(process.execPath, [renderer.pathname, "--input", input], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+test("observability contract pins the compose network subnet and the active Service ClusterIP", () => {
+  const contract = observabilityContract();
+  assert.equal(contract.schemaVersion, "PLATFORM_K3S_OBSERVABILITY_CONTRACT_V1");
+  assert.equal(contract.artifactKind, "platform-k3s-observability-contract");
+  assert.equal(contract.issueRef.repository, "AquilaXk/easysubway-platform");
+  assert.equal(contract.issueRef.issueNumber, 221);
+  assert.match(contract.composeNetwork.name, /^[a-z0-9][a-z0-9_-]*_default$/);
+  assert.match(contract.composeNetwork.subnet, /^(?:\d{1,3}\.){3}\d{1,3}\/(?:[1-9]|[12]\d|3[0-2])$/);
+  assert.equal(contract.activeService.name, "journey-active");
+  assert.equal(contract.activeService.namespace, "easysubway-journey");
+  assert.match(contract.activeService.clusterIP, /^(?:\d{1,3}\.){3}\d{1,3}$/);
+  assert.equal(contract.activeService.port, 8080);
+  assert.equal(contract.activeService.managementPort, 8081);
+});
+
+test("rendered active Service exposes HTTP and management ports and NetworkPolicy admits the compose subnet only on the management port", () => {
+  const contract = observabilityContract();
+  const rendered = render();
+  const active = rendered.activationPlan.activeServiceTemplate;
+  assert.equal(active.metadata.name, contract.activeService.name);
+  assert.equal(active.metadata.namespace, contract.activeService.namespace);
+  assert.equal(active.spec.clusterIP, contract.activeService.clusterIP);
+  assert.deepEqual(active.spec.ports, [
+    { name: "http", port: contract.activeService.port, protocol: "TCP", targetPort: contract.activeService.port, nodePort: 32080 },
+    { name: "management", port: contract.activeService.managementPort, protocol: "TCP", targetPort: contract.activeService.managementPort },
+  ]);
+
+  // 보안 경계(F1, Issue #225): TCP 8080은 [namespace, 노드 /32]에만 열고, compose subnet은 management 포트(8081)에만 연다.
+  // egress는 Issue #221 이전 규칙과 정확히 같아야 한다(관측 경로 추가가 egress를 넓히지 않는다).
+  const policy = rendered.candidateObjects.find(({ kind }) => kind === "NetworkPolicy");
+  assert.deepEqual(policy.spec.ingress, [
+    {
+      from: [
+        { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+        { ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } },
+      ],
+      ports: [{ protocol: "TCP", port: contract.activeService.port }],
+    },
+    {
+      from: [
+        { namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "easysubway-journey" } } },
+        { ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } },
+        { ipBlock: { cidr: contract.composeNetwork.subnet } },
+      ],
+      ports: [{ protocol: "TCP", port: contract.activeService.managementPort }],
+    },
+  ]);
+  assert.deepEqual(policy.spec.egress, [
+    {
+      to: [{ ipBlock: { cidr: `${validInput().nodeInternalIp}/32` } }],
+      ports: [{ protocol: "TCP", port: 15432 }, { protocol: "TCP", port: 9000 }],
+    },
+    {
+      to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } } }],
+      ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }],
+    },
+    {
+      to: [{
+        ipBlock: {
+          cidr: "0.0.0.0/0",
+          except: ["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"],
+        },
+      }],
+      ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 80 }],
+    },
+  ]);
+});
+
+test("Prometheus backend probe and app metrics scrape target the rendered active Service management port", () => {
+  const contract = observabilityContract();
+  const active = render().activationPlan.activeServiceTemplate;
+  const managementPort = active.spec.ports.find(({ name }) => name === "management")?.port;
+  assert.equal(managementPort, contract.activeService.managementPort);
+  const address = `${active.spec.clusterIP}:${managementPort}`;
+  const jobs = scrapeTargetsByJob(readText("infra/prometheus/prometheus.yml"));
+
+  assert.deepEqual(jobs.get("easysubway-backend"), [`http://${address}/actuator/health/readiness`]);
+  assert.deepEqual(jobs.get("backend_app_metrics"), [address]);
+  assert.equal(contract.activeService.clusterIP, active.spec.clusterIP);
+});
+
+test("no Prometheus scrape target points at a compose backend that K3s activation drains", () => {
+  const jobs = scrapeTargetsByJob(readText("infra/prometheus/prometheus.yml"));
+  assert.ok(jobs.size > 0);
+  const drained = new Set(PRODUCTION_DB_COMPOSE_BACKEND_SERVICES);
+  for (const [job, targets] of jobs) {
+    for (const target of targets) {
+      assert.equal(drained.has(targetHost(target)), false, `${job} targets drained compose service ${target}`);
+    }
+  }
+});
+
+test("backend scrape down alerts still fire and no longer describe the drained compose backend or main HTTP port", () => {
+  const alerts = readText("infra/prometheus/alerts.yml");
+  const alertTests = readText("infra/prometheus/alerts.test.yml");
+  assert.match(alerts, /expr: min\(up\{job="backend_app_metrics"\}\) < 1/);
+  assert.doesNotMatch(alerts, /backend:8080|ClusterIP:8080|10\.43\.11\.187:8080/);
+  assert.doesNotMatch(alertTests, /backend:8080|ClusterIP:8080|10\.43\.11\.187:8080/);
+  assert.match(alertTests, /name: backend app metrics scrape down fires dead-mans switch/);
+  // F4: probe 경로 실패는 dead-man 경보와 별개의 probe_success 경보로 드러난다.
+  assert.match(alerts, /- alert: AquilaBackendReadinessProbeFailed\n\s+expr: min\(probe_success\{job="easysubway-backend"\}\) < 1\n\s+for: 5m/);
+  assert.match(alertTests, /alertname: AquilaBackendReadinessProbeFailed\n\s+exp_alerts:\n\s+- exp_labels:/);
+});
+
+test("Prometheus retains 30 days with a disk cap so the 28-day latency SLO window stays computable", () => {
+  // Platform Issue #235: 28일 지연 SLO 준수율은 TSDB가 28일을 보존해야 계산된다. 기본 보존 15일이면 계산할 수 없다.
+  // 운영 호스트 실측(2026-10-07): TSDB 약 0.8 GB/15일(약 56 MB/일), 디스크 여유 14 GB. 30일 약 1.8 GB의 약 1.7배인 3GB를
+  // 상한으로 둬 디스크를 채우지 못하게 한다.
+  const compose = readText("infra/docker-compose.yml");
+  const start = compose.indexOf("\n  prometheus:\n");
+  const prometheus = compose.slice(start, compose.indexOf("\n  loki", start));
+  assert.match(prometheus, /- "--storage\.tsdb\.retention\.time=30d"/);
+  assert.match(prometheus, /- "--storage\.tsdb\.retention\.size=3GB"/);
+});
+
+test("CI runs this contract exactly once", () => {
+  const ci = readText(".github/workflows/ci.yml");
+  assert.equal(ci.split("node --test tools/platform/prometheus-k3s-backend-target.test.mjs").length - 1, 1);
+});

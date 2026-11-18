@@ -1,0 +1,157 @@
+{
+  "schemaVersion": "PLATFORM_K3S_RUNTIME_CONTRACT_V1",
+  "artifactKind": "platform-k3s-runtime-contract",
+  "issueRef": {
+    "repository": "AquilaXk/easysubway-platform",
+    "issueNumber": 111,
+    "parentIssueNumbers": [17, 77],
+    "risk": "A_R3"
+  },
+  "distribution": {
+    "name": "K3S",
+    "version": "v1.36.3+k3s1",
+    "architecture": "arm64",
+    "binaryUrl": "https://github.com/k3s-io/k3s/releases/download/v1.36.3%2Bk3s1/k3s-arm64",
+    "binarySha256": "c9a209103f480f163b7c6a56f00862b4481927b284dc29a3716bb70d886691a8"
+  },
+  "host": {
+    "provider": "OCI",
+    "shape": "VM.Standard.A1.Flex",
+    "nodeCount": 1,
+    "ocpu": 4,
+    "memoryGiB": 24,
+    "edgeOwner": "HOST_NGINX",
+    "publicHttpPort": 80,
+    "publicHttpsPort": 443
+  },
+  "packagedComponents": {
+    "disabled": [
+      "traefik",
+      "servicelb",
+      "metrics-server",
+      "local-storage"
+    ],
+    "helmChartCount": 0,
+    "customOperatorCount": 0,
+    "serviceMeshCount": 0
+  },
+  "networking": {
+    "edgeOwner": "HOST_NGINX",
+    "kubeProxyMode": "iptables",
+    "nodePortAddresses": [
+      "127.0.0.0/8"
+    ],
+    "activeServiceNodePort": 32080,
+    "publicNodePortCount": 0,
+    "ingressControllerCount": 0
+  },
+  "capacity": {
+    "nodeCount": 1,
+    "failureDomainCount": 1,
+    "activeReplicaCount": 1,
+    "maximumTransientCandidateReplicas": 1,
+    "horizontalPodAutoscalerCount": 0,
+    "podDisruptionBudgetCount": 0,
+    "topologySpreadConstraintCount": 0,
+    "multiHostHighAvailabilityClaim": false
+  },
+  "state": {
+    "postgres": {
+      "mode": "SAME_HOST_EXTERNAL_COMPOSE_SERVICE",
+      "serviceName": "journey-postgres",
+      "servicePort": 5432,
+      "defaultPublishedHostPort": 15432
+    },
+    "objectStorage": {
+      "mode": "SAME_HOST_EXTERNAL_COMPOSE_SERVICE",
+      "serviceName": "journey-object-storage",
+      "servicePort": 9000,
+      "defaultPublishedHostPort": 9000
+    },
+    "endpointBinding": "SELECTORLESS_SERVICE_AND_ENDPOINT_SLICE_TO_NODE_INTERNAL_IP",
+    "hostPathCount": 0,
+    "persistentVolumeClaimCount": 0,
+    "podLocalDatabaseCount": 0,
+    "podLocalObjectStorageCount": 0
+  },
+  "identity": {
+    "sourceFree": true,
+    "releaseTupleSchemaVersion": "JOURNEY_RELEASE_TUPLE_V1",
+    "canonicalAnnotationFields": [
+      "tupleSha256",
+      "backendImageDigest",
+      "backendConfigDigest",
+      "journeyContractDigest",
+      "serverRouteBundleDigest",
+      "deploymentRevision",
+      "environmentIdentity",
+      "candidateGeneration",
+      "trafficGeneration"
+    ],
+    "configMapNameSource": "BACKEND_CONFIG_DIGEST",
+    "secretNameSource": "SECRET_CONTENT_IDENTITY",
+    "configAndSecretImmutable": true,
+    "secretValueSerializedCount": 0
+  },
+  "workload": {
+    "namespace": "easysubway-journey",
+    "workloadServiceAccount": "journey-backend",
+    "serviceAccountTokenAutomount": false,
+    "runAsNonRoot": true,
+    "runAsUser": 10001,
+    "runAsGroup": 10001,
+    "readOnlyRootFilesystem": true,
+    "allowPrivilegeEscalation": false,
+    "seccompProfile": "RuntimeDefault",
+    "droppedCapabilities": [
+      "ALL"
+    ],
+    "terminationGracePeriodSeconds": 30,
+    "requiredProbes": [
+      "startup",
+      "readiness",
+      "liveness"
+    ],
+    "resourceRequestsAndLimitsRequired": true,
+    "boundedEmptyDirRequired": true
+  },
+  "deployer": {
+    "namespace": "easysubway-journey",
+    "serviceAccount": "journey-deployer",
+    "clusterWideRoleCount": 0,
+    "secretReadVerbCount": 0,
+    "allowedResourceGroups": [
+      "apps/deployments",
+      "core/services",
+      "core/configmaps",
+      "core/secrets",
+      "core/serviceaccounts",
+      "core/pods",
+      "core/pods/log",
+      "core/pods/portforward",
+      "discovery.k8s.io/endpointslices",
+      "networking.k8s.io/networkpolicies"
+    ]
+  },
+  "activationBoundary": {
+    "candidateServiceType": "ClusterIP",
+    "candidateProductionTrafficCount": 0,
+    "candidateProbeBoundary": "TASK_OWNED_LOOPBACK_KUBECTL_PORT_FORWARD",
+    "activeServiceType": "NodePort",
+    "activeServiceSelectorCommit": "RESOURCE_VERSION_CAS",
+    "applyActiveServiceDuringCandidatePreparation": false,
+    "automaticRollbackCount": 0,
+    "alternateOrchestratorSelectionCount": 0
+  },
+  "failure": {
+    "result": "TYPED_NONZERO_OUTPUT_ZERO",
+    "forbiddenSuccessSources": [
+      "COMPOSE_FALLBACK",
+      "LEGACY_ROUTE_V2",
+      "PREVIOUS_OR_STALE_RELEASE",
+      "LOCAL_SOURCE_CHECKOUT",
+      "ALTERNATE_PROVIDER",
+      "PLACEHOLDER_DATA"
+    ]
+  }
+}

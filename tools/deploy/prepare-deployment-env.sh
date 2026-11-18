@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	printf 'usage: %s <source.env> <compose.allowlist> <backend.allowlist> <output-dir>\n' "$0" >&2
+	exit 2
+}
+
+[[ $# -eq 4 ]] || usage
+
+source_env="$1"
+compose_allowlist="$2"
+backend_allowlist="$3"
+output_dir="$4"
+
+for file in "${source_env}" "${compose_allowlist}" "${backend_allowlist}"; do
+	[[ -f "${file}" ]] || { printf 'missing file: %s\n' "${file}" >&2; exit 2; }
+done
+
+compose_keys=()
+backend_keys=()
+
+trim_whitespace() {
+	local raw="$1"
+	raw="${raw#"${raw%%[![:space:]]*}"}"
+	raw="${raw%"${raw##*[![:space:]]}"}"
+	printf '%s' "${raw}"
+}
+
+while IFS= read -r line || [[ -n "${line}" ]]; do
+	line="${line%$'\r'}"
+	[[ -z "${line}" || "${line}" == \#* ]] && continue
+	if [[ ! "${line}" =~ ^[A-Z0-9_]+= ]]; then
+		printf 'invalid dotenv line: %s\n' "${line}" >&2
+		exit 1
+	fi
+	name="${line%%=*}"
+	raw_val="${line#*=}"
+	has_var="ENV_HAS_${name}"
+	if [[ -n "${!has_var:-}" ]]; then
+		printf 'duplicate dotenv key: %s\n' "${name}" >&2
+		exit 1
+	fi
+	if [[ "${raw_val}" == *'$'* && "${raw_val}" != \'*\' ]]; then
+		printf 'cross-key interpolation is not allowed: %s\n' "${name}" >&2
+		exit 1
+	fi
+	unquoted="${raw_val}"
+	if [[ "${unquoted}" == \"*\" && "${unquoted}" == *\" ]]; then
+		unquoted="${unquoted:1:${#unquoted}-2}"
+	elif [[ "${unquoted}" == \'*\' && "${unquoted}" == *\' ]]; then
+		unquoted="${unquoted:1:${#unquoted}-2}"
+	fi
+	printf -v "${has_var}" '%s' "1"
+	printf -v "ENV_LINE_${name}" '%s' "${line}"
+	printf -v "ENV_VAL_${name}" '%s' "${unquoted}"
+done < "${source_env}"
+
+read_allowlist() {
+	local allowlist="$1"
+	local prefix="$2"
+	local target_array="$3"
+	while IFS= read -r name || [[ -n "${name}" ]]; do
+		name="${name%$'\r'}"
+		[[ -z "${name}" || "${name}" == \#* ]] && continue
+		if [[ ! "${name}" =~ ^[A-Z0-9_]+$ ]]; then
+			printf 'invalid allowlist key: %s\n' "${name}" >&2
+			exit 1
+		fi
+		local seen_var="${prefix}_${name}"
+		if [[ -n "${!seen_var:-}" ]]; then
+			printf 'duplicate allowlist key: %s\n' "${name}" >&2
+			exit 1
+		fi
+		printf -v "${seen_var}" '%s' "1"
+		if [[ "${target_array}" == "compose" ]]; then
+			compose_keys+=("${name}")
+		else
+			backend_keys+=("${name}")
+		fi
+	done < "${allowlist}"
+}
+
+read_allowlist "${compose_allowlist}" "ALLOW_COMPOSE" "compose"
+read_allowlist "${backend_allowlist}" "ALLOW_BACKEND" "backend"
+
+has_key() {
+	local var_name="ENV_HAS_$1"
+	[[ -n "${!var_name:-}" ]]
+}
+
+value() {
+	local var_name="ENV_VAL_$1"
+	printf '%s' "${!var_name:-}"
+}
+
+require_nonempty() {
+	local name="$1"
+	if [[ -z "$(value "${name}")" ]]; then
+		printf 'required deployment env is empty: %s\n' "${name}" >&2
+		exit 1
+	fi
+}
+
+require_port() {
+	local name="$1"
+	local raw
+	raw="$(value "${name}")"
+	[[ -z "${raw}" ]] && return 0
+	if [[ ! "${raw}" =~ ^[0-9]+$ || "${raw}" -lt 1 || "${raw}" -gt 65535 ]]; then
+		printf 'invalid port: %s\n' "${name}" >&2
+		exit 1
+	fi
+}
+
+require_positive_postgres_integer() {
+	local name="$1"
+	local raw
+	raw="$(value "${name}")"
+	if [[ ! "${raw}" =~ ^[1-9][0-9]*$ \
+		|| "${#raw}" -gt 10 \
+		|| ( "${#raw}" -eq 10 && "${raw}" > "2147483647" ) ]]; then
+		printf 'invalid positive integer: %s\n' "${name}" >&2
+		exit 1
+	fi
+}
+
+require_bounded_positive_integer() {
+	local name="$1"
+	local maximum="$2"
+	local raw
+	raw="$(value "${name}")"
+	if [[ ! "${raw}" =~ ^[1-9][0-9]*$ \
+		|| "${#raw}" -gt "${#maximum}" \
+		|| ( "${#raw}" -eq "${#maximum}" && "${raw}" > "${maximum}" ) ]]; then
+		printf 'invalid or relaxed Route V2 limit: %s\n' "${name}" >&2
+		exit 1
+	fi
+}
+
+require_bool() {
+	local name="$1"
+	local raw
+	raw="$(printf '%s' "$(value "${name}")" | tr '[:upper:]' '[:lower:]')"
+	[[ -z "${raw}" ]] && return 0
+	case "${raw}" in
+		true|false|on|off|yes|no|1|0) ;;
+		*) printf 'invalid boolean: %s\n' "${name}" >&2; exit 1 ;;
+	esac
+}
+
+require_route_v2_trusted_proxy_cidr() {
+	local raw
+	raw="$(value EASYSUBWAY_ROUTE_V2_TRUSTED_PROXY_CIDR)"
+	if [[ "${raw}" != "172.16.0.0/12" ]]; then
+		printf 'invalid Route V2 trusted proxy CIDR\n' >&2
+		exit 1
+	fi
+}
+
+is_truthy() {
+	local name="$1"
+	case "$(printf '%s' "$(value "${name}")" | tr '[:upper:]' '[:lower:]')" in
+		true|on|yes|1) true ;;
+		*) false ;;
+	esac
+}
+
+require_nonempty EASYSUBWAY_ADMIN_USERNAME
+require_nonempty EASYSUBWAY_ADMIN_PASSWORD
+require_nonempty EASYSUBWAY_POSTGRES_USER
+require_nonempty EASYSUBWAY_POSTGRES_PASSWORD
+require_nonempty EASYSUBWAY_DATASOURCE_USERNAME
+require_nonempty EASYSUBWAY_DATASOURCE_PASSWORD
+require_nonempty EASYSUBWAY_REPORT_UPLOAD_BUCKET
+require_nonempty EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY
+require_nonempty EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY
+require_nonempty EASYSUBWAY_ADS_ASSET_ORIGIN
+require_nonempty EASYSUBWAY_TAGO_TRAIN_SERVICE_KEY
+require_nonempty EASYSUBWAY_SEOUL_METRO_ELEVATOR_SERVICE_KEY
+if has_key EASYSUBWAY_ADS_EVENT_DAILY_CAP && [[ -z "$(value EASYSUBWAY_ADS_EVENT_DAILY_CAP)" ]]; then
+	require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
+fi
+require_nonempty EASYSUBWAY_ADS_EVENT_DAILY_CAP
+require_positive_postgres_integer EASYSUBWAY_ADS_EVENT_DAILY_CAP
+require_nonempty EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET
+require_nonempty EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256
+require_nonempty EASYSUBWAY_PLAY_INTEGRITY_CREDENTIALS_BASE64
+require_nonempty EASYSUBWAY_JOURNEY_SEARCH_TIMEOUT
+require_nonempty EASYSUBWAY_JOURNEY_MAX_SEARCHES_PER_SESSION
+require_nonempty EASYSUBWAY_JOURNEY_SESSION_CERTIFICATE_SHA256
+require_port EASYSUBWAY_ROUTE_V2_GATEWAY_PORT
+require_bool EASYSUBWAY_ROUTE_V2_INGRESS_ENABLED
+require_route_v2_trusted_proxy_cidr
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_RATE_PER_MINUTE 5
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_BURST 2
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SEARCH_RATE_PER_MINUTE 10
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SEARCH_BURST 3
+require_bounded_positive_integer EASYSUBWAY_ROUTE_V2_SESSION_MAX_REQUESTS 50
+if [[ ! "$(value EASYSUBWAY_ROUTE_V2_ORIGIN_SECRET)" =~ ^[A-Za-z0-9_-]{43,128}$ ]]; then
+	printf 'invalid Route V2 origin secret\n' >&2
+	exit 1
+fi
+if [[ ! "$(value EASYSUBWAY_ROUTE_V2_PLAY_INTEGRITY_CERTIFICATE_SHA256)" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+	printf 'invalid Play Integrity certificate SHA-256\n' >&2
+	exit 1
+fi
+
+if [[ "$(value EASYSUBWAY_BACKEND_BIND)" != "127.0.0.1" ]]; then
+	printf 'backend bind must be 127.0.0.1\n' >&2
+	exit 1
+fi
+
+postgres_bind="$(value EASYSUBWAY_POSTGRES_BIND)"
+if [[ -n "${postgres_bind}" && "${postgres_bind}" != "127.0.0.1" ]]; then
+	printf 'postgres bind must be 127.0.0.1\n' >&2
+	exit 1
+fi
+
+object_storage_bind="$(value EASYSUBWAY_OBJECT_STORAGE_BIND)"
+if [[ -n "${object_storage_bind}" && "${object_storage_bind}" != "127.0.0.1" ]]; then
+	printf 'object storage bind must be 127.0.0.1\n' >&2
+	exit 1
+fi
+
+ads_asset_origin="$(value EASYSUBWAY_ADS_ASSET_ORIGIN)"
+ads_asset_authority="${ads_asset_origin#https://}"
+ads_asset_authority="${ads_asset_authority%/}"
+ads_asset_host="${ads_asset_authority%%:*}"
+ads_asset_port=""
+if [[ "${ads_asset_authority}" == *:* ]]; then
+	ads_asset_port="${ads_asset_authority##*:}"
+fi
+ads_asset_host_normalized="$(printf '%s' "${ads_asset_host}" | tr '[:upper:]' '[:lower:]')"
+ads_asset_origin_invalid=0
+IFS='.' read -r -a ads_asset_host_labels <<< "${ads_asset_host}"
+ads_asset_numeric_ipv4=0
+if [[ "${#ads_asset_host_labels[@]}" -ge 2 && "${#ads_asset_host_labels[@]}" -le 4 ]]; then
+	ads_asset_numeric_ipv4=1
+fi
+
+if [[ "${#ads_asset_host}" -gt 253 ]]; then
+	ads_asset_origin_invalid=1
+fi
+for ads_asset_host_label in "${ads_asset_host_labels[@]}"; do
+	if [[ "${#ads_asset_host_label}" -lt 1 || "${#ads_asset_host_label}" -gt 63 ]]; then
+		ads_asset_origin_invalid=1
+	fi
+	if [[ "${ads_asset_numeric_ipv4}" -eq 1 && ! "${ads_asset_host_label}" =~ ^([0-9]+|0[xX][0-9A-Fa-f]+)$ ]]; then
+		ads_asset_numeric_ipv4=0
+	fi
+done
+if [[ "${ads_asset_numeric_ipv4}" -eq 1 ]]; then
+	ads_asset_origin_invalid=1
+fi
+
+if [[ ! "${ads_asset_origin}" =~ ^https://([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(:[1-9][0-9]{0,4})?/?$ ]]; then
+	ads_asset_origin_invalid=1
+fi
+if [[ "${ads_asset_port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#${ads_asset_port} > 65535 )); then
+	ads_asset_origin_invalid=1
+fi
+case ".${ads_asset_host_normalized}." in
+	*.localhost.*|*.local.|*.internal.|*.example.|*.invalid.|*.test.|*.arpa.|*.onion.|*.alt.|*.example.com.|*.example.net.|*.example.org.|*.placeholder.*|*.change-me.*|*.changeme.*|*.todo.*|*.tbd.*)
+		ads_asset_origin_invalid=1
+		;;
+esac
+if [[ "${ads_asset_origin_invalid}" -ne 0 ]]; then
+	printf 'invalid public HTTPS origin: %s\n' EASYSUBWAY_ADS_ASSET_ORIGIN >&2
+	exit 1
+fi
+
+if has_key EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER; then
+	printf 'legacy deployment env is forbidden: %s\n' EASYSUBWAY_REPORT_RECEIPT_TOKEN_PEPPER >&2
+	exit 1
+fi
+require_nonempty EASYSUBWAY_REPORT_RECEIPT_PEPPER
+require_nonempty EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY
+receipt_pepper="$(trim_whitespace "$(value EASYSUBWAY_REPORT_RECEIPT_PEPPER)")"
+intent_key="$(trim_whitespace "$(value EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY)")"
+if [[ ${#receipt_pepper} -lt 32 || "${receipt_pepper}" == *local* || "${receipt_pepper}" == *test* ]]; then
+	printf 'invalid production report secret: %s\n' EASYSUBWAY_REPORT_RECEIPT_PEPPER >&2
+	exit 1
+fi
+if [[ ${#intent_key} -lt 32 || "${intent_key}" == *local* || "${intent_key}" == *test* ]]; then
+	printf 'invalid production report secret: %s\n' EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY >&2
+	exit 1
+fi
+if [[ "${receipt_pepper}" == "${intent_key}" ]]; then
+	printf 'canonical report secrets는 서로 달라야 합니다: %s, %s\n' \
+		EASYSUBWAY_REPORT_RECEIPT_PEPPER EASYSUBWAY_REPORT_UPLOAD_INTENT_SIGNING_KEY >&2
+	exit 1
+fi
+
+if [[ "$(value EASYSUBWAY_DATASOURCE_URL)" != jdbc:postgresql://postgres:5432/* ]]; then
+	printf 'datasource must target postgres:5432 inside Compose\n' >&2
+	exit 1
+fi
+if [[ "$(value EASYSUBWAY_DATASOURCE_USERNAME)" != "$(value EASYSUBWAY_POSTGRES_USER)" ]]; then
+	printf 'datasource username must match Compose postgres user\n' >&2
+	exit 1
+fi
+if [[ "$(value EASYSUBWAY_DATASOURCE_PASSWORD)" != "$(value EASYSUBWAY_POSTGRES_PASSWORD)" ]]; then
+	printf 'datasource password must match Compose postgres password\n' >&2
+	exit 1
+fi
+# Sonar S5332 Won't fix: 이 값은 Compose 내부 네트워크의 object-storage 컨테이너(TLS 미구성 MinIO)를 가리키는 고정 서비스 이름이며
+# 호스트 밖으로 노출되지 않는다. 외부 공개 URL은 아래 public_upload_url 검증이 HTTPS만 허용한다.
+if [[ "$(value EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT)" != "http://object-storage:9000" ]]; then
+	printf 'report object storage internal endpoint must be http://object-storage:9000\n' >&2
+	exit 1
+fi
+
+public_upload_url="$(value EASYSUBWAY_REPORT_UPLOAD_PUBLIC_BASE_URL)"
+if [[ ! "${public_upload_url}" =~ ^https://[^/@\?#:]+(:[0-9]+)?/?$ ]]; then
+	printf 'public upload URL must be an HTTPS origin\n' >&2
+	exit 1
+fi
+public_upload_url_normalized="$(printf '%s' "${public_upload_url}" | tr '[:upper:]' '[:lower:]')"
+case "${public_upload_url_normalized}" in
+	*localhost*|*127.*|*::1*|*object-storage*) printf 'public upload URL must not be internal\n' >&2; exit 1 ;;
+esac
+
+trusted_proxy_cidrs="$(value EASYSUBWAY_TRUSTED_PROXY_CIDRS)"
+if [[ "${trusted_proxy_cidrs}" != "172.16.0.0/12" ]]; then
+	printf 'trusted proxy CIDRs must equal the Docker ingress boundary\n' >&2
+	exit 1
+fi
+
+require_port EASYSUBWAY_POSTGRES_PORT
+require_port EASYSUBWAY_OBJECT_STORAGE_PORT
+require_port EASYSUBWAY_OBJECT_STORAGE_CONSOLE_PORT
+require_port EASYSUBWAY_BACKEND_PORT
+require_port EASYSUBWAY_PROMETHEUS_PORT
+require_port EASYSUBWAY_ALERTMANAGER_PORT
+require_bool EASYSUBWAY_ALERT_EMAIL_ENABLED
+require_bool EASYSUBWAY_ALERT_SMTP_REQUIRE_TLS
+
+if [[ "$(value EASYSUBWAY_POSTGRES_PORT)" == "5432" ]]; then
+	printf 'postgres host port 5432 is reserved on the production host\n' >&2
+	exit 1
+fi
+
+if is_truthy EASYSUBWAY_ALERT_EMAIL_ENABLED; then
+	require_nonempty EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL
+	require_nonempty EASYSUBWAY_ALERT_EMAIL_TO
+	require_nonempty EASYSUBWAY_ALERT_EMAIL_FROM
+	require_nonempty EASYSUBWAY_ALERT_SMTP_SMARTHOST
+	require_nonempty EASYSUBWAY_ALERT_SMTP_USERNAME
+	require_nonempty EASYSUBWAY_ALERT_SMTP_PASSWORD
+	alertmanager_url="$(value EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL)"
+	if [[ ! "${alertmanager_url}" =~ ^https://(\[[0-9A-Fa-f:.]+\]|[^/@\?#:]+)(:[0-9]+)?(/.*)?$ ]]; then
+		printf 'alertmanager external URL must be an HTTPS URL\n' >&2
+		exit 1
+	fi
+	alertmanager_url_normalized="$(printf '%s' "${alertmanager_url}" | tr '[:upper:]' '[:lower:]')"
+	case "${alertmanager_url_normalized}" in
+		http://*|https://localhost*|https://127.*|https://\[::1\]*|https://alertmanager|https://alertmanager/*|https://alertmanager:*|https://prometheus|https://prometheus/*|https://prometheus:*) printf 'alertmanager external URL must not be internal\n' >&2; exit 1 ;;
+		*) ;;
+	esac
+fi
+
+mkdir -p "${output_dir}"
+chmod 700 "${output_dir}"
+compose_tmp="$(mktemp "${output_dir}/compose.env.XXXXXX")"
+backend_tmp="$(mktemp "${output_dir}/backend.env.XXXXXX")"
+chmod 600 "${compose_tmp}" "${backend_tmp}"
+
+write_output() {
+	local path="$1"
+	shift
+	: > "${path}"
+	local name line_var
+	for name in "$@"; do
+		if has_key "${name}"; then
+			line_var="ENV_LINE_${name}"
+			printf '%s\n' "${!line_var}" >> "${path}"
+		fi
+	done
+}
+
+write_output "${compose_tmp}" ${compose_keys[@]+"${compose_keys[@]}"}
+write_output "${backend_tmp}" ${backend_keys[@]+"${backend_keys[@]}"}
+
+mv "${compose_tmp}" "${output_dir}/compose.env"
+mv "${backend_tmp}" "${output_dir}/backend.env"
+chmod 600 "${output_dir}/compose.env" "${output_dir}/backend.env"
+printf '%s\n' "${output_dir}"

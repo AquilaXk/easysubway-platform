@@ -1,0 +1,325 @@
+name: Platform CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    name: Platform CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Guard tracked agent and AI hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          if forbidden_paths="$(git ls-files | grep -E '(^|/)(AGENTS|CLAUDE|CLAUDE\.local|GEMINI|CURSOR|COPILOT|TODO)\.md$|(^|/)\.(agents|claude|codex|cursor|gemini|aider|windsurf|ai|playwright-mcp)(/|$)|(^|/)\.coderabbit\.ya?ml$|(^|/)\.github/dependabot\.ya?ml$')"; then
+            printf 'forbidden agent/repo-hygiene files are tracked:\n%s\n' "${forbidden_paths}" >&2
+            exit 1
+          else
+            ls_rc=$?
+            if [[ "${ls_rc}" -ne 1 ]]; then
+              printf 'git ls-files hygiene check failed with status %s\n' "${ls_rc}" >&2
+              exit "${ls_rc}"
+            fi
+          fi
+          if ai_matches="$(git grep -inE '(claude|codex|coderabbit|copilot|anthropic|co-authored-by|chatgpt|gemini)' -- ':!.gitignore' ':!.github/workflows/ci.yml')"; then
+            printf 'forbidden AI trace found in tracked files:\n%s\n' "${ai_matches}" >&2
+            exit 1
+          else
+            grep_rc=$?
+            if [[ "${grep_rc}" -ne 1 ]]; then
+              printf 'git grep hygiene check failed with status %s\n' "${grep_rc}" >&2
+              exit "${grep_rc}"
+            fi
+          fi
+
+      - name: Lint workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 워크플로를 실제 YAML 파서로 읽는 유일한 게이트다. run 블록의 block scalar가
+          # 깨져 스크립트 일부가 YAML 구조로 새어 나가는 파손은 텍스트 기반 계약 테스트로는
+          # 잡히지 않는다. 이미지는 다른 pin과 같은 규칙으로 digest 고정한다.
+          docker run --rm -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+
+      - name: Check documentation fragment preflight sync
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ -n "${BASE_REF}" ]]; then
+            node tools/ci/check-documentation-fragment-sync.mjs --base "origin/${BASE_REF}"
+          else
+            node tools/ci/check-documentation-fragment-sync.mjs --check-all
+          fi
+
+      - name: Test platform contracts
+        run: |
+          node --test tools/ci/check-documentation-fragment-sync.test.mjs
+          node --test tools/ci/public-sensitivity-owner-receipt-caller.test.mjs
+          node --test tools/platform/no-mutable-contract-source.test.mjs
+          node --test tools/platform/prepare-deployment-env.test.mjs
+          node --test tools/platform/docker-compose-security.test.mjs
+          node --test tools/platform/validate-deployment-input.test.mjs
+          node --test tools/platform/verify-production-deploy-effective-admission-receipt.test.mjs
+          node --test tools/platform/data-volume-backup-contract.test.mjs
+          node --test tools/platform/map-catalog-oci-contract.test.mjs
+          node --test tools/platform/validate-terraform-root-inventory.test.mjs
+          node --test tools/platform/terraform-static-analysis.test.mjs
+          node tools/platform/terraform-static-analysis.mjs validate-policy
+          node --test tools/platform/journey-release-contract.test.mjs
+          node --test tools/platform/server-route-bundle-object-acquisition-contract.test.mjs
+          node --test tools/platform/acquire-server-route-bundle.test.mjs
+          node --test tools/platform/admit-journey-release-candidate.test.mjs
+          node --test tools/platform/observe-journey-candidate-readiness.test.mjs
+          node --test tools/platform/activate-journey-backend.test.mjs
+          node --test tools/platform/run-journey-candidate-canary.test.mjs
+          node --test tools/platform/start-journey-compose-candidates.test.mjs
+          node --test tools/platform/run-fixed-host-journey-activation.test.mjs
+          node --test tools/platform/assemble-platform-deployment-input-envelope.test.mjs
+          node --test tools/platform/platform-journey-release-lifecycle-contract.test.mjs
+          node --test tools/platform/bind-journey-release-candidate-v2.test.mjs
+          node --test tools/platform/prepare-source-free-fixed-host-deployment.test.mjs
+          node --test tools/platform/source-free-k3s-deployment.test.mjs
+          node --test tools/platform/production-db-backend-image-contract.test.mjs
+          node --test tools/platform/prometheus-k3s-backend-target.test.mjs
+          node --test tools/platform/origin-certificate-expiry-probe.test.mjs
+          node --test tools/platform/candidate-token-content-digest.test.mjs
+          node --test tools/platform/inject-datapack-callback-secrets.test.mjs
+          node --test tools/platform/inject-journey-runtime-settings.test.mjs
+          node --test tools/ci/source-free-journey-deploy-workflow.test.mjs
+          node --test tools/platform/stage-journey-release-tuple.test.mjs
+          node --test tools/platform/read-staged-journey-release-tuple.test.mjs
+          node --test tools/platform/single-node-k3s-foundation.test.mjs
+          node --test tools/ops/post-deploy-smoke.test.mjs
+          node --test tools/ops/trigger-journey-deploy.test.mjs
+          node --test tools/platform/nginx-host-rate-limit.test.mjs
+          node --test tools/ops/data-workflow-scheduler.test.mjs
+          node --test tools/platform/data-workflow-scheduler-contract.test.mjs
+          node --test tools/platform/deploy-data-workflow-scheduler.test.mjs
+          node --test tools/platform/deploy-lib.test.mjs
+          node --test tools/ops/source-reachability-probe.test.mjs
+          node --test tools/lib/read-regular-file.test.mjs
+          node --test tools/ops/facility-report-photo-restore-check.test.mjs
+          node --test tools/platform/source-reachability-probe-contract.test.mjs
+          node --test tools/platform/deploy-source-reachability-probe.test.mjs
+          node --test tools/platform/deploy-observability-config.test.mjs
+          node --test tools/platform/deploy-observability-config-series.test.mjs
+          node --test tools/platform/deploy-observability-config-recovery.test.mjs
+          node --test tools/platform/observability-network.test.mjs
+          node --test tools/platform/shared-deploy-lock.test.mjs
+          node --test tools/platform/prune-k3s-candidate-configs.test.mjs
+          node --test tools/platform/prune-host-backend-images.test.mjs
+          node --test tools/ci/observability-config-deploy-workflow.test.mjs
+          node --test tools/ci/origin-certificate-renew-workflow.test.mjs
+          node --test tools/ci/production-deploy-actor-gates.test.mjs
+          node --test tools/ci/guard-anti-cheat.test.mjs
+          node --test tools/ops/data-source-raw-archive.test.mjs
+          node --test tools/ops/facility-report-photo-backup.test.mjs
+          node --test tools/ops/postgres-backup.test.mjs
+          node --test tools/ops/postgres-restore-rehearsal.test.mjs
+          node --test tools/ops/prune-sensitive-backups.test.mjs
+          node --test tools/platform/acquire-platform-contract-bundle.test.mjs
+          node --test tools/platform/finops-quota-retention-budget.test.mjs
+          node --test tools/platform/service-slo-error-budget.test.mjs
+          node --test tools/platform/verify-clean-room-host-bootstrap.test.mjs
+
+      - name: Validate Compose configurations
+        env:
+          EASYSUBWAY_BACKEND_ENV_FILE: /dev/null
+          EASYSUBWAY_BACKEND_IMAGE: ghcr.io/aquilaxk/easysubway-backend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        run: |
+          docker compose -f infra/docker-compose.yml config --quiet
+          docker compose -f infra/docker-compose.local-deps.yml config --quiet
+
+      - name: Validate Prometheus alert rules
+        run: |
+          docker run --rm --entrypoint promtool -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo prom/prometheus:v3.14.0 test rules infra/prometheus/*.test.yml
+
+      - name: Validate Blackbox exporter configuration
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}/infra/blackbox:/config:ro" prom/blackbox-exporter:v0.29.1 --config.file=/config/origin-certificate.yml --config.check
+
+      - name: Validate Nginx configuration
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}/infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:alpine nginx -t
+
+      - name: Smoke test Nginx rate limiting
+        run: |
+          bash tools/platform/nginx-rate-limit-smoke.sh
+
+      - name: Check shell syntax
+        run: |
+          bash -n tools/deploy/deploy-backend.sh
+          bash -n tools/deploy/prepare-deployment-env.sh
+          bash -n tools/platform/bootstrap-single-node-k3s.sh
+          bash -n tools/platform/judge-origin-certificate.sh
+          bash -n tools/platform/nginx-rate-limit-smoke.sh
+          bash -n tools/ops/backup-path-guard.sh
+          bash -n tools/ops/data-source-raw-archive.sh
+          bash -n tools/ops/facility-report-photo-backup.sh
+          bash -n tools/ops/postgres-backup.sh
+          bash -n tools/ops/postgres-restore-rehearsal.sh
+          bash -n tools/repo/pre-commit-check.sh
+
+      - name: Check Python syntax
+        run: |
+          PYTHONPYCACHEPREFIX="${RUNNER_TEMP:-/tmp}/pycache" python3 -m py_compile tools/platform/read-staged-journey-release-tuple.py tools/platform/secure-publish-journey-release-tuple.py
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.14.6
+
+      - name: Validate Terraform roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform fmt -check -recursive infra/terraform
+          tf_data_dir="${RUNNER_TEMP}/terraform-data/oci-always-free-a1-flex"
+          rm -rf "${tf_data_dir}"
+          mkdir -p "${tf_data_dir}"
+          export TF_DATA_DIR="${tf_data_dir}"
+          terraform -chdir=infra/terraform/oci/always-free-a1-flex init -backend=false -input=false -lockfile=readonly -no-color
+          terraform -chdir=infra/terraform/oci/always-free-a1-flex validate -no-color
+          git diff --exit-code -- infra/terraform/oci/always-free-a1-flex/.terraform.lock.hcl
+          backup_tf_data_dir="${RUNNER_TEMP}/terraform-data/data-volume-backup-control"
+          rm -rf "${backup_tf_data_dir}"
+          mkdir -p "${backup_tf_data_dir}"
+          export TF_DATA_DIR="${backup_tf_data_dir}"
+          terraform -chdir=infra/terraform/oci/data-volume-backup-control init -backend=false -input=false -lockfile=readonly -no-color
+          terraform -chdir=infra/terraform/oci/data-volume-backup-control validate -no-color
+          git diff --exit-code -- infra/terraform/oci/data-volume-backup-control/.terraform.lock.hcl
+
+      - name: Pull pinned Terraform static-analysis scanner images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f
+          docker pull bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144
+
+      - name: Scan Terraform roots with pinned TFLint
+        id: tflint
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/terraform-static-analysis"
+          mkdir -p "${report_dir}"
+          set +e
+          docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+            -e TFLINT_DISABLE_VERSION_CHECK=1 \
+            ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f --version > "${report_dir}/tflint-version.stdout" 2> "${report_dir}/tflint-version.stderr"
+          version_exit=$?
+          set -e
+          node tools/platform/terraform-static-analysis.mjs record-tool-check TFLINT "${version_exit}"
+          while IFS=$'\t' read -r root_id root_path; do
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+              -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w /repo \
+              -e TFLINT_DISABLE_VERSION_CHECK=1 \
+              ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f \
+              --config=/repo/.tflint.hcl --chdir="${root_path}" --call-module-type=local --format=sarif --no-color \
+              > "${report_dir}/tflint-${root_id}.sarif"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-scan TFLINT "${root_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-roots)
+          while IFS= read -r fixture_id; do
+            fixture_name="${fixture_id}.tf.fixture"
+            fixture_dir="${report_dir}/fixtures/${fixture_name}"
+            mkdir -p "${fixture_dir}"
+            cp "tools/platform/fixtures/terraform-static-analysis/${fixture_name}" "${fixture_dir}/main.tf"
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/reports/fixtures/${fixture_name}" \
+              -e TFLINT_DISABLE_VERSION_CHECK=1 \
+              ghcr.io/terraform-linters/tflint@sha256:1c595f42d794c32c45a6ea8b58655fd66433d4ca3b1bc631c574a48d120bd19f \
+              --config=/repo/.tflint.hcl --chdir=. --call-module-type=local --format=sarif --no-color > "${report_dir}/fixture-${fixture_id}.sarif"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-fixture TFLINT "${fixture_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-fixtures TFLINT)
+
+      - name: Scan Terraform roots with pinned Checkov
+        id: checkov
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/terraform-static-analysis"
+          mkdir -p "${report_dir}"
+          set +e
+          docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+            bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144 --version > "${report_dir}/checkov-version.stdout" 2> "${report_dir}/checkov-version.stderr"
+          version_exit=$?
+          set -e
+          node tools/platform/terraform-static-analysis.mjs record-tool-check CHECKOV "${version_exit}"
+          while IFS=$'\t' read -r root_id root_path; do
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp \
+              -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/repo/${root_path}" \
+              bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144 \
+              --framework terraform --directory . --download-external-modules false --skip-download \
+              -o sarif -o json --output-file-path "/reports/checkov-${root_id}.sarif,/reports/checkov-${root_id}.json"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-scan CHECKOV "${root_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-roots)
+          while IFS= read -r fixture_id; do
+            fixture_name="${fixture_id}.tf.fixture"
+            fixture_dir="${report_dir}/fixtures/${fixture_name}"
+            mkdir -p "${fixture_dir}"
+            cp "tools/platform/fixtures/terraform-static-analysis/${fixture_name}" "${fixture_dir}/main.tf"
+            set +e
+            docker run --pull=never --rm --network none --read-only --tmpfs /tmp -v "${GITHUB_WORKSPACE}:/repo:ro" -v "${report_dir}:/reports:rw" -w "/reports/fixtures/${fixture_name}" \
+              bridgecrew/checkov@sha256:12a62da01af22654883aee3b9da18ba4297f123f5122663bf65235db37934144 \
+              --framework terraform --directory . --download-external-modules false --skip-download \
+              -o sarif -o json --output-file-path "/reports/fixture-${fixture_id}.sarif,/reports/fixture-${fixture_id}.json"
+            scanner_exit=$?
+            set -e
+            node tools/platform/terraform-static-analysis.mjs record-fixture CHECKOV "${fixture_id}" "${scanner_exit}"
+          done < <(node tools/platform/terraform-static-analysis.mjs list-fixtures CHECKOV)
+
+      - name: Normalize current Terraform scanner reports
+        if: always()
+        shell: bash
+        run: |
+          node tools/platform/terraform-static-analysis.mjs analyze
+          cat "${RUNNER_TEMP}/terraform-static-analysis/terraform-static-analysis-summary.md" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Enforce Terraform static analysis verdict
+        if: always()
+        env:
+          TFLINT_OUTCOME: ${{ steps.tflint.outcome }}
+          CHECKOV_OUTCOME: ${{ steps.checkov.outcome }}
+        run: node tools/platform/terraform-static-analysis.mjs enforce
+
+      - name: Cleanup verified Terraform static analysis internals
+        if: success()
+        run: node tools/platform/terraform-static-analysis.mjs cleanup
+
+      - name: Upload Terraform static analysis report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: terraform-static-analysis-${{ github.sha }}
+          path: ${{ runner.temp }}/terraform-static-analysis
+          if-no-files-found: error
+          retention-days: 14

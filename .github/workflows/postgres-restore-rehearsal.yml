@@ -1,0 +1,41 @@
+name: PostgreSQL Restore Rehearsal (Disaster Recovery)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_file:
+        description: "Explicit path to backup file to rehearse (optional, defaults to latest in backup directory)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    name: Disaster Recovery Rehearsal
+    runs-on:
+      - self-hosted
+      - easysubway-production
+    timeout-minutes: 15
+    concurrency:
+      group: postgres-restore-rehearsal-production
+      cancel-in-progress: false
+    environment:
+      name: production
+    env:
+      DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rehearse database backup restoration
+        shell: bash
+        env:
+          BACKUP_FILE_INPUT: ${{ github.event.inputs.backup_file }}
+        run: |
+          set -euo pipefail
+          bash tools/ops/postgres-restore-rehearsal.sh "${BACKUP_FILE_INPUT:-}"

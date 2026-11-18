@@ -1,0 +1,9 @@
+resource "oci_objectstorage_bucket" "public" {
+  compartment_id = "ocid1.compartment.oc1..example"
+  name           = "fixture"
+  namespace      = "fixture"
+  access_type    = "ObjectReadWithoutList"
+  object_events_enabled = true
+  kms_key_id             = "ocid1.key.oc1..example"
+  versioning             = "Enabled"
+}

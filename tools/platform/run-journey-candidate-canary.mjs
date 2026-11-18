@@ -1,0 +1,603 @@
+#!/usr/bin/env node
+
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import {
+  CandidateAdmissionError,
+  openStableCandidateAdmissionInput,
+} from "./admit-journey-release-candidate.mjs";
+import {
+  CandidateBindingError,
+  validateJourneyReleaseTupleBytes,
+} from "./bind-journey-release-candidate.mjs";
+
+const MAX_RESPONSE_BYTES = 64 * 1024;
+const REQUEST_TIMEOUT_MS = 5000;
+const CANARY_PATH = "/internal/v1/journey/canary";
+const LOOPBACK_HOSTS = Object.freeze(["127.0.0.1", "localhost", "[::1]"]);
+const SHA256 = /^[a-f0-9]{64}$/;
+const ULID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
+const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
+const MOBILITY_PROFILES = new Set(["STANDARD", "SLOW", "NO_STAIRS", "STEP_FREE"]);
+const CONSTRAINT_MODES = new Set(["NONE", "REQUIRE_STEP_FREE"]);
+const isNonemptyString = (value) => typeof value === "string" && value.length > 0;
+const matches = (value, pattern) => typeof value === "string" && pattern.test(value);
+const positiveSafeInteger = (value) => Number.isSafeInteger(value) && value > 0;
+const RESPONSE_FIELDS = Object.freeze([
+  "schemaVersion", "artifactKind", "canaryRequestIdentity", "requestId",
+  "candidateManifestSha256", "candidateGeneration", "bundleId",
+  "bundleReleaseSequence", "queryId", "capturedAt", "passed",
+  "legacyGraphSuccessCount", "localRouteInvocationCount",
+  "staleJourneyServedCount", "alternateEndpointSuccessCount",
+  "evidenceSha256",
+]);
+const ZERO_COUNTER_FIELDS = Object.freeze([
+  "legacyGraphSuccessCount", "localRouteInvocationCount",
+  "staleJourneyServedCount", "alternateEndpointSuccessCount",
+]);
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+const CLI_OPTIONS = new Map([
+  ["--tuple", "tuplePath"],
+  ["--base-url", "baseUrl"],
+  ["--candidate-generation", "candidateGeneration"],
+  ["--canary-request-identity", "canaryRequestIdentity"],
+  ["--request-id", "requestId"],
+  ["--origin-station-id", "originStationId"],
+  ["--destination-station-id", "destinationStationId"],
+  ["--mobility-profile", "mobilityProfile"],
+  ["--constraint-mode", "constraintMode"],
+  ["--max-transfers", "maxTransfers"],
+  ["--alternative-count", "alternativeCount"],
+]);
+const ERROR_MESSAGES = Object.freeze({
+  JOURNEY_CANARY_USAGE: "expected exact Journey candidate canary arguments",
+  JOURNEY_CANARY_INPUT: "Journey release tuple validation failed",
+  JOURNEY_CANARY_SECRET: "Journey canary secret validation failed",
+  JOURNEY_CANARY_NETWORK: "Journey canary request failed",
+  JOURNEY_CANARY_HTTP: "Journey canary HTTP contract failed",
+  JOURNEY_CANARY_RESPONSE: "Journey canary response validation failed",
+  JOURNEY_CANARY_IDENTITY: "Journey canary identity validation failed",
+  JOURNEY_CANARY_TIMESTAMP: "Journey canary timestamp validation failed",
+  JOURNEY_CANARY_EVIDENCE: "Journey canary evidence validation failed",
+  JOURNEY_CANARY_INPUT_UNSTABLE: "Journey canary input changed during request",
+});
+
+// backend가 UNAVAILABLE 응답에 추가하는 실패 사유(additive). 닫힌 집합만 신뢰하고, 없거나 모르는 값은 사유 없음으로 둔다.
+const FAILURE_REASONS = Object.freeze([
+  "SNAPSHOT_ERROR", "WINDOW_MISMATCH", "PLAN_ERROR", "NO_CANDIDATES",
+]);
+const FAILURE_BODY_ARTIFACT_KIND = "journey-v3-candidate-canary-failure";
+const DETAIL_FIELDS = Object.freeze(["probeId", "regionId", "httpStatus", "failureReason"]);
+
+/**
+ * canary 대표 출발 시각은 backend가 정한다(운행일 10:00 KST). 어댑터는 시각을 보내지 않으므로
+ * 실행 시각이 요청에 영향을 주지 않는다. 실패하면 실패한 probe(probeId, regionId)와 backend가 보고한
+ * 사유(failureReason)를 오류 필드와 메시지에 남긴다. 토큰·응답 본문은 메시지에 넣지 않는다.
+ */
+export class JourneyCandidateCanaryAdapterError extends Error {
+  constructor(code, exitCode = 1, options = undefined, details = {}) {
+    super(`${ERROR_MESSAGES[code] ?? "Journey candidate canary failed"}${formatDetails(details)}`, options);
+    this.name = "JourneyCandidateCanaryAdapterError";
+    this.code = code;
+    this.exitCode = exitCode;
+    for (const field of DETAIL_FIELDS) {
+      if (details[field] !== undefined) this[field] = details[field];
+    }
+  }
+}
+
+function formatDetails(details) {
+  const entries = DETAIL_FIELDS.filter((field) => details[field] !== undefined)
+    .map((field) => `${field}=${details[field]}`);
+  return entries.length === 0 ? "" : ` (${entries.join(" ")})`;
+}
+
+function withProbe(error, probe) {
+  if (!(error instanceof JourneyCandidateCanaryAdapterError) || error.probeId !== undefined) return error;
+  const details = { probeId: probe.requestId };
+  if (typeof probe.regionId === "string") details.regionId = probe.regionId;
+  for (const field of ["httpStatus", "failureReason"]) {
+    if (error[field] !== undefined) details[field] = error[field];
+  }
+  return new JourneyCandidateCanaryAdapterError(
+    error.code, error.exitCode, error.cause === undefined ? undefined : { cause: error.cause }, details);
+}
+
+export async function runJourneyCandidateCanary({
+  tuplePath,
+  baseUrl,
+  candidateGeneration,
+  canaryRequestIdentity,
+  requestId,
+  originStationId,
+  destinationStationId,
+  mobilityProfile,
+  constraintMode,
+  maxTransfers,
+  alternativeCount,
+  probes,
+  serviceToken,
+  fetchImpl = fetch,
+  now = () => new Date(),
+}) {
+  validateInvocation({
+    tuplePath,
+    baseUrl,
+    candidateGeneration,
+    canaryRequestIdentity,
+    requestId,
+    originStationId,
+    destinationStationId,
+    mobilityProfile,
+    constraintMode,
+    maxTransfers,
+    alternativeCount,
+    probes,
+    serviceToken,
+    fetchImpl,
+    now,
+  });
+  const input = await openTupleInput(tuplePath);
+  try {
+    const tuple = validateTuple(input.bytes);
+    const probeList = Array.isArray(probes) && probes.length > 0
+      ? probes
+      : [{ requestId, originStationId, destinationStationId, mobilityProfile, constraintMode, maxTransfers, alternativeCount }];
+
+    const results = [];
+    for (const probe of probeList) {
+      const command = Object.freeze({
+        schemaVersion: 1,
+        artifactKind: "journey-v3-candidate-canary-command",
+        canaryRequestIdentity,
+        candidateManifestSha256: tuple.serverRouteBundleDigest.slice(7),
+        candidateGeneration,
+        requestId: probe.requestId,
+        originStationId: probe.originStationId,
+        destinationStationId: probe.destinationStationId,
+        mobilityProfile: probe.mobilityProfile,
+        constraintMode: probe.constraintMode,
+        maxTransfers: probe.maxTransfers,
+        alternativeCount: probe.alternativeCount,
+      });
+      try {
+        results.push(await requestCanary({
+          baseUrl,
+          command,
+          serviceToken,
+          fetchImpl,
+          now,
+        }));
+      } catch (error) {
+        throw withProbe(error, probe);
+      }
+    }
+    await verifyTupleInput(input);
+    const combinedDigest = probeList.length === 1
+      ? `sha256:${results[0].evidenceSha256}`
+      : `sha256:${sha256(results.map((r) => r.evidenceSha256).join(","))}`;
+    return {
+      schemaVersion: "PLATFORM_JOURNEY_CANDIDATE_CANARY_V1",
+      artifactKind: "journey-candidate-canary",
+      tupleSha256: tuple.tupleSha256,
+      passed: true,
+      evidenceDigest: combinedDigest,
+      legacyGraphSuccessCount: 0,
+      localRouteInvocationCount: 0,
+      staleJourneyServedCount: 0,
+      alternateEndpointSuccessCount: 0,
+    };
+  } finally {
+    await input.close();
+  }
+}
+
+export function formatJourneyCandidateCanary(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function validateInvocation(values) {
+  if (
+    !isNonemptyString(values.tuplePath) ||
+    !validBaseUrl(values.baseUrl) ||
+    !positiveSafeInteger(values.candidateGeneration) ||
+    !validRawText(values.canaryRequestIdentity, 512) ||
+    typeof values.fetchImpl !== "function" ||
+    typeof values.now !== "function"
+  ) {
+    throw failure("JOURNEY_CANARY_USAGE", 2);
+  }
+  if (!validServiceToken(values.serviceToken)) {
+    throw failure("JOURNEY_CANARY_SECRET", 2);
+  }
+
+  if (Array.isArray(values.probes)) {
+    if (values.probes.length === 0) {
+      throw failure("JOURNEY_CANARY_USAGE", 2);
+    }
+    for (const probe of values.probes) {
+      if (
+        !matches(probe.requestId, ULID) ||
+        !validRawText(probe.originStationId, 255) ||
+        !validRawText(probe.destinationStationId, 255) ||
+        probe.originStationId === probe.destinationStationId ||
+        !MOBILITY_PROFILES.has(probe.mobilityProfile) ||
+        !CONSTRAINT_MODES.has(probe.constraintMode) ||
+        (probe.mobilityProfile === "NO_STAIRS" && probe.constraintMode === "NONE") ||
+        !Number.isSafeInteger(probe.maxTransfers) ||
+        probe.maxTransfers < 0 || probe.maxTransfers > 3 ||
+        !Number.isSafeInteger(probe.alternativeCount) ||
+        probe.alternativeCount < 1 || probe.alternativeCount > 3
+      ) {
+        throw failure("JOURNEY_CANARY_USAGE", 2);
+      }
+    }
+  } else {
+    if (
+      !matches(values.requestId, ULID) ||
+      !validRawText(values.originStationId, 255) ||
+      !validRawText(values.destinationStationId, 255) ||
+      values.originStationId === values.destinationStationId ||
+      !MOBILITY_PROFILES.has(values.mobilityProfile) ||
+      !CONSTRAINT_MODES.has(values.constraintMode) ||
+      (values.mobilityProfile === "NO_STAIRS" && values.constraintMode === "NONE") ||
+      !Number.isSafeInteger(values.maxTransfers) ||
+      values.maxTransfers < 0 || values.maxTransfers > 3 ||
+      !Number.isSafeInteger(values.alternativeCount) ||
+      values.alternativeCount < 1 || values.alternativeCount > 3
+    ) {
+      throw failure("JOURNEY_CANARY_USAGE", 2);
+    }
+  }
+}
+
+function validServiceToken(value) {
+  return typeof value === "string" && value.length >= 32 && value.length <= 512 &&
+    [...value].every((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint >= 0x21 && codePoint < 0x7f;
+    });
+}
+
+function validBaseUrl(value) {
+  if (!isNonemptyString(value)) return false;
+  try {
+    const url = new URL(value);
+    return !url.username && !url.password && !url.search && !url.hash &&
+      (url.pathname === "" || url.pathname === "/") &&
+      ["http:", "https:"].includes(url.protocol) &&
+      LOOPBACK_HOSTS.includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validRawText(value, maxLength) {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 || value.length > maxLength ||
+    value !== value.trim() || value.trim().length === 0 ||
+    !hasWellFormedUtf16(value)
+  ) {
+    return false;
+  }
+  return [...value].every((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint >= 0x20 && codePoint !== 0x7f;
+  });
+}
+
+function hasWellFormedUtf16(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      const next = value.charCodeAt(++index);
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) return false;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function openTupleInput(path) {
+  try {
+    return await openStableCandidateAdmissionInput(path);
+  } catch (error) {
+    throw translateInputError(error);
+  }
+}
+
+async function verifyTupleInput(input) {
+  try {
+    await input.verify();
+  } catch (error) {
+    throw translateInputError(error);
+  }
+}
+
+function translateInputError(error) {
+  if (!(error instanceof CandidateAdmissionError)) return error;
+  const code = error.code === "CANDIDATE_ADMISSION_INPUT_UNSTABLE"
+    ? "JOURNEY_CANARY_INPUT_UNSTABLE"
+    : "JOURNEY_CANARY_INPUT";
+  return failure(code, error.exitCode);
+}
+
+function validateTuple(bytes) {
+  try {
+    return validateJourneyReleaseTupleBytes(bytes);
+  } catch (error) {
+    if (error instanceof CandidateBindingError) {
+      throw failure("JOURNEY_CANARY_INPUT", 2);
+    }
+    throw error;
+  }
+}
+
+async function requestCanary({ baseUrl, command, serviceToken, fetchImpl, now }) {
+  const url = new URL(CANARY_PATH, `${baseUrl}/`).href;
+  const requestStartedAt = readClock(now);
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(command),
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (networkError) {
+    throw failure("JOURNEY_CANARY_NETWORK", 1, { cause: networkError });
+  }
+  await requireHttpContract(response);
+  const bytes = await readResponse(response);
+  const receivedAt = readClock(now);
+  const result = parseJson(bytes);
+  validateResult(result, bytes, command, requestStartedAt, receivedAt);
+  return result;
+}
+
+function readClock(now) {
+  const value = now();
+  if (value instanceof Date && Number.isFinite(value.valueOf())) return value;
+  throw failure("JOURNEY_CANARY_USAGE", 2);
+}
+
+async function requireHttpContract(response) {
+  const contentType = response?.headers?.get("content-type")?.toLowerCase() ?? "";
+  const mediaType = contentType.split(";", 1)[0].trim();
+  const cacheDirectives = new Set(
+    (response?.headers?.get("cache-control") ?? "")
+      .toLowerCase()
+      .split(",")
+      .map((value) => value.trim()),
+  );
+  if (
+    response?.status !== 200 ||
+    mediaType !== "application/json" ||
+    !cacheDirectives.has("no-store")
+  ) {
+    let body = "";
+    try {
+      const bytes = await readBoundedResponse(response);
+      body = bytes.toString("utf8");
+    } catch {
+      // ignore body read error on failure diagnostic
+    }
+    // 응답 본문은 로그 안전을 위해 원문을 남기지 않는다. 상태, 길이, 닫힌 사유만 기록한다.
+    const httpStatus = Number.isSafeInteger(response?.status) ? response.status : undefined;
+    const failureReason = reportedFailureReason(body);
+    const reasonText = failureReason === undefined ? "" : `, failureReason=${failureReason}`;
+    throw failure("JOURNEY_CANARY_HTTP", 1, {
+      cause: new Error(`status=${httpStatus}, bodyLength=${Buffer.byteLength(body)}${reasonText}`),
+    }, { httpStatus, failureReason });
+  }
+}
+
+function reportedFailureReason(body) {
+  try {
+    const value = JSON.parse(body);
+    return value?.artifactKind === FAILURE_BODY_ARTIFACT_KIND && FAILURE_REASONS.includes(value.failureReason)
+      ? value.failureReason
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readResponse(response) {
+  try {
+    const bytes = await readBoundedResponse(response);
+    if (bytes.length < 2 || bytes.length > MAX_RESPONSE_BYTES) {
+      throw failure("JOURNEY_CANARY_RESPONSE");
+    }
+    return bytes;
+  } catch (error) {
+    if (error instanceof JourneyCandidateCanaryAdapterError) throw error;
+    throw failure("JOURNEY_CANARY_RESPONSE");
+  }
+}
+
+async function readBoundedResponse(response) {
+  if (typeof response?.body?.getReader !== "function") {
+    throw failure("JOURNEY_CANARY_RESPONSE");
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!ArrayBuffer.isView(value)) throw failure("JOURNEY_CANARY_RESPONSE");
+      length += value.byteLength;
+      if (length > MAX_RESPONSE_BYTES) {
+        await cancelReader(reader);
+        throw failure("JOURNEY_CANARY_RESPONSE");
+      }
+      chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+    }
+    return Buffer.concat(chunks, length);
+  } finally {
+    reader.releaseLock?.();
+  }
+}
+
+async function cancelReader(reader) {
+  try {
+    await reader.cancel?.();
+  } catch {
+    // The bounded failure remains authoritative even if cancellation fails.
+  }
+}
+
+function parseJson(bytes) {
+  try {
+    const text = bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("invalid UTF-8");
+    return JSON.parse(text);
+  } catch {
+    throw failure("JOURNEY_CANARY_RESPONSE");
+  }
+}
+
+function validateResult(value, bytes, command, requestStartedAt, receivedAt) {
+  if (
+    !isExactObject(value, RESPONSE_FIELDS) ||
+    value.schemaVersion !== 1 ||
+    value.artifactKind !== "journey-v3-candidate-canary-result" ||
+    !validRawText(value.canaryRequestIdentity, 512) ||
+    !matches(value.requestId, ULID) ||
+    !matches(value.candidateManifestSha256, SHA256) ||
+    !positiveSafeInteger(value.candidateGeneration) ||
+    !matches(value.bundleId, BUNDLE_ID) ||
+    !positiveSafeInteger(value.bundleReleaseSequence) ||
+    !matches(value.queryId, ULID) ||
+    !validInstant(value.capturedAt) ||
+    value.passed !== true ||
+    ZERO_COUNTER_FIELDS.some((field) => value[field] !== 0) ||
+    !matches(value.evidenceSha256, SHA256) ||
+    !bytes.equals(Buffer.from(JSON.stringify(value)))
+  ) {
+    throw failure("JOURNEY_CANARY_RESPONSE");
+  }
+  if (
+    value.canaryRequestIdentity !== command.canaryRequestIdentity ||
+    value.requestId !== command.requestId ||
+    value.candidateManifestSha256 !== command.candidateManifestSha256 ||
+    value.candidateGeneration !== command.candidateGeneration ||
+    value.queryId !== command.requestId
+  ) {
+    throw failure("JOURNEY_CANARY_IDENTITY");
+  }
+  const capturedAt = Date.parse(value.capturedAt);
+  if (capturedAt < requestStartedAt.valueOf() || capturedAt > receivedAt.valueOf()) {
+    throw failure("JOURNEY_CANARY_TIMESTAMP");
+  }
+  if (canaryEvidenceSha256(value) !== value.evidenceSha256) {
+    throw failure("JOURNEY_CANARY_EVIDENCE");
+  }
+}
+
+function canaryEvidenceSha256(value) {
+  const canonical = RESPONSE_FIELDS.slice(0, -1).flatMap((field) => [field, value[field]])
+    .reduce((result, entry) => {
+      const text = String(entry);
+      return `${result}${Buffer.byteLength(text, "utf8")}:${text}`;
+    }, "");
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function validInstant(value) {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value);
+  const parsed = Date.parse(value);
+  if (!match || !Number.isFinite(parsed)) return false;
+  const instant = new Date(parsed);
+  const actual = [
+    instant.getUTCFullYear(), instant.getUTCMonth() + 1, instant.getUTCDate(),
+    instant.getUTCHours(), instant.getUTCMinutes(), instant.getUTCSeconds(),
+  ];
+  return actual.every((part, index) => part === Number(match[index + 1]));
+}
+
+function isExactObject(value, fields) {
+  if (value === null || Array.isArray(value) || typeof value !== "object") return false;
+  const actual = Object.keys(value);
+  return actual.length === fields.length &&
+    fields.every((field, index) => actual[index] === field);
+}
+
+function failure(code, exitCode = 1, options = undefined, details = undefined) {
+  return new JourneyCandidateCanaryAdapterError(code, exitCode, options, details);
+}
+
+function parseCliArguments(args) {
+  if (args.length !== CLI_OPTIONS.size * 2) throw failure("JOURNEY_CANARY_USAGE", 2);
+  const values = Object.create(null);
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index];
+    const value = args[index + 1];
+    const name = CLI_OPTIONS.get(flag);
+    if (!name || Object.hasOwn(values, name) || !isNonemptyString(value) || value.startsWith("--")) {
+      throw failure("JOURNEY_CANARY_USAGE", 2);
+    }
+    values[name] = value;
+  }
+  return {
+    ...values,
+    candidateGeneration: parseCanonicalInteger(values.candidateGeneration, 1),
+    maxTransfers: parseCanonicalInteger(values.maxTransfers, 0),
+    alternativeCount: parseCanonicalInteger(values.alternativeCount, 1),
+  };
+}
+
+function parseCanonicalInteger(value, minimum) {
+  const pattern = minimum === 0 ? /^(?:0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/;
+  if (!pattern.test(value)) throw failure("JOURNEY_CANARY_USAGE", 2);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || String(result) !== value) {
+    throw failure("JOURNEY_CANARY_USAGE", 2);
+  }
+  return result;
+}
+
+async function runCli(args, environment) {
+  const input = parseCliArguments(args);
+  const result = await runJourneyCandidateCanary({
+    ...input,
+    serviceToken: environment.EASYSUBWAY_JOURNEY_READINESS_SERVICE_TOKEN,
+  });
+  return formatJourneyCandidateCanary(result);
+}
+
+if (isEntryPoint(process.argv[1])) {
+  runCli(process.argv.slice(2), process.env).then(
+    (output) => process.stdout.write(output),
+    (error) => {
+    const canaryError = error instanceof JourneyCandidateCanaryAdapterError
+      ? error
+      : failure("JOURNEY_CANARY_INPUT_UNSTABLE");
+    process.stderr.write(`${canaryError.code} ${canaryError.message}\n`);
+    process.exitCode = canaryError.exitCode;
+    },
+  );
+}
+
+function isEntryPoint(entry) {
+  if (!entry) return false;
+  try {
+    const moduleUrl = pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+    return moduleUrl === pathToFileURL(realpathSync(resolve(entry))).href;
+  } catch {
+    return false;
+  }
+}

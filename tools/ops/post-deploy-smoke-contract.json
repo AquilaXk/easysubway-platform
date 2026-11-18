@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "gate": "post-deploy-smoke",
+  "issue": 1688,
+  "descriptionKo": "매 백엔드 배포 직후 핵심 6축이 배포 URL에서 실제 동작하는지 확인하는 경량 스모크 계약. 경로검색 공개 API는 production에서 폐쇄 상태를 검증한다.",
+  "axes": {
+    "liveness": {
+      "id": "liveness",
+      "titleKo": "헬스 (프로세스)",
+      "deploymentAttributed": true,
+      "path": "/actuator/health/liveness",
+      "expectStatusField": "status",
+      "expectStatusValue": "UP"
+    },
+    "readiness": {
+      "id": "readiness",
+      "titleKo": "헬스 (플랫폼)",
+      "deploymentAttributed": true,
+      "path": "/actuator/health/readiness",
+      "expectStatusField": "status",
+      "expectStatusValue": "UP"
+    },
+    "routeApiClosure": {
+      "id": "route-api-closure",
+      "titleKo": "경로검색 공개 API 폐쇄",
+      "deploymentAttributed": true,
+      "acceptedStatuses": [403, 404],
+      "endpoints": [
+        {
+          "method": "POST",
+          "path": "/api/v1/routes/search",
+          "request": {
+            "originStationId": "closure-probe",
+            "destinationStationId": "closure-probe",
+            "mobilityType": "SENIOR"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v2/routes/session",
+          "acceptedStatusesByIngress": {
+            "true": [403],
+            "false": [403, 404]
+          },
+          "expectedJsonFieldsByIngress": {
+            "true": {
+              "success": false,
+              "code": "ROUTE_SESSION_ATTESTATION_REJECTED"
+            }
+          },
+          "request": {
+            "integrityToken": "deployment-smoke-invalid-integrity-token",
+            "clientNonce": "AAAAAAAAAAAAAAAAAAAAAA"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v2/routes/search",
+          "acceptedStatusesByIngress": {
+            "true": [401],
+            "false": [403, 404]
+          },
+          "request": {
+            "originStationId": "closure-probe",
+            "destinationStationId": "closure-probe",
+            "departureTime": "2026-07-15T09:15:00+09:00",
+            "mobilityType": "SENIOR",
+            "constraintMode": "ALLOW_WITH_WARNINGS",
+            "useRealtime": false,
+            "maxTransfers": 3,
+            "alternativeCount": 1
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v2/routes/closure-probe/refresh",
+          "request": {}
+        }
+      ]
+    },
+    "trainSearch": {
+      "id": "train-search",
+      "titleKo": "전국 여객열차 검색",
+      "deploymentAttributed": true,
+      "stationPath": "/api/v1/trains/stations",
+      "stationQueries": ["서울", "대전"],
+      "searchPath": "/api/v1/trains/search",
+      "trainType": "KTX"
+    },
+    "adminLogin": {
+      "id": "admin-login",
+      "titleKo": "관리자 웹",
+      "deploymentAttributed": true,
+      "path": "/admin/login",
+      "mustIncludeAny": ["<form", "login", "로그인"]
+    },
+    "datapack": {
+      "id": "datapack",
+      "titleKo": "데이터팩 배포 URL (오프라인)",
+      "deploymentAttributed": false,
+      "baseUrl": "https://objectstorage.ap-seoul-1.oraclecloud.com/n/axvym6vk8g7i/b/easysubway-datapacks/o",
+      "catalogPath": "/catalog/current.json",
+      "requiredArrayField": "packs"
+    }
+  }
+}

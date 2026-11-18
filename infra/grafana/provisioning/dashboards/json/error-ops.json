@@ -1,0 +1,125 @@
+{
+  "uid": "easysubway-error-ops",
+  "title": "오류 조회",
+  "tags": ["easysubway", "error-ops", "wp4"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "correlationId",
+        "type": "textbox",
+        "label": "correlationId",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "5xx 비율",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "easysubway-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[$__rate_interval])) / sum(rate(http_server_requests_seconds_count[$__rate_interval]))",
+          "legendFormat": "5xx ratio",
+          "editorMode": "code",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "5xx burn rate (error budget 0.001)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "easysubway-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[5m])) / sum(rate(http_server_requests_seconds_count[5m]))) / 0.001",
+          "legendFormat": "burn 5m",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[1h])) / sum(rate(http_server_requests_seconds_count[1h]))) / 0.001",
+          "legendFormat": "burn 1h",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[6h])) / sum(rate(http_server_requests_seconds_count[6h]))) / 0.001",
+          "legendFormat": "burn 6h",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "(sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[3d])) / sum(rate(http_server_requests_seconds_count[3d]))) / 0.001",
+          "legendFormat": "burn 3d",
+          "editorMode": "code",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "Backend ERROR logs",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "loki", "uid": "easysubway-loki" },
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{container=~\".*backend.*\"} | json | level=\"ERROR\" |~ \"$correlationId\"",
+          "legendFormat": "",
+          "datasource": { "type": "loki", "uid": "easysubway-loki" },
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ]
+    }
+  ]
+}

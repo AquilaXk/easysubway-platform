@@ -1,0 +1,352 @@
+services:
+  postgres:
+    image: imresamu/postgis:18-3.6@sha256:b5766ee720aca09c61b9a868abefbf273348a4b90ad4cf146b4f8c9ac85d48e4
+    container_name: easysubway-postgres
+    mem_limit: 4g
+    environment:
+      POSTGRES_DB: ${EASYSUBWAY_POSTGRES_DB:-easysubway}
+      POSTGRES_USER: ${EASYSUBWAY_POSTGRES_USER:-easysubway}
+      POSTGRES_PASSWORD: ${EASYSUBWAY_POSTGRES_PASSWORD:-easysubway_local}
+    ports:
+      - "${EASYSUBWAY_POSTGRES_BIND:-127.0.0.1}:${EASYSUBWAY_POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  object-storage:
+    image: minio/minio:RELEASE.2025-06-13T11-33-47Z
+    container_name: easysubway-object-storage
+    mem_limit: 1g
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${EASYSUBWAY_OBJECT_STORAGE_ACCESS_KEY:-easysubway_local}
+      MINIO_ROOT_PASSWORD: ${EASYSUBWAY_OBJECT_STORAGE_SECRET_KEY:-easysubway_local_secret}
+    ports:
+      - "${EASYSUBWAY_OBJECT_STORAGE_BIND:-127.0.0.1}:${EASYSUBWAY_OBJECT_STORAGE_PORT:-9000}:9000"
+      - "${EASYSUBWAY_OBJECT_STORAGE_BIND:-127.0.0.1}:${EASYSUBWAY_OBJECT_STORAGE_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - object-storage-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # One-shot root fixup so named log volumes are writable by UID 10001
+  # (empty volumes are root-owned; image chown is masked by the mount).
+  backend-logs-init:
+    image: busybox:1.38.0
+    container_name: easysubway-backend-logs-init
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /logs/backend /logs/standby && chown -R 10001:10001 /logs/backend /logs/standby"]
+    volumes:
+      - backend-logs:/logs/backend
+      - backend-standby-logs:/logs/standby
+
+  backend:
+    image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
+    container_name: easysubway-backend
+    mem_limit: 4g
+    restart: unless-stopped
+    stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev
+    volumes:
+      - backend-logs:/opt/easysubway/logs
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ${EASYSUBWAY_BACKEND_ENV_FILE:?set backend env file}
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
+      EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false"
+    ports:
+      - "${EASYSUBWAY_BACKEND_BIND:-127.0.0.1}:${EASYSUBWAY_BACKEND_PORT:-8080}:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      backend-logs-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+
+  # Transient blue/green standby: boots the candidate image on an alternate
+  # port so deploy-backend.sh can validate it before promoting it onto the
+  # canonical "backend" container above (Hub Issue #2331). Never started by a
+  # bare `up`/`up -d` (deploy-backend.sh always names services explicitly);
+  # `restart: "no"` keeps it from lingering if the host reboots mid-deploy —
+  # every deploy run either promotes and removes it, or removes it on
+  # failure, well within the same run.
+  #
+  # This container shares the SAME Postgres datasource as canonical "backend"
+  # below (same EASYSUBWAY_DATASOURCE_URL), which is still serving live
+  # traffic while this boots. Flyway migrations and TimetableSeedLoader's
+  # snapshot swap commit here, against the live database, before canonical is
+  # touched — "old backend untouched" is a process/Nginx-level guarantee, not
+  # a data-layer one. See the migration contract comment at the top of
+  # tools/deploy/deploy-backend.sh (Hub Issue #2331 review).
+  backend-standby:
+    image: ${EASYSUBWAY_BACKEND_IMAGE:?set immutable backend image}
+    container_name: easysubway-backend-standby
+    mem_limit: 4g
+    restart: "no"
+    stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev
+    volumes:
+      - backend-standby-logs:/opt/easysubway/logs
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ${EASYSUBWAY_BACKEND_ENV_FILE:?set backend env file}
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      EASYSUBWAY_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${EASYSUBWAY_POSTGRES_DB:-easysubway}
+      EASYSUBWAY_REPORT_OBJECT_STORAGE_INTERNAL_ENDPOINT: http://object-storage:9000
+      EASYSUBWAY_PUSH_DELIVERY_ENABLED: "false"
+    ports:
+      - "${EASYSUBWAY_BACKEND_BIND:-127.0.0.1}:${EASYSUBWAY_BACKEND_STANDBY_PORT:-8082}:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      backend-logs-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+
+  public-edge-probe:
+    image: prom/blackbox-exporter:v0.29.1
+    container_name: easysubway-public-edge-probe
+    mem_limit: 128m
+    restart: unless-stopped
+    profiles:
+      - observability
+
+  # 호스트 nginx 443의 원 서버 인증서 만료를 읽는 전용 blackbox다(platform#270). 운영 readiness를 보는 public-edge-probe와
+  # 설정·수명을 분리해, 이 설정이 깨져도 readiness 감시가 같이 죽지 않는다.
+  origin-certificate-probe:
+    image: prom/blackbox-exporter:v0.29.1
+    container_name: easysubway-origin-certificate-probe
+    mem_limit: 128m
+    restart: unless-stopped
+    profiles:
+      - observability
+    command:
+      - "--config.file=/etc/blackbox_exporter/origin-certificate.yml"
+    volumes:
+      - ./blackbox/origin-certificate.yml:/etc/blackbox_exporter/origin-certificate.yml:ro
+    # origin_certificate_probe job이 호스트 nginx의 443을 docker 네트워크 게이트웨이로 직접 TLS 연결한다.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  docker-runtime-probe:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    container_name: easysubway-docker-runtime-probe
+    mem_limit: 512m
+    restart: unless-stopped
+    profiles:
+      - observability
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.2
+    container_name: easysubway-alertmanager
+    mem_limit: 256m
+    profiles:
+      - observability
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.external-url=${EASYSUBWAY_ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093}"
+      - "--web.route-prefix=/"
+    ports:
+      - "${EASYSUBWAY_ALERTMANAGER_BIND:-127.0.0.1}:${EASYSUBWAY_ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ${EASYSUBWAY_ALERTMANAGER_CONFIG_FILE:-./alertmanager/alertmanager.local.yml}:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/templates:/etc/alertmanager/templates:ro
+      - alertmanager-data:/alertmanager
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    container_name: easysubway-prometheus
+    mem_limit: 2g
+    profiles:
+      - observability
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # Journey 지연 SLO가 28일 창이라 기본 15일 보존으로는 준수율을 계산할 수 없다(Platform Issue #235). 운영 호스트 실측
+      # (2026-10-07) TSDB 약 0.8 GB/15일, 디스크 여유 14 GB. 30일 약 1.8 GB의 약 1.7배인 3GB를 상한으로 둔다.
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=3GB"
+      - "--web.enable-lifecycle"
+      - "--web.external-url=${EASYSUBWAY_PROMETHEUS_EXTERNAL_URL:-http://localhost:9090}"
+    ports:
+      - "${EASYSUBWAY_PROMETHEUS_BIND:-127.0.0.1}:${EASYSUBWAY_PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  loki-volume-init:
+    image: busybox:1.38.0
+    container_name: easysubway-loki-volume-init
+    profiles:
+      - observability
+    command: ["sh", "-c", "mkdir -p /loki/chunks /loki/rules /loki/rules-temp /loki/retention && chown -R 10001:10001 /loki"]
+    volumes:
+      - loki-data:/loki
+
+  loki:
+    image: grafana/loki:3.7.9
+    container_name: easysubway-loki
+    mem_limit: 1g
+    profiles:
+      - observability
+    user: "10001:10001"
+    command:
+      - "--config.file=/etc/loki/loki.yml"
+    ports:
+      - "127.0.0.1:${EASYSUBWAY_LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    depends_on:
+      loki-volume-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "loki", "-config.file=/etc/loki/loki.yml", "-verify-config"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    container_name: easysubway-grafana
+    mem_limit: 512m
+    profiles:
+      - observability
+    environment:
+      GF_SECURITY_ADMIN_USER: ${EASYSUBWAY_GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${EASYSUBWAY_GRAFANA_ADMIN_PASSWORD:-easysubway_local}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${EASYSUBWAY_GRAFANA_BIND:-127.0.0.1}:${EASYSUBWAY_GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  alloy:
+    image: grafana/alloy:v1.21.3
+    container_name: easysubway-alloy
+    mem_limit: 512m
+    restart: unless-stopped
+    profiles:
+      - observability
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --server.http.listen-addr=127.0.0.1:12345
+    environment:
+      EASYSUBWAY_OBSERVABILITY_ENV: ${EASYSUBWAY_OBSERVABILITY_ENV:-prod}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log/nginx:/var/log/nginx:ro
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      loki:
+        condition: service_healthy
+    # grafana/alloy 이미지에 wget/curl이 없어 bash /dev/tcp로 ready를 판정한다 (Hub Issue #2449).
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/localhost/12345; printf \"GET /-/ready HTTP/1.0\\r\\n\\r\\n\" >&3; grep -q \"Alloy is ready\" <&3'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  object-storage-data:
+  alertmanager-data:
+  prometheus-data:
+  loki-data:
+  grafana-data:
+  alloy-data:
+  backend-logs:
+  backend-standby-logs:
+
+# 운영 네트워크는 compose 밖에서 관리한다(platform#273). compose가 소유하면 정의가 바뀔 때 연결된 컨테이너를 떼어 내며 네트워크를 다시
+# 만들려 한다. 이름·서브넷의 정본은 contracts/release/platform-k3s-observability-contract.json이고, 없으면 배포 도구가 그 서브넷으로 만든다.
+networks:
+  default:
+    name: easysubway_default
+    external: true
